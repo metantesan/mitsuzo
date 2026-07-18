@@ -73,8 +73,20 @@ pub async fn create_paste(State(db): State<DataStore>, body: Bytes) -> Result<Ve
     };
 
     let mut rng = rand::rng();
-    let id: u32 = rng.random_range(100_000..1_000_000);
-    let id_str = id.to_string();
+    let mut id_str;
+    let mut attempts = 0;
+    loop {
+        let id: u32 = rng.random_range(100_000..1_000_000);
+        id_str = id.to_string();
+        if !db.id_available(&id_str) {
+            attempts += 1;
+            if attempts >= 100 {
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            continue;
+        }
+        break;
+    }
 
     db.insert(
         &id_str,
@@ -166,15 +178,15 @@ pub async fn get_paste(
 ) -> Result<Response<Body>, StatusCode> {
     validate_id(&id)?;
     if let Some(stored_hash) = db.get_password_hash(&id) {
-        let provided_hash_str = headers
+        let Some(provided_hash_str) = headers
             .get("X-Password-Hash")
-            .and_then(|value| value.to_str().ok());
-        if provided_hash_str.is_none() {
+            .and_then(|value| value.to_str().ok())
+        else {
             db.decrement_try_count(&id);
             db.increment_fail();
             return Err(StatusCode::UNAUTHORIZED);
-        }
-        let provided_hash = match general_purpose::STANDARD.decode(provided_hash_str.unwrap()) {
+        };
+        let provided_hash = match general_purpose::STANDARD.decode(provided_hash_str) {
             Ok(h) => h,
             Err(_) => {
                 db.decrement_try_count(&id);

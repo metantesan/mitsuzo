@@ -18,3 +18,4 @@ rpassword.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
+zeroize.workspace = true

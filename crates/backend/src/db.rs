@@ -264,6 +264,20 @@ impl DataStore {
         if path.exists() { Some(path) } else { None }
     }
 
+    pub fn id_available(&self, id: &str) -> bool {
+        match self.db.get(format!("meta:{}", id)) {
+            Ok(Some(value)) => {
+                let Ok((_, expiration_timestamp, _, _, _, _)) =
+                    decode::<(u32, u64, DataType, Option<String>, Option<String>, u32)>(&value)
+                else {
+                    return true;
+                };
+                expiration_timestamp > 0 && epoch_secs() > expiration_timestamp
+            }
+            _ => true,
+        }
+    }
+
     pub fn get_nonce(&self, id: &str) -> Option<Vec<u8>> {
         if self.is_expired(id) {
             return None;

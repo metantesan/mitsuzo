@@ -1,6 +1,7 @@
 use argon2::{Argon2, Params};
 use orion::hazardous::aead::chacha20poly1305;
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 const CHUNK_SIZE: usize = 65536;
 const HMAC_BLOCK: usize = 64;
@@ -32,8 +33,18 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     outer.finalize().into()
 }
 
+const ENCRYPTION_KEY_INFO: &[u8] = b"mitsuzo-encryption-key";
+const VALIDATION_KEY_INFO: &[u8] = b"mitsuzo-validation-key";
+
+fn hkdf_expand_sha256(prk: &[u8; 32], info: &[u8]) -> [u8; 32] {
+    let mut data = Vec::with_capacity(info.len() + 1);
+    data.extend_from_slice(info);
+    data.push(0x01);
+    hmac_sha256(prk, &data)
+}
+
 pub fn get_argon2_params() -> Result<Params, String> {
-    Params::new(19456, 2, 1, Some(64)).map_err(|e| format!("Failed to create Argon2 params: {}", e))
+    Params::new(19456, 2, 1, Some(32)).map_err(|e| format!("Failed to create Argon2 params: {}", e))
 }
 
 pub fn derive_keys(password: &str, salt: &[u8]) -> Result<([u8; 32], [u8; 32]), String> {
@@ -42,12 +53,16 @@ pub fn derive_keys(password: &str, salt: &[u8]) -> Result<([u8; 32], [u8; 32]), 
         argon2::Version::V0x13,
         get_argon2_params()?,
     );
-    let mut output = [0u8; 64];
+    let mut master_key = [0u8; 32];
     argon2
-        .hash_password_into(password.as_bytes(), salt, &mut output)
+        .hash_password_into(password.as_bytes(), salt, &mut master_key)
         .map_err(|e| format!("Failed to derive key: {}", e))?;
-    let encryption_key: [u8; 32] = output[..32].try_into().unwrap();
-    let validation_key: [u8; 32] = output[32..].try_into().unwrap();
+
+    let encryption_key = hkdf_expand_sha256(&master_key, ENCRYPTION_KEY_INFO);
+    let validation_key = hkdf_expand_sha256(&master_key, VALIDATION_KEY_INFO);
+
+    master_key.zeroize();
+
     Ok((encryption_key, validation_key))
 }
 

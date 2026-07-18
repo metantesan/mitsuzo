@@ -11,6 +11,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Deserialize)]
 struct Config {
@@ -97,8 +98,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             try_count,
             ttl,
         } => {
-            let password = rpassword::prompt_password("Enter password: ")?;
-            let password_confirm = rpassword::prompt_password("Confirm password: ")?;
+            let password = Zeroizing::new(rpassword::prompt_password("Enter password: ")?);
+            let password_confirm = Zeroizing::new(rpassword::prompt_password("Confirm password: ")?);
 
             if password != password_confirm {
                 eprintln!("Passwords do not match.");
@@ -121,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             };
 
-            let (salt, nonce, encryption_key, password_hash) = encrypt_setup(&password)?;
+            let (salt, nonce, mut encryption_key, password_hash) = encrypt_setup(&password)?;
 
             let total_chunks = if content.is_empty() {
                 1
@@ -148,6 +149,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             encrypt_into(&content, &encryption_key, &nonce, &mut body)?;
 
+            encryption_key.zeroize();
+
             let response = client
                 .post(format!("{}/api/paste", base_url))
                 .body(body)
@@ -163,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Get { id, output } => {
-            let password = rpassword::prompt_password("Enter password: ")?;
+            let password = Zeroizing::new(rpassword::prompt_password("Enter password: ")?);
 
             let salt_response = client
                 .get(format!("{}/api/paste/{}/salt", base_url, id))
@@ -178,10 +181,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let salt_body = salt_response.bytes().await?;
             let decoded_salt: GetSaltResponse = bitcode::decode(&salt_body)?;
 
-            let (_encryption_key, validation_key) = derive_keys(&password, &decoded_salt.salt)
+            let (_encryption_key, mut validation_key) = derive_keys(&password, &decoded_salt.salt)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let password_hash = compute_password_hash(&validation_key, &decoded_salt.salt);
+            let mut password_hash = compute_password_hash(&validation_key, &decoded_salt.salt);
             let encoded_hash = base64::engine::general_purpose::STANDARD.encode(password_hash);
+
+            password_hash.zeroize();
+            validation_key.zeroize();
 
             let response = client
                 .get(format!("{}/api/paste/{}", base_url, id))
@@ -207,19 +213,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let plaintext_size = get_plaintext_size(paste_total_chunks, encrypted.len())
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 let mut decrypted_content = Vec::with_capacity(plaintext_size);
-                let (_encryption_key, _) = derive_keys(&password, &decoded_salt.salt)?;
+                let (mut encryption_key, _) = derive_keys(&password, &decoded_salt.salt)?;
 
                 for i in 0..paste_total_chunks {
                     let (start, end) = get_chunk_bounds(paste_total_chunks, i, encrypted.len());
                     decrypt_chunk_into(
                         &encrypted[start..end],
-                        &_encryption_key,
+                        &encryption_key,
                         &header.nonce,
                         i,
                         &mut decrypted_content,
                     )
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 }
+                encryption_key.zeroize();
 
                 if let Some(output_path) = output {
                     if output_path == "-" {
@@ -232,9 +239,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match header.data_type {
                         DataType::File => {
                             if let Some(filename) = header.filename {
-                                let mut file = std::fs::File::create(&filename)?;
+                                let safe_name = PathBuf::from(&filename)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(String::from)
+                                    .unwrap_or_else(|| format!("paste_{}", id));
+                                let mut file = std::fs::File::create(&safe_name)?;
                                 file.write_all(&decrypted_content)?;
-                                eprintln!("Saved paste to file {}", filename);
+                                eprintln!("Saved paste to file {}", safe_name);
                             } else {
                                 io::stdout().write_all(&decrypted_content)?;
                             }

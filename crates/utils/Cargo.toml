@@ -11,3 +11,4 @@ argon2.workspace = true
 sha2.workspace = true
 orion.workspace = true
 getrandom.workspace = true
+zeroize.workspace = true

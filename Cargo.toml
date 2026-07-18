@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.4"
+version = "0.3.5"
 license = "BSD-3-Clause"
 authors = ["hikari <me@metantesan.com>"]
 edition = "2024"
@@ -67,3 +67,4 @@ rand = "0.10.1"
 axum = "0.8"
 tower-http = { version = "0.7", features = ["cors", "fs"] }
 sled = "0.34.7"
+zeroize = { version = "1", features = ["zeroize_derive"] }
