@@ -1,0 +1,75 @@
+name: CLI Build & Publish
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+env:
+  CRATE_NAME: cli
+  BIN_NAME: mitsuzo
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_postfix: ""
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary_postfix: ""
+            deps: gcc-aarch64-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+            binary_postfix: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_postfix: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_postfix: ".exe"
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            binary_postfix: ".exe"
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - if: matrix.deps
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.deps }}
+
+      - run: cargo build --release --package ${{ env.CRATE_NAME }} --target ${{ matrix.target }}
+
+      - run: cp target/${{ matrix.target }}/release/${{ env.CRATE_NAME }}${{ matrix.binary_postfix }} ${{ env.BIN_NAME }}${{ matrix.binary_postfix }}
+
+      - name: Compress binary
+        run: zip -9 ${{ env.BIN_NAME }}-${{ matrix.target }}.zip ${{ env.BIN_NAME }}${{ matrix.binary_postfix }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN_NAME }}-${{ matrix.target }}
+          path: ${{ env.BIN_NAME }}-${{ matrix.target }}.zip
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - run: find . -name "*.zip" -type f -exec shasum -a 256 {} + > checksums.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            **/*.zip
+            checksums.txt
+          tag_name: ${{ github.ref_name }}
