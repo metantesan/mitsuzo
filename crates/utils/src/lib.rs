@@ -22,13 +22,13 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     }
 
     let mut inner = Sha256::new();
-    inner.update(&ipad);
+    inner.update(ipad);
     inner.update(data);
     let inner_hash = inner.finalize();
 
     let mut outer = Sha256::new();
-    outer.update(&opad);
-    outer.update(&inner_hash);
+    outer.update(opad);
+    outer.update(inner_hash);
     outer.finalize().into()
 }
 
@@ -126,6 +126,7 @@ fn generate_nonce() -> Result<[u8; 12], String> {
 
 const FULL_CHUNK_CIPHER_LEN: usize = CHUNK_SIZE + 16;
 
+#[allow(clippy::type_complexity)]
 pub fn encrypt_setup(password: &str) -> Result<([u8; 16], [u8; 12], [u8; 32], [u8; 32]), String> {
     let salt = generate_salt()?;
     let (encryption_key, validation_key) = derive_keys(password, &salt)?;
@@ -143,7 +144,7 @@ pub fn encrypt_into(
     let total_chunks = if plaintext.is_empty() {
         1
     } else {
-        ((plaintext.len() + CHUNK_SIZE - 1) / CHUNK_SIZE) as u32
+        plaintext.len().div_ceil(CHUNK_SIZE) as u32
     };
 
     output.reserve(if total_chunks == 1 {
@@ -164,6 +165,7 @@ pub fn encrypt_into(
     Ok(total_chunks)
 }
 
+#[allow(clippy::type_complexity)]
 pub fn encrypt_content(
     plaintext: &[u8],
     password: &str,
@@ -175,7 +177,11 @@ pub fn encrypt_content(
 }
 
 /// Compute byte range for a chunk in the ciphertext
-pub fn get_chunk_bounds(total_chunks: u32, chunk_index: u32, ciphertext_len: usize) -> (usize, usize) {
+pub fn get_chunk_bounds(
+    total_chunks: u32,
+    chunk_index: u32,
+    ciphertext_len: usize,
+) -> (usize, usize) {
     let start = chunk_index as usize * FULL_CHUNK_CIPHER_LEN;
     let end = if chunk_index == total_chunks - 1 {
         ciphertext_len
@@ -191,7 +197,9 @@ pub fn get_plaintext_size(total_chunks: u32, ciphertext_len: usize) -> Result<us
         return Err("total_chunks cannot be 0".to_string());
     }
     if total_chunks == 1 {
-        return ciphertext_len.checked_sub(16).ok_or_else(|| "Invalid single chunk".to_string());
+        return ciphertext_len
+            .checked_sub(16)
+            .ok_or_else(|| "Invalid single chunk".to_string());
     }
     let full_chunks = (total_chunks - 1) as usize;
     let full_chunks_cipher_len = full_chunks * FULL_CHUNK_CIPHER_LEN;
@@ -234,7 +242,7 @@ pub fn decrypt_into(
 
     for i in 0..total_chunks {
         let start = i as usize * FULL_CHUNK_CIPHER_LEN;
-        let end = if i as u32 == total_chunks - 1 {
+        let end = if i == total_chunks - 1 {
             ciphertext.len()
         } else {
             start + FULL_CHUNK_CIPHER_LEN
@@ -257,6 +265,13 @@ pub fn decrypt_content(
         .try_into()
         .map_err(|_| "Nonce must be 12 bytes".to_string())?;
     let mut output = Vec::new();
-    decrypt_into(ciphertext, &base_nonce, password, salt, total_chunks, &mut output)?;
+    decrypt_into(
+        ciphertext,
+        &base_nonce,
+        password,
+        salt,
+        total_chunks,
+        &mut output,
+    )?;
     Ok(output)
 }

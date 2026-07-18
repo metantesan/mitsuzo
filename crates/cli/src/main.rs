@@ -4,8 +4,8 @@ use mitsuzo_types::{
     CreatePasteHeader, CreatePasteResponse, DataType, GetPasteHeader, GetSaltResponse,
 };
 use mitsuzo_utils::{
-    compute_password_hash, derive_keys, encrypt_setup, encrypt_into,
-    decrypt_chunk_into, get_chunk_bounds, get_plaintext_size,
+    compute_password_hash, decrypt_chunk_into, derive_keys, encrypt_into, encrypt_setup,
+    get_chunk_bounds, get_plaintext_size,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -71,10 +71,10 @@ fn get_config_paths() -> Vec<PathBuf> {
 
 fn load_config() -> Option<Config> {
     for path in get_config_paths() {
-        if let Ok(file) = std::fs::File::open(path) {
-            if let Ok(config) = serde_yaml::from_reader(file) {
-                return Some(config);
-            }
+        if let Ok(file) = std::fs::File::open(path)
+            && let Ok(config) = serde_yaml::from_reader(file)
+        {
+            return Some(config);
         }
     }
     None
@@ -126,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let total_chunks = if content.is_empty() {
                 1
             } else {
-                ((content.len() + 65535) / 65536) as u32
+                content.len().div_ceil(65536) as u32
             };
 
             let header = CreatePasteHeader {
@@ -181,7 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (_encryption_key, validation_key) = derive_keys(&password, &decoded_salt.salt)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             let password_hash = compute_password_hash(&validation_key, &decoded_salt.salt);
-            let encoded_hash = base64::engine::general_purpose::STANDARD.encode(&password_hash);
+            let encoded_hash = base64::engine::general_purpose::STANDARD.encode(password_hash);
 
             let response = client
                 .get(format!("{}/api/paste/{}", base_url, id))
@@ -191,7 +191,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if response.status().is_success() {
                 let mut response_body = response.bytes().await?;
-                let header_len = u32::from_le_bytes(response_body[..4].try_into().unwrap()) as usize;
+                let header_len =
+                    u32::from_le_bytes(response_body[..4].try_into().unwrap()) as usize;
                 let header_end = 4 + header_len;
                 let header: GetPasteHeader = bitcode::decode(&response_body[4..header_end])
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -210,8 +211,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 for i in 0..paste_total_chunks {
                     let (start, end) = get_chunk_bounds(paste_total_chunks, i, encrypted.len());
-                    decrypt_chunk_into(&encrypted[start..end], &_encryption_key, &header.nonce, i, &mut decrypted_content)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                    decrypt_chunk_into(
+                        &encrypted[start..end],
+                        &_encryption_key,
+                        &header.nonce,
+                        i,
+                        &mut decrypted_content,
+                    )
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 }
 
                 if let Some(output_path) = output {

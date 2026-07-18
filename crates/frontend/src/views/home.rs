@@ -49,19 +49,18 @@ pub fn home_view() -> Element {
 
     use_future(move || async move {
         let result = do_xhr_get(&format!("{}/api/paste/stats", BASE_URL), vec![], |_, _| {}).await;
-        if let Ok(response) = result {
-            if response.status >= 200 && response.status < 300 {
-                if let Some(body) = response.body {
-                    if let Ok(decoded) = bitcode::decode::<GetStatsResponse>(&body) {
-                        stats.set(Some(decoded));
-                    }
-                }
-            }
+        if let Ok(response) = result
+            && response.status >= 200
+            && response.status < 300
+            && let Some(body) = response.body
+            && let Ok(decoded) = bitcode::decode::<GetStatsResponse>(&body)
+        {
+            stats.set(Some(decoded));
         }
     });
 
     let create_paste = {
-        let mut auto_generated = auto_generated.clone();
+        let mut auto_generated = auto_generated;
         move |_| {
             spawn(async move {
                 let password = password_input.read().clone();
@@ -141,7 +140,7 @@ pub fn home_view() -> Element {
                 let total_chunks = if file_size_for_chunks == 0 {
                     1
                 } else {
-                    ((file_size_for_chunks as usize + CHUNK_SIZE - 1) / CHUNK_SIZE) as u32
+                    (file_size_for_chunks as usize).div_ceil(CHUNK_SIZE) as u32
                 };
 
                 let header = CreatePasteHeader {
@@ -394,16 +393,14 @@ pub fn home_view() -> Element {
                                     .and_then(|w| w.document())
                                     .and_then(|d| d.get_element_by_id("file-upload"))
                                     .and_then(|el| el.dyn_into::<web_sys::HtmlInputElement>().ok());
-                                if let Some(input) = input {
-                                    if let Some(files) = input.files() {
-                                        if let Some(file) = files.get(0) {
+                                if let Some(input) = input
+                                    && let Some(files) = input.files()
+                                        && let Some(file) = files.get(0) {
                                             progress.set(Some(ProgressState { status: "File loaded".to_string(), progress: 100.0 }));
                                             file_data.set(Some(file));
                                             file_name.set(Some(files.get(0).unwrap().name()));
                                             file_content_type.set(Some(files.get(0).unwrap().type_()));
                                         }
-                                    }
-                                }
                             }
                         }
                     }
