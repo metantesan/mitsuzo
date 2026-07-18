@@ -1,0 +1,11 @@
+target/
+database/
+public/doc/
+.env
+.env.*
+.vscode/
+.idea/
+*.swp
+*.swo
+*.orig
+*.bk

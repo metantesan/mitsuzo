@@ -1,0 +1,33 @@
+[package]
+name = "mitsuzo-frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+dioxus.workspace = true
+reqwasm.workspace = true
+serde.workspace = true
+bitcode.workspace = true
+log.workspace = true
+wasm-logger.workspace = true
+mitsuzo-types = { workspace = true }
+
+base64.workspace = true
+js-sys.workspace = true
+wasm-bindgen.workspace = true
+web-sys.workspace = true
+getrandom.workspace = true
+gloo-file.workspace = true
+gloo-timers.workspace = true
+futures.workspace = true
+mitsuzo-utils = { workspace = true }
+wasm-bindgen-futures.workspace = true
+dioxus-i18n.workspace = true
+unic-langid.workspace = true
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
