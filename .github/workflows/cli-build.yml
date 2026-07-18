@@ -9,6 +9,7 @@ env:
   BIN_NAME: mitsuzo
   CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
 jobs:
   build:
@@ -56,11 +57,15 @@ jobs:
             zip -9 ${{ env.BIN_NAME }}-${{ matrix.target }}.zip ${{ env.BIN_NAME }}${{ matrix.binary_postfix }}
           fi
 
+      - name: Verify artifact exists
+        run: ls -la ${{ env.BIN_NAME }}-${{ matrix.target }}.zip
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BIN_NAME }}-${{ matrix.target }}
           path: ${{ env.BIN_NAME }}-${{ matrix.target }}.zip
+          if-no-files-found: error
           retention-days: 1
 
   publish:
