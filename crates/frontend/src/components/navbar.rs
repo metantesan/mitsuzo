@@ -13,7 +13,7 @@ pub fn Navbar() -> Element {
 
     rsx! {
         nav {
-            class: "bg-gray-800 p-4 text-white flex justify-between items-center",
+            class: "bg-surface0 p-4 text-text flex justify-between items-center",
             div {
                 class: "text-2xl font-bold",
                 Link {
@@ -25,28 +25,28 @@ pub fn Navbar() -> Element {
                 class: "hidden md:flex space-x-4 items-center",
                 Link {
                     to: Route::Home {},
-                    class: "hover:text-blue-400",
+                    class: "hover:text-blue",
                     {t!("nav-home")}
                 }
                 Link {
                     to: Route::HowItWorks {},
-                    class: "hover:text-blue-400",
+                    class: "hover:text-blue",
                     {t!("nav-how-it-works")}
                 }
                 Link {
                     to: Route::Changelog {},
-                    class: "hover:text-blue-400",
+                    class: "hover:text-blue",
                     {t!("nav-changelog")}
                 }
                 a {
                     href: GITHUB_RELEASES,
-                    class: "hover:text-green-400",
+                    class: "hover:text-green",
                     {t!("nav-download")}
                 }
                 div {
-                    class: "flex border border-gray-600 rounded overflow-hidden",
+                    class: "flex border border-surface1 rounded overflow-hidden",
                     button {
-                        class: if current_lang == langid!("en-US") { "px-2 py-1 text-sm bg-blue-600" } else { "px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600" },
+                        class: if current_lang == langid!("en-US") { "px-2 py-1 text-sm bg-blue text-crust" } else { "px-2 py-1 text-sm bg-overlay0 hover:bg-overlay1 text-text" },
                         onclick: move |_| {
                             i18n.set_language(langid!("en-US"));
                             if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
@@ -56,7 +56,7 @@ pub fn Navbar() -> Element {
                         "EN"
                     }
                     button {
-                        class: if current_lang == langid!("fa-IR") { "px-2 py-1 text-sm bg-blue-600" } else { "px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600" },
+                        class: if current_lang == langid!("fa-IR") { "px-2 py-1 text-sm bg-blue text-crust" } else { "px-2 py-1 text-sm bg-overlay0 hover:bg-overlay1 text-text" },
                         onclick: move |_| {
                             i18n.set_language(langid!("fa-IR"));
                             if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
@@ -79,44 +79,44 @@ pub fn Navbar() -> Element {
             }
             if menu_open() {
                 div {
-                    class: "fixed inset-0 bg-gray-900/50 z-40",
+                    class: "fixed inset-0 bg-crust/50 z-40",
                     onclick: move |_| menu_open.set(false),
                 }
                 div {
-                    class: "fixed top-0 right-0 w-64 h-full bg-gray-800 z-50 p-6 flex flex-col space-y-4 shadow-lg",
+                    class: "fixed top-0 right-0 w-64 h-full bg-surface0 z-50 p-6 flex flex-col space-y-4 shadow-lg",
                     button {
-                        class: "self-end text-white text-2xl",
+                        class: "self-end text-text text-2xl",
                         onclick: move |_| menu_open.set(false),
                         "✕"
                     }
                     Link {
                         to: Route::Home {},
-                        class: "text-lg hover:text-blue-400",
+                        class: "text-lg hover:text-blue",
                         onclick: move |_| menu_open.set(false),
                         {t!("nav-home")}
                     }
                     Link {
                         to: Route::HowItWorks {},
-                        class: "text-lg hover:text-blue-400",
+                        class: "text-lg hover:text-blue",
                         onclick: move |_| menu_open.set(false),
                         {t!("nav-how-it-works")}
                     }
                     Link {
                         to: Route::Changelog {},
-                        class: "text-lg hover:text-blue-400",
+                        class: "text-lg hover:text-blue",
                         onclick: move |_| menu_open.set(false),
                         {t!("nav-changelog")}
                     }
                     a {
                         href: GITHUB_RELEASES,
-                        class: "text-lg hover:text-green-400",
+                        class: "text-lg hover:text-green",
                         onclick: move |_| menu_open.set(false),
                         {t!("nav-download")}
                     }
                     div {
-                        class: "flex border border-gray-600 rounded overflow-hidden mt-4",
+                        class: "flex border border-surface1 rounded overflow-hidden mt-4",
                         button {
-                            class: if current_lang == langid!("en-US") { "flex-1 px-2 py-1 text-sm bg-blue-600" } else { "flex-1 px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600" },
+                            class: if current_lang == langid!("en-US") { "flex-1 px-2 py-1 text-sm bg-blue text-crust" } else { "flex-1 px-2 py-1 text-sm bg-overlay0 hover:bg-overlay1 text-text" },
                             onclick: move |_| {
                                 i18n.set_language(langid!("en-US"));
                                 if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
@@ -126,7 +126,7 @@ pub fn Navbar() -> Element {
                             "EN"
                         }
                         button {
-                            class: if current_lang == langid!("fa-IR") { "flex-1 px-2 py-1 text-sm bg-blue-600" } else { "flex-1 px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600" },
+                            class: if current_lang == langid!("fa-IR") { "flex-1 px-2 py-1 text-sm bg-blue text-crust" } else { "flex-1 px-2 py-1 text-sm bg-overlay0 hover:bg-overlay1 text-text" },
                             onclick: move |_| {
                                 i18n.set_language(langid!("fa-IR"));
                                 if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {

@@ -10,17 +10,17 @@ pub const APP_VERSION: &str = match option_env!("APP_VERSION") {
 pub fn Footer() -> Element {
     rsx! {
         footer {
-            class: "bg-gray-800 p-4 text-white text-center mt-8",
+            class: "bg-surface0 p-4 text-text text-center mt-8",
             "{APP_VERSION} · {t!(\"footer-created\")} ",
             a {
                 href: "https://metantesan.com",
-                class: "text-blue-400 hover:underline",
+                class: "text-blue hover:underline",
                 {t!("footer-author")}
             }
             " · ",
             a {
                 href: "https://github.com/metantesan/mitsuzo",
-                class: "text-blue-400 hover:underline",
+                class: "text-blue hover:underline",
                 {t!("footer-github")}
             }
             "."
