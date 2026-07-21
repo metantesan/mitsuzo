@@ -99,7 +99,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ttl,
         } => {
             let password = Zeroizing::new(rpassword::prompt_password("Enter password: ")?);
-            let password_confirm = Zeroizing::new(rpassword::prompt_password("Confirm password: ")?);
+            let password_confirm =
+                Zeroizing::new(rpassword::prompt_password("Confirm password: ")?);
 
             if password != password_confirm {
                 eprintln!("Passwords do not match.");
