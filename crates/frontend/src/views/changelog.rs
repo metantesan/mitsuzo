@@ -14,6 +14,32 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.5.0",
+            date: "2026-07",
+            items_en: vec![
+                "Chunked upload with resume support — split ciphertext into 16MB chunks",
+                "Parallel upload (8 concurrent chunks) with retry and exponential backoff",
+                "Parallel download via HTTP Range requests with retry",
+                "Parallel encryption/decryption across all CPU cores",
+                "New /data endpoint for raw ciphertext download with Range support",
+                "Separate /chunks and /complete endpoints for resumable uploads",
+                "CLI progress bars with percentage, ETA, and human-readable sizes",
+                "Colored CLI output with spinners and status indicators",
+                "Backward-incompatible: old monolithic POST endpoint replaced",
+            ],
+            items_fa: vec![
+                "آپلود تکه‌تکه با قابلیت ادامه — تقسیم متن رمزگذاری‌شده به تکه‌های ۱۶MB",
+                "آپلود موازی (۸ تکه هم‌زمان) با تلاش مجدد و پشتیبان نمایی",
+                "دانلود موازی با درخواست‌های HTTP Range و تلاش مجدد",
+                "رمزگذاری/رمزگشایی موازی روی همه هسته‌های CPU",
+                "ان‌پوینت جدید /data برای دانلود خام ciphertext با پشتیبانی Range",
+                "ان‌پوینت‌های مجزا /chunks و /complete برای آپلود قابل ادامه",
+                "نوار پیشرفت در CLI با درصد، زمان تخمینی و اندازه‌های قابل خواندن",
+                "خروجی رنگی CLI با اسپینر و نشانگر وضعیت",
+                "شکستن سازگاری با نسخه‌های قبلی — ان‌پوینت قدیمی POST حذف شد",
+            ],
+        },
+        Change {
             version: "v0.4.0",
             date: "2026-07",
             items_en: vec![

@@ -6,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose};
 use dioxus::prelude::*;
 use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
-use mitsuzo_types::{DataType, GetPasteHeader, GetSaltResponse};
+use mitsuzo_types::{DataType, GetSaltResponse};
 use mitsuzo_utils::{
     compute_password_hash, decrypt_chunk_into, derive_keys, get_chunk_bounds, get_plaintext_size,
 };
@@ -319,7 +319,15 @@ async fn do_decrypt(
     )
     .await;
 
-    let (salt, received_try_count, total_chunks) = match salt_result {
+    let (
+        salt,
+        total_chunks,
+        header_nonce,
+        header_data_type,
+        header_filename,
+        header_content_type,
+        header_allow_download,
+    ) = match salt_result {
         Ok(response) => {
             if response.status >= 200 && response.status < 300 {
                 if let Some(body) = response.body {
@@ -327,7 +335,15 @@ async fn do_decrypt(
                         Ok(decoded) => {
                             try_count.set(Some(decoded.try_count));
                             ttl.set(Some(decoded.ttl));
-                            (decoded.salt, decoded.try_count, decoded.total_chunks)
+                            (
+                                decoded.salt,
+                                decoded.total_chunks,
+                                decoded.nonce,
+                                decoded.data_type,
+                                decoded.filename,
+                                decoded.content_type,
+                                decoded.allow_download,
+                            )
                         }
                         Err(e) => {
                             popup_ctx
@@ -386,7 +402,7 @@ async fn do_decrypt(
     }));
 
     let content_result = do_xhr_get(
-        &format!("{}/api/paste/{}", BASE_URL, current_id),
+        &format!("{}/api/paste/{}/data", BASE_URL, current_id),
         vec![("X-Password-Hash".to_string(), encoded_hash)],
         |loaded, total| {
             if total > 0 {
@@ -410,43 +426,8 @@ async fn do_decrypt(
     match content_result {
         Ok(response) => {
             if response.status >= 200 && response.status < 300 {
-                if let Some(mut body) = response.body {
-                    if body.len() < 4 {
-                        popup_ctx
-                            .write()
-                            .show_error("Response too short".to_string());
-                        progress.set(None);
-                        return;
-                    }
-                    let header_len = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
-                    let header_end = 4 + header_len;
-                    if body.len() < header_end {
-                        popup_ctx
-                            .write()
-                            .show_error("Response too short".to_string());
-                        progress.set(None);
-                        return;
-                    }
-
-                    let header: GetPasteHeader = match bitcode::decode(&body[4..header_end]) {
-                        Ok(h) => h,
-                        Err(e) => {
-                            popup_ctx
-                                .write()
-                                .show_error(t!("error-decode-paste-failed", error: e.to_string()));
-                            progress.set(None);
-                            return;
-                        }
-                    };
-
-                    let content = body.split_off(header_end);
-                    drop(body);
-
-                    let paste_total_chunks = if header.total_chunks > 0 {
-                        header.total_chunks
-                    } else {
-                        total_chunks
-                    };
+                if let Some(content) = response.body {
+                    let paste_total_chunks = total_chunks;
 
                     let (encryption_key, _) = match derive_keys(&current_password, &salt) {
                         Ok(k) => k,
@@ -472,20 +453,18 @@ async fn do_decrypt(
                     };
 
                     let mut plaintext = Vec::with_capacity(plaintext_size);
-                    let base_nonce = header.nonce;
-
                     let result: Result<(), String> = async {
                         for i in 0..paste_total_chunks {
                             if i % 8 == 0 {
-                                let pct = 95.0 - (i as f32 / paste_total_chunks as f32) * 90.0;
+                                let pct = 90.0 + (i as f32 / paste_total_chunks as f32) * 10.0;
                                 progress.set(Some(ProgressState {
-                                    status: t!("progress-decrypting-percent", percent: format!("{:.0}", 100.0 - pct + 5.0)),
+                                    status: t!("progress-decrypting-percent", percent: format!("{:.0}", (i as f32 / paste_total_chunks as f32) * 100.0)),
                                     progress: pct,
                                 }));
                                 TimeoutFuture::new(0).await;
                             }
                             let (start, end) = get_chunk_bounds(paste_total_chunks, i, content.len());
-                            decrypt_chunk_into(&content[start..end], &encryption_key, &base_nonce, i, &mut plaintext)?;
+                            decrypt_chunk_into(&content[start..end], &encryption_key, &header_nonce, i, &mut plaintext)?;
                         }
                         Ok(())
                     }.await;
@@ -494,10 +473,10 @@ async fn do_decrypt(
                         Ok(()) => {
                             paste_content.set(Some((
                                 plaintext,
-                                header.data_type,
-                                header.filename,
-                                header.content_type,
-                                header.allow_download,
+                                header_data_type,
+                                header_filename,
+                                header_content_type,
+                                header_allow_download,
                             )));
                             progress.set(None);
                         }
@@ -517,8 +496,11 @@ async fn do_decrypt(
                     .write()
                     .show_error(t!("error-get-paste-failed", status: response.status.to_string()));
                 progress.set(None);
-                if received_try_count > 0 {
-                    try_count.set(Some(received_try_count - 1));
+                let current = *try_count.read();
+                if let Some(count) = current {
+                    if count > 0 {
+                        try_count.set(Some(count - 1));
+                    }
                 }
             }
         }

@@ -1,16 +1,22 @@
 use base64::Engine;
 use clap::{Parser, Subcommand};
+use colored::*;
 use mitsuzo_types::{
-    CreatePasteHeader, CreatePasteResponse, DataType, GetPasteHeader, GetSaltResponse,
+    CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, DataType, GetSaltResponse, InitPasteResponse,
+    UPLOAD_CHUNK_SIZE,
 };
 use mitsuzo_utils::{
-    compute_password_hash, decrypt_chunk_into, derive_keys, encrypt_into, encrypt_setup,
+    compute_password_hash, decrypt_chunk_into, derive_keys, encrypt_chunk_into, encrypt_setup,
     get_chunk_bounds, get_plaintext_size,
 };
 use reqwest::Client;
 use serde::Deserialize;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+use tokio::sync::Semaphore;
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Deserialize)]
@@ -19,6 +25,7 @@ struct Config {
 }
 
 const DEFAULT_BASE_URL: &str = "http://localhost:3030";
+const PARALLELISM: usize = 8;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -26,33 +33,22 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// The base URL of the mitsuzo server.
     #[arg(short, long)]
     base_url: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Create a new paste
     Create {
-        /// The content of the paste. If not provided or set to '-', it will be read from stdin.
         #[arg(short, long)]
         file: Option<String>,
-
-        /// The number of times the paste can be tried before it's deleted.
         #[arg(short = 'c', long, default_value = "5")]
         try_count: u32,
-
-        /// The time to live of the paste in seconds.
         #[arg(short, long, default_value = "43200")]
         ttl: u32,
     },
-    /// Get a paste
     Get {
-        /// The ID of the paste to retrieve.
         id: String,
-
-        /// Output file path. If not provided, the original filename is used. Use '-' for stdout.
         #[arg(short, long)]
         output: Option<String>,
     },
@@ -81,10 +77,44 @@ fn load_config() -> Option<Config> {
     None
 }
 
+fn full_chunk_cipher_len() -> usize {
+    CHUNK_SIZE + 16
+}
+
+fn encrypted_size(total_size: u64, total_chunks: u32) -> usize {
+    if total_chunks <= 1 {
+        (total_size as usize) + 16
+    } else if (total_size as usize) < (total_chunks as usize - 1) * CHUNK_SIZE {
+        0
+    } else {
+        let full = (total_chunks as usize - 1) * full_chunk_cipher_len();
+        let last = (total_size as usize) - (total_chunks as usize - 1) * CHUNK_SIZE + 16;
+        full + last
+    }
+}
+
+fn bar_template(main: &str, remainder: &str) -> indicatif::ProgressStyle {
+    indicatif::ProgressStyle::with_template(&format!(
+        "{{spinner:.cyan}} [{{bar:32.{main}}}] {{percent}}% {{msg}} {remainder}"
+    ))
+    .unwrap()
+    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+    .progress_chars("━╾─")
+}
+
+fn make_pb(len: u64, main: &str, remainder: &str) -> indicatif::ProgressBar {
+    let pb = indicatif::ProgressBar::new(len);
+    pb.set_style(bar_template(main, remainder));
+    pb.enable_steady_tick(Duration::from_millis(80));
+    pb
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()?;
 
     let base_url = cli
         .base_url
@@ -98,12 +128,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             try_count,
             ttl,
         } => {
-            let password = Zeroizing::new(rpassword::prompt_password("Enter password: ")?);
-            let password_confirm =
-                Zeroizing::new(rpassword::prompt_password("Confirm password: ")?);
+            let password = Zeroizing::new(rpassword::prompt_password(&format!(
+                "{} ",
+                "Enter password:".cyan().bold()
+            ))?);
+            let password_confirm = Zeroizing::new(rpassword::prompt_password(&format!(
+                "{} ",
+                "Confirm password:".cyan().bold()
+            ))?);
 
             if password != password_confirm {
-                eprintln!("Passwords do not match.");
+                eprintln!("{} Passwords do not match.", "Error:".red().bold());
                 return Ok(());
             }
 
@@ -113,8 +148,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (buffer, DataType::Text, None)
             } else {
                 let file_path = file.as_ref().unwrap();
+                let data = std::fs::read(file_path)?;
                 (
-                    std::fs::read(file_path)?,
+                    data,
                     DataType::File,
                     PathBuf::from(file_path)
                         .file_name()
@@ -123,13 +159,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             };
 
-            let (salt, nonce, mut encryption_key, password_hash) = encrypt_setup(&password)?;
-
-            let total_chunks = if content.is_empty() {
+            let total_enc_chunks = if content.is_empty() {
                 1
             } else {
-                content.len().div_ceil(65536) as u32
+                content.len().div_ceil(CHUNK_SIZE) as u32
             };
+
+            eprintln!(
+                "{} {:.2} {} · {} encryption chunks",
+                "Input:".bright_black(),
+                indicatif::HumanBytes(content.len() as u64),
+                if data_type == DataType::Text {
+                    "(text)"
+                } else {
+                    "(file)"
+                },
+                total_enc_chunks
+            );
+
+            let (salt, nonce, mut encryption_key, password_hash) = encrypt_setup(&password)?;
 
             let header = CreatePasteHeader {
                 nonce,
@@ -140,130 +188,392 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 data_type,
                 filename,
                 content_type: None,
-                total_chunks,
+                total_chunks: total_enc_chunks,
                 allow_download: true,
             };
 
             let header_bytes = bitcode::encode(&header);
-            let mut body = Vec::with_capacity(4 + header_bytes.len());
-            body.extend_from_slice(&(header_bytes.len() as u32).to_le_bytes());
-            body.extend_from_slice(&header_bytes);
 
-            encrypt_into(&content, &encryption_key, &nonce, &mut body)?;
+            let pb = make_pb(total_enc_chunks as u64, "blue", "");
+            let done = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let results = Arc::new(std::sync::Mutex::new(Vec::new()));
 
+            std::thread::scope(|s| {
+                let n = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4);
+                let cpt = (total_enc_chunks as usize + n - 1) / n;
+
+                for t in 0..n {
+                    let sc = t * cpt;
+                    let ec = std::cmp::min(sc + cpt, total_enc_chunks as usize);
+                    if sc >= ec {
+                        continue;
+                    }
+                    let k = encryption_key.clone();
+                    let nce = nonce;
+                    let data = &content;
+                    let done = &done;
+                    let pb = &pb;
+                    let results = &results;
+
+                    s.spawn(move || {
+                        let mut local = Vec::new();
+                        for i in sc..ec {
+                            let start = i * CHUNK_SIZE;
+                            let end = std::cmp::min(start + CHUNK_SIZE, data.len());
+                            let _ = encrypt_chunk_into(
+                                &data[start..end],
+                                &k,
+                                &nce,
+                                i as u32,
+                                &mut local,
+                            );
+                            let prev = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            pb.set_position(prev as u64 + 1);
+                            pb.set_message(indicatif::HumanBytes(local.len() as u64).to_string());
+                        }
+                        results.lock().unwrap().push((t, local));
+                    });
+                }
+            });
+
+            let mut results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+            results.sort_by_key(|(t, _)| *t);
+            let ciphertext: Vec<u8> = results.into_iter().flat_map(|(_, buf)| buf).collect();
             encryption_key.zeroize();
+            pb.finish_and_clear();
 
-            let response = client
+            let init_response = client
                 .post(format!("{}/api/paste", base_url))
-                .body(body)
+                .body(header_bytes)
                 .send()
                 .await?;
 
-            if response.status().is_success() {
-                let response_body = response.bytes().await?;
-                let decoded_response: CreatePasteResponse = bitcode::decode(&response_body)?;
-                println!("Paste created with ID: {}", decoded_response.id);
+            if !init_response.status().is_success() {
+                eprintln!(
+                    "{} Failed to initialize paste: {}",
+                    "Error:".red().bold(),
+                    init_response.status()
+                );
+                return Ok(());
+            }
+
+            let init_body = init_response.bytes().await?;
+            let decoded: InitPasteResponse = bitcode::decode(&init_body)?;
+            let paste_id = decoded.id;
+
+            let chunk_info = client
+                .get(format!("{}/api/paste/{}/chunks", base_url, paste_id))
+                .send()
+                .await?;
+
+            let start_chunk = if chunk_info.status().is_success() {
+                if let Ok(body) = chunk_info.bytes().await {
+                    bitcode::decode::<ChunkInfoResponse>(&body)
+                        .map(|c| c.received)
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
             } else {
-                eprintln!("Failed to create paste: {}", response.status());
+                0
+            };
+
+            let total_up_chunks = (ciphertext.len() + UPLOAD_CHUNK_SIZE - 1) / UPLOAD_CHUNK_SIZE;
+
+            let pb = make_pb(total_up_chunks as u64, "cyan/blue", "({pos}/{len} chunks)");
+            pb.set_position(start_chunk as u64);
+
+            let sem = Arc::new(Semaphore::new(PARALLELISM));
+            let client = Arc::new(client);
+            let pb = Arc::new(pb);
+            let url = format!("{}/api/paste/{}/chunk", base_url, paste_id);
+            let ct = Arc::new(ciphertext);
+
+            let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut handles = Vec::new();
+            for i in start_chunk..total_up_chunks as u32 {
+                let permit = sem.clone().acquire_owned().await.unwrap();
+                let client = client.clone();
+                let pb = pb.clone();
+                let url = url.clone();
+                let ct = ct.clone();
+                let failed = failed.clone();
+
+                handles.push(tokio::spawn(async move {
+                    let cs = i as usize * UPLOAD_CHUNK_SIZE;
+                    let ce = std::cmp::min(cs + UPLOAD_CHUNK_SIZE, ct.len());
+                    let data = ct[cs..ce].to_vec();
+                    for retry in 0..3 {
+                        let resp = client
+                            .put(format!("{}/{}", url, i))
+                            .body(data.clone())
+                            .send()
+                            .await;
+                        match resp {
+                            Ok(r) if r.status().is_success() => {
+                                pb.inc(1);
+                                pb.set_message(indicatif::HumanBytes((ce - cs) as u64).to_string());
+                                break;
+                            }
+                            _ if retry < 2 => {
+                                tokio::time::sleep(Duration::from_secs(1 << retry)).await;
+                            }
+                            _ => {
+                                failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                                pb.println(format!(
+                                    "{} Chunk {} failed after 3 retries",
+                                    "Error:".red().bold(),
+                                    i
+                                ));
+                            }
+                        }
+                    }
+                    drop(permit);
+                }));
+            }
+
+            for h in handles {
+                let _ = h.await;
+            }
+            pb.finish_and_clear();
+
+            if failed.load(std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "{} Upload incomplete — some chunks failed.",
+                    "Error:".red().bold()
+                );
+                return Ok(());
+            }
+
+            let complete = client
+                .post(format!("{}/api/paste/{}/complete", base_url, paste_id))
+                .body(Vec::new())
+                .send()
+                .await?;
+
+            if complete.status().is_success() {
+                println!(
+                    "{} Paste created with ID: {}",
+                    "✓".green().bold(),
+                    paste_id.yellow().bold()
+                );
+            } else {
+                eprintln!("{} Failed to complete paste", "Error:".red().bold());
             }
         }
         Commands::Get { id, output } => {
-            let password = Zeroizing::new(rpassword::prompt_password("Enter password: ")?);
+            let password = Zeroizing::new(rpassword::prompt_password(&format!(
+                "{} ",
+                "Enter password:".cyan().bold()
+            ))?);
 
-            let salt_response = client
+            let salt_resp = client
                 .get(format!("{}/api/paste/{}/salt", base_url, id))
                 .send()
                 .await?;
 
-            if !salt_response.status().is_success() {
-                eprintln!("Failed to get salt: {}", salt_response.status());
+            if !salt_resp.status().is_success() {
+                eprintln!(
+                    "{} Failed to get paste metadata: {}",
+                    "Error:".red().bold(),
+                    salt_resp.status()
+                );
                 return Ok(());
             }
 
-            let salt_body = salt_response.bytes().await?;
-            let decoded_salt: GetSaltResponse = bitcode::decode(&salt_body)?;
+            let salt_body = salt_resp.bytes().await?;
+            let meta: GetSaltResponse = bitcode::decode(&salt_body)?;
 
-            let (_encryption_key, mut validation_key) = derive_keys(&password, &decoded_salt.salt)
+            let enc_bytes = encrypted_size(meta.total_size, meta.total_chunks);
+
+            eprintln!(
+                "{} {:.2} plain · {} chunks · {:.2} encrypted",
+                "Size:".bright_black(),
+                indicatif::HumanBytes(meta.total_size),
+                meta.total_chunks,
+                indicatif::HumanBytes(enc_bytes as u64),
+            );
+
+            let (_encryption_key, mut vk) = derive_keys(&password, &meta.salt)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let mut password_hash = compute_password_hash(&validation_key, &decoded_salt.salt);
-            let encoded_hash = base64::engine::general_purpose::STANDARD.encode(password_hash);
+            let mut ph = compute_password_hash(&vk, &meta.salt);
+            let auth = base64::engine::general_purpose::STANDARD.encode(ph);
+            ph.zeroize();
+            vk.zeroize();
 
-            password_hash.zeroize();
-            validation_key.zeroize();
+            let pb = make_pb(enc_bytes as u64, "green/yellow", "");
+            let num_parts = PARALLELISM.min(16).max(1);
+            let part_size = (enc_bytes as u64 + num_parts as u64 - 1) / num_parts as u64;
 
-            let response = client
-                .get(format!("{}/api/paste/{}", base_url, id))
-                .header("X-Password-Hash", encoded_hash)
-                .send()
-                .await?;
+            if enc_bytes == 0 {
+                eprintln!(
+                    "{} Paste appears incomplete (no data).",
+                    "Error:".red().bold()
+                );
+                return Ok(());
+            }
 
-            if response.status().is_success() {
-                let mut response_body = response.bytes().await?;
-                let header_len =
-                    u32::from_le_bytes(response_body[..4].try_into().unwrap()) as usize;
-                let header_end = 4 + header_len;
-                let header: GetPasteHeader = bitcode::decode(&response_body[4..header_end])
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let encrypted = response_body.split_off(header_end);
+            let buf = Arc::new(std::sync::Mutex::new(vec![0u8; enc_bytes]));
+            let dl_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let pb = Arc::new(pb);
+            let client = Arc::new(client);
+            let url = format!("{}/api/paste/{}/data", base_url, id);
 
-                let paste_total_chunks = if header.total_chunks > 0 {
-                    header.total_chunks
-                } else {
-                    decoded_salt.total_chunks
-                };
-
-                let plaintext_size = get_plaintext_size(paste_total_chunks, encrypted.len())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let mut decrypted_content = Vec::with_capacity(plaintext_size);
-                let (mut encryption_key, _) = derive_keys(&password, &decoded_salt.salt)?;
-
-                for i in 0..paste_total_chunks {
-                    let (start, end) = get_chunk_bounds(paste_total_chunks, i, encrypted.len());
-                    decrypt_chunk_into(
-                        &encrypted[start..end],
-                        &encryption_key,
-                        &header.nonce,
-                        i,
-                        &mut decrypted_content,
-                    )
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let mut dl = Vec::new();
+            for p in 0..num_parts {
+                let s = p as u64 * part_size;
+                let e = (s + part_size - 1).min(enc_bytes as u64 - 1);
+                if s > e {
+                    continue;
                 }
-                encryption_key.zeroize();
+                let client = client.clone();
+                let url = url.clone();
+                let auth = auth.clone();
+                let buf = buf.clone();
+                let pb = pb.clone();
+                let dl_failed = dl_failed.clone();
 
-                if let Some(output_path) = output {
-                    if output_path == "-" {
-                        io::stdout().write_all(&decrypted_content)?;
-                    } else {
-                        let mut file = std::fs::File::create(output_path)?;
-                        file.write_all(&decrypted_content)?;
+                dl.push(tokio::spawn(async move {
+                    for retry in 0..3 {
+                        let range = format!("bytes={}-{}", s, e);
+                        match client
+                            .get(&url)
+                            .header("X-Password-Hash", &auth)
+                            .header("Range", &range)
+                            .send()
+                            .await
+                        {
+                            Ok(resp) => {
+                                if let Ok(data) = resp.bytes().await {
+                                    let mut b = buf.lock().unwrap();
+                                    b[s as usize..][..data.len()].copy_from_slice(&data);
+                                    pb.inc(data.len() as u64);
+                                    pb.set_message(
+                                        indicatif::HumanBytes(pb.position()).to_string(),
+                                    );
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        if retry < 2 {
+                            tokio::time::sleep(Duration::from_secs(1 << retry)).await;
+                        } else {
+                            dl_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
-                } else {
-                    match header.data_type {
-                        DataType::File => {
-                            if let Some(filename) = header.filename {
-                                let safe_name = PathBuf::from(&filename)
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .map(String::from)
-                                    .unwrap_or_else(|| format!("paste_{}", id));
-                                let mut file = std::fs::File::create(&safe_name)?;
-                                file.write_all(&decrypted_content)?;
-                                eprintln!("Saved paste to file {}", safe_name);
-                            } else {
-                                io::stdout().write_all(&decrypted_content)?;
+                }));
+            }
+            for h in dl {
+                let _ = h.await;
+            }
+            pb.finish_and_clear();
+
+            if dl_failed.load(std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "{} Download incomplete — some ranges failed.",
+                    "Error:".red().bold()
+                );
+                return Ok(());
+            }
+
+            let encrypted = Arc::try_unwrap(buf).unwrap().into_inner().unwrap();
+
+            let (mut ek, _) = derive_keys(&password, &meta.salt)?;
+
+            let done = Arc::new(AtomicU32::new(0));
+            let total = meta.total_chunks;
+            let pb = make_pb(total as u64, "magenta/yellow", "");
+
+            let plain_size = get_plaintext_size(total, encrypted.len())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let out = Arc::new(std::sync::Mutex::new(Vec::with_capacity(plain_size)));
+
+            std::thread::scope(|s| {
+                let n = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4);
+                let cpt = (total as usize + n - 1) / n;
+
+                for t in 0..n {
+                    let sc = t * cpt;
+                    let ec = std::cmp::min(sc + cpt, total as usize);
+                    if sc >= ec {
+                        continue;
+                    }
+                    let k = ek.clone();
+                    let nonce = meta.nonce;
+                    let enc = &encrypted;
+                    let out = &out;
+                    let done = &done;
+                    let pb = &pb;
+
+                    s.spawn(move || {
+                        let mut local = Vec::new();
+                        for i in sc..ec {
+                            let (a, b) = get_chunk_bounds(total, i as u32, enc.len());
+                            let _ =
+                                decrypt_chunk_into(&enc[a..b], &k, &nonce, i as u32, &mut local);
+                            let prev = done.fetch_add(1, Ordering::Relaxed) as u64;
+                            if prev % 4 == 0 || prev + 1 == total as u64 {
+                                pb.set_position(prev + 1);
+                                pb.set_message(
+                                    indicatif::HumanBytes(local.len() as u64).to_string(),
+                                );
                             }
                         }
-                        DataType::Text => {
-                            io::stdout().write_all(&decrypted_content)?;
-                        }
-                    }
+                        let mut o = out.lock().unwrap();
+                        o.extend_from_slice(&local);
+                    });
+                }
+            });
+
+            ek.zeroize();
+            pb.finish_and_clear();
+
+            let decrypted = Arc::try_unwrap(out).unwrap().into_inner().unwrap();
+
+            if let Some(output_path) = output {
+                if output_path == "-" {
+                    io::stdout().write_all(&decrypted)?;
+                } else {
+                    std::fs::write(output_path, &decrypted)?;
+                    println!(
+                        "{} Saved to {} ({:.2})",
+                        "✓".green().bold(),
+                        output_path.yellow(),
+                        indicatif::HumanBytes(decrypted.len() as u64)
+                    );
                 }
             } else {
-                eprintln!("Failed to get paste: {}", response.status());
+                match meta.data_type {
+                    DataType::File => {
+                        if let Some(fname) = meta.filename {
+                            let safe = PathBuf::from(&fname)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(String::from)
+                                .unwrap_or_else(|| format!("paste_{}", id));
+                            std::fs::write(&safe, &decrypted)?;
+                            println!(
+                                "{} Saved to {} ({:.2})",
+                                "✓".green().bold(),
+                                safe.yellow(),
+                                indicatif::HumanBytes(decrypted.len() as u64)
+                            );
+                        } else {
+                            io::stdout().write_all(&decrypted)?;
+                        }
+                    }
+                    DataType::Text => {
+                        io::stdout().write_all(&decrypted)?;
+                    }
+                }
             }
         }
     }
 
-    println!();
     Ok(())
 }
