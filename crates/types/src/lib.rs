@@ -1,4 +1,3 @@
-use bitcode;
 use serde::{Deserialize, Serialize};
 
 pub const CHUNK_SIZE: usize = 65536;

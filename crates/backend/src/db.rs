@@ -14,6 +14,7 @@ pub struct DataStore {
 }
 
 impl DataStore {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let db = sled::open(Path::new("database/db")).unwrap();
         let stats = sled::open(Path::new("database/stats")).unwrap();
@@ -75,6 +76,7 @@ fn epoch_secs() -> u64 {
 }
 
 impl DataStore {
+    #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &self,
         id: &str,
@@ -144,6 +146,7 @@ impl DataStore {
             .map(|v| v.to_vec())
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn get_meta(
         &self,
         id: &str,
@@ -200,17 +203,18 @@ impl DataStore {
         let mut deleted_count = 0;
 
         for item in self.db.scan_prefix(b"meta:") {
-            if let Ok((key, value)) = item {
-                if let Ok((_, expiration_timestamp, _, _, _, _)) =
-                    decode::<(u32, u64, DataType, Option<String>, Option<String>, u32)>(&value)
-                {
-                    if expiration_timestamp > 0 && current_time > expiration_timestamp {
-                        if let Ok(id_str) = std::str::from_utf8(&key[5..]) {
-                            self.delete_paste(id_str);
-                            deleted_count += 1;
-                        }
-                    }
-                }
+            let Ok((key, value)) = item else { continue };
+            let Ok((_, expiration_timestamp, _, _, _, _)) =
+                decode::<(u32, u64, DataType, Option<String>, Option<String>, u32)>(&value)
+            else {
+                continue;
+            };
+            if expiration_timestamp > 0
+                && current_time > expiration_timestamp
+                && let Ok(id_str) = std::str::from_utf8(&key[5..])
+            {
+                self.delete_paste(id_str);
+                deleted_count += 1;
             }
         }
 
@@ -220,18 +224,19 @@ impl DataStore {
     pub fn list_all(&self) -> Vec<(String, u64, DataType, Option<String>)> {
         let mut results = Vec::new();
         for item in self.db.scan_prefix(b"meta:") {
-            if let Ok((key, value)) = item {
-                if let Ok(id_str) = std::str::from_utf8(&key[5..]) {
-                    if let Ok((_, _, data_type, filename, _, _)) =
-                        decode::<(u32, u64, DataType, Option<String>, Option<String>, u32)>(&value)
-                    {
-                        let size = std::fs::metadata(content_path(&self.files_dir, id_str))
-                            .map(|m| m.len() as u64)
-                            .unwrap_or(0);
-                        results.push((id_str.to_string(), size, data_type, filename));
-                    }
-                }
-            }
+            let Ok((key, value)) = item else { continue };
+            let Ok(id_str) = std::str::from_utf8(&key[5..]) else {
+                continue;
+            };
+            let Ok((_, _, data_type, filename, _, _)) =
+                decode::<(u32, u64, DataType, Option<String>, Option<String>, u32)>(&value)
+            else {
+                continue;
+            };
+            let size = std::fs::metadata(content_path(&self.files_dir, id_str))
+                .map(|m| m.len())
+                .unwrap_or(0);
+            results.push((id_str.to_string(), size, data_type, filename));
         }
         results
     }

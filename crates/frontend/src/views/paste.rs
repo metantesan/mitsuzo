@@ -5,9 +5,11 @@ use crate::utils::do_xhr_get;
 use base64::{Engine as _, engine::general_purpose};
 use dioxus::prelude::*;
 use dioxus_i18n::t;
-use mitsuzo_types::{DataType, GetPasteHeader, GetSaltResponse};
-use mitsuzo_utils::{compute_password_hash, derive_keys, decrypt_chunk_into, get_chunk_bounds, get_plaintext_size};
 use gloo_timers::future::TimeoutFuture;
+use mitsuzo_types::{DataType, GetPasteHeader, GetSaltResponse};
+use mitsuzo_utils::{
+    compute_password_hash, decrypt_chunk_into, derive_keys, get_chunk_bounds, get_plaintext_size,
+};
 use wasm_bindgen::JsCast;
 use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
 
@@ -21,8 +23,8 @@ pub struct ProgressState {
 pub fn paste_view(id: String) -> Element {
     let id = sanitize_id(&id);
     let mut password_input = use_signal(String::new);
-    let paste_content: Signal<Option<(Vec<u8>, DataType, Option<String>, Option<String>)>> =
-        use_signal(|| None);
+    let paste_content =
+        use_signal(|| Option::<(Vec<u8>, DataType, Option<String>, Option<String>)>::None);
     let paste_id_state = use_signal(|| id.clone());
     let try_count: Signal<Option<u32>> = use_signal(|| None);
     let ttl: Signal<Option<u64>> = use_signal(|| None);
@@ -36,14 +38,14 @@ pub fn paste_view(id: String) -> Element {
         let pwd = hash.strip_prefix('#').unwrap_or("").to_string();
         if pwd.is_empty() { None } else { Some(pwd) }
     })();
-    if let Some(ref pwd) = hash_from_url {
-        if password_input.read().is_empty() {
-            password_input.set(pwd.clone());
-        }
+    if let Some(ref pwd) = hash_from_url
+        && password_input.read().is_empty()
+    {
+        password_input.set(pwd.clone());
     }
 
     let fetch_and_decrypt = {
-        let mut popup_ctx = popup_ctx.clone();
+        let mut popup_ctx = popup_ctx;
         move |_| {
             let current_id = paste_id_state.read().clone();
             let current_password = password_input.read().clone();
@@ -54,11 +56,11 @@ pub fn paste_view(id: String) -> Element {
             spawn(do_decrypt(
                 current_id,
                 current_password,
-                popup_ctx.clone(),
-                try_count.clone(),
-                ttl.clone(),
-                progress.clone(),
-                paste_content.clone(),
+                popup_ctx,
+                try_count,
+                ttl,
+                progress,
+                paste_content,
             ));
         }
     };
@@ -66,12 +68,7 @@ pub fn paste_view(id: String) -> Element {
     let hash_processed = use_signal(|| false);
 
     use_effect({
-        let popup_ctx = popup_ctx.clone();
-        let try_count = try_count.clone();
-        let ttl = ttl.clone();
-        let progress = progress.clone();
-        let paste_content = paste_content.clone();
-        let mut hash_processed = hash_processed.clone();
+        let mut hash_processed = hash_processed;
         move || {
             if *hash_processed.read() {
                 return;
@@ -83,11 +80,11 @@ pub fn paste_view(id: String) -> Element {
                 spawn(do_decrypt(
                     current_id,
                     current_password,
-                    popup_ctx.clone(),
-                    try_count.clone(),
-                    ttl.clone(),
-                    progress.clone(),
-                    paste_content.clone(),
+                    popup_ctx,
+                    try_count,
+                    ttl,
+                    progress,
+                    paste_content,
                 ));
             }
         }
@@ -258,6 +255,7 @@ pub fn paste_view(id: String) -> Element {
     }
 }
 
+#[allow(clippy::type_complexity)]
 async fn do_decrypt(
     current_id: String,
     current_password: String,
@@ -347,7 +345,7 @@ async fn do_decrypt(
     };
 
     let password_hash = compute_password_hash(&validation_key, &salt);
-    let encoded_hash = general_purpose::STANDARD.encode(&password_hash);
+    let encoded_hash = general_purpose::STANDARD.encode(password_hash);
 
     progress.set(Some(ProgressState {
         status: t!("progress-downloading-content"),
@@ -381,14 +379,18 @@ async fn do_decrypt(
             if response.status >= 200 && response.status < 300 {
                 if let Some(mut body) = response.body {
                     if body.len() < 4 {
-                        popup_ctx.write().show_error("Response too short".to_string());
+                        popup_ctx
+                            .write()
+                            .show_error("Response too short".to_string());
                         progress.set(None);
                         return;
                     }
                     let header_len = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
                     let header_end = 4 + header_len;
                     if body.len() < header_end {
-                        popup_ctx.write().show_error("Response too short".to_string());
+                        popup_ctx
+                            .write()
+                            .show_error("Response too short".to_string());
                         progress.set(None);
                         return;
                     }
@@ -396,7 +398,9 @@ async fn do_decrypt(
                     let header: GetPasteHeader = match bitcode::decode(&body[4..header_end]) {
                         Ok(h) => h,
                         Err(e) => {
-                            popup_ctx.write().show_error(t!("error-decode-paste-failed", error: e.to_string()));
+                            popup_ctx
+                                .write()
+                                .show_error(t!("error-decode-paste-failed", error: e.to_string()));
                             progress.set(None);
                             return;
                         }
@@ -414,16 +418,21 @@ async fn do_decrypt(
                     let (encryption_key, _) = match derive_keys(&current_password, &salt) {
                         Ok(k) => k,
                         Err(e) => {
-                            popup_ctx.write().show_error(t!("error-decryption-failed", error: e));
+                            popup_ctx
+                                .write()
+                                .show_error(t!("error-decryption-failed", error: e));
                             progress.set(None);
                             return;
                         }
                     };
 
-                    let plaintext_size = match get_plaintext_size(paste_total_chunks, content.len()) {
+                    let plaintext_size = match get_plaintext_size(paste_total_chunks, content.len())
+                    {
                         Ok(s) => s,
                         Err(e) => {
-                            popup_ctx.write().show_error(t!("error-decryption-failed", error: e.to_string()));
+                            popup_ctx
+                                .write()
+                                .show_error(t!("error-decryption-failed", error: e.to_string()));
                             progress.set(None);
                             return;
                         }
@@ -459,9 +468,9 @@ async fn do_decrypt(
                             progress.set(None);
                         }
                         Err(e) => {
-                            popup_ctx.write().show_error(
-                                t!("error-decryption-failed", error: e.to_string()),
-                            );
+                            popup_ctx
+                                .write()
+                                .show_error(t!("error-decryption-failed", error: e.to_string()));
                             progress.set(None);
                         }
                     }
