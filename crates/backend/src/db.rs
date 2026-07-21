@@ -90,6 +90,7 @@ impl DataStore {
         filename: Option<String>,
         content_type: Option<String>,
         total_chunks: u32,
+        allow_download: bool,
     ) {
         std::fs::write(content_path(&self.files_dir, id), content).unwrap();
         std::fs::write(nonce_path(&self.files_dir, id), nonce).unwrap();
@@ -109,6 +110,7 @@ impl DataStore {
             filename,
             content_type,
             total_chunks,
+            allow_download,
         ));
         let _ = self.db.insert(format!("meta:{}", id), meta_value);
         let _ = self.db.flush();
@@ -150,7 +152,7 @@ impl DataStore {
     pub fn get_meta(
         &self,
         id: &str,
-    ) -> Option<(u32, u64, DataType, Option<String>, Option<String>, u32)> {
+    ) -> Option<(u32, u64, DataType, Option<String>, Option<String>, u32, bool)> {
         match self.db.get(format!("meta:{}", id)) {
             Ok(Some(value)) => decode(&value).ok(),
             Ok(None) => None,
@@ -164,8 +166,8 @@ impl DataStore {
             .db
             .update_and_fetch(key.as_bytes(), |value| {
                 let value = value.as_ref()?;
-                let (try_count, expiration, data_type, filename, content_type, total_chunks) =
-                    decode::<(u32, u64, DataType, Option<String>, Option<String>, u32)>(value)
+                let (try_count, expiration, data_type, filename, content_type, total_chunks, allow_download) =
+                    decode::<(u32, u64, DataType, Option<String>, Option<String>, u32, bool)>(value)
                         .ok()?;
                 if try_count == 0 {
                     return None;
@@ -178,14 +180,15 @@ impl DataStore {
                     filename,
                     content_type,
                     total_chunks,
+                    allow_download,
                 ));
                 Some(encoded)
             })
             .ok()
             .flatten();
         if let Some(meta) = result {
-            if let Ok((0, _, _, _, _, _)) =
-                decode::<(u32, u64, DataType, Option<String>, Option<String>, u32)>(&meta)
+            if let Ok((0, _, _, _, _, _, _)) =
+                decode::<(u32, u64, DataType, Option<String>, Option<String>, u32, bool)>(&meta)
             {
                 self.delete_paste(id);
             }
@@ -208,8 +211,8 @@ impl DataStore {
 
         for item in self.db.scan_prefix(b"meta:") {
             let Ok((key, value)) = item else { continue };
-            let Ok((_, expiration_timestamp, _, _, _, _)) =
-                decode::<(u32, u64, DataType, Option<String>, Option<String>, u32)>(&value)
+            let Ok((_, expiration_timestamp, _, _, _, _, _)) =
+                decode::<(u32, u64, DataType, Option<String>, Option<String>, u32, bool)>(&value)
             else {
                 continue;
             };
@@ -232,8 +235,8 @@ impl DataStore {
             let Ok(id_str) = std::str::from_utf8(&key[5..]) else {
                 continue;
             };
-            let Ok((_, _, data_type, filename, _, _)) =
-                decode::<(u32, u64, DataType, Option<String>, Option<String>, u32)>(&value)
+            let Ok((_, _, data_type, filename, _, _, _)) =
+                decode::<(u32, u64, DataType, Option<String>, Option<String>, u32, bool)>(&value)
             else {
                 continue;
             };
@@ -246,7 +249,7 @@ impl DataStore {
     }
 
     fn is_expired(&self, id: &str) -> bool {
-        if let Some((_, expiration_timestamp, _, _, _, _)) = self.get_meta(id) {
+        if let Some((_, expiration_timestamp, _, _, _, _, _)) = self.get_meta(id) {
             let current_time = epoch_secs();
             if expiration_timestamp > 0 && current_time > expiration_timestamp {
                 self.delete_paste(id);
@@ -267,8 +270,8 @@ impl DataStore {
     pub fn id_available(&self, id: &str) -> bool {
         match self.db.get(format!("meta:{}", id)) {
             Ok(Some(value)) => {
-                let Ok((_, expiration_timestamp, _, _, _, _)) =
-                    decode::<(u32, u64, DataType, Option<String>, Option<String>, u32)>(&value)
+            let Ok((_, expiration_timestamp, _, _, _, _, _)) =
+                    decode::<(u32, u64, DataType, Option<String>, Option<String>, u32, bool)>(&value)
                 else {
                     return true;
                 };

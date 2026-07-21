@@ -141,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 filename,
                 content_type: None,
                 total_chunks,
+                allow_download: true,
             };
 
             let header_bytes = bitcode::encode(&header);

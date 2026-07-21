@@ -8,6 +8,7 @@ nav-download = Download
 changelog-title = Changelog
 changelog-current = current
 
+disable-download = Disable download (preview only)
 home-placeholder = Enter your paste here...
 or-upload-file = Or Upload a File:
 choose-file = Choose a file...

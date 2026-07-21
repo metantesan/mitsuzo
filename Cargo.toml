@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.7"
+version = "0.3.8"
 license = "BSD-3-Clause"
 authors = ["hikari <me@metantesan.com>"]
 edition = "2024"
@@ -70,3 +70,11 @@ sled = "0.34.7"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
 mermaid-rs-renderer = { version = "0.3", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+debug = 0
+strip = "symbols"
+panic = "abort"
