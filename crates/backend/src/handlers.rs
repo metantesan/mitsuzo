@@ -2,15 +2,15 @@ use crate::db::DataStore;
 use axum::{
     body::{Body, Bytes},
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
 use bitcode::{decode, encode};
 use futures::stream::{self, StreamExt};
 use mitsuzo_types::{
-    CHUNK_SIZE, CreatePasteHeader, CreatePasteResponse, GetPasteHeader, GetSaltResponse,
-    GetStatsResponse, MAX_PASTE_SIZE, read_framed,
+    CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, GetPasteHeader, GetSaltResponse,
+    GetStatsResponse, InitPasteResponse, UPLOAD_CHUNK_SIZE,
 };
 use rand::RngExt;
 use std::fs;
@@ -44,14 +44,48 @@ fn validate_id(id: &str) -> Result<(), StatusCode> {
         .ok_or(StatusCode::NOT_FOUND)
 }
 
-pub async fn create_paste(State(db): State<DataStore>, body: Bytes) -> Result<Vec<u8>, StatusCode> {
-    let (header_bytes, content) = read_framed(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    let header: CreatePasteHeader = decode(header_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    if content.len() > MAX_PASTE_SIZE {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
     }
+    let mut result: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        result |= x ^ y;
+    }
+    result == 0
+}
+
+fn verify_password(db: &DataStore, id: &str, headers: &HeaderMap) -> Result<(), StatusCode> {
+    let Some(stored_hash) = db.get_password_hash(id) else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let Some(provided_hash_str) = headers
+        .get("X-Password-Hash")
+        .and_then(|value| value.to_str().ok())
+    else {
+        db.decrement_try_count(id);
+        db.increment_fail();
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let provided_hash = match general_purpose::STANDARD.decode(provided_hash_str) {
+        Ok(h) => h,
+        Err(_) => {
+            db.decrement_try_count(id);
+            db.increment_fail();
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
+
+    if !constant_time_eq(&provided_hash, &stored_hash) {
+        db.decrement_try_count(id);
+        db.increment_fail();
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(())
+}
+
+pub async fn init_paste(State(db): State<DataStore>, body: Bytes) -> Result<Vec<u8>, StatusCode> {
+    let header: CreatePasteHeader = decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     if header.total_chunks == 0 {
         return Err(StatusCode::BAD_REQUEST);
@@ -88,9 +122,8 @@ pub async fn create_paste(State(db): State<DataStore>, body: Bytes) -> Result<Ve
         break;
     }
 
-    db.insert(
+    db.init_paste(
         &id_str,
-        content,
         &header.nonce,
         &header.salt,
         &header.password_hash,
@@ -103,21 +136,50 @@ pub async fn create_paste(State(db): State<DataStore>, body: Bytes) -> Result<Ve
         header.allow_download,
     );
 
-    info!(id = %id_str, "paste created");
+    info!(id = %id_str, "paste initialized");
 
-    let response = CreatePasteResponse { id: id_str };
-    Ok(encode(&response))
+    Ok(encode(&InitPasteResponse { id: id_str }))
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
+pub async fn upload_chunk(
+    State(db): State<DataStore>,
+    Path((id, chunk_index)): Path<(String, u32)>,
+    body: Bytes,
+) -> Result<(), StatusCode> {
+    validate_id(&id)?;
+    if body.len() > UPLOAD_CHUNK_SIZE {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
-    let mut result: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
+    if db.get_salt(&id).is_none() {
+        return Err(StatusCode::NOT_FOUND);
     }
-    result == 0
+    db.append_chunk(&id, chunk_index, &body)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(())
+}
+
+pub async fn get_chunk_info(
+    State(db): State<DataStore>,
+    Path(id): Path<String>,
+) -> Result<Vec<u8>, StatusCode> {
+    validate_id(&id)?;
+    if db.get_salt(&id).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let received = db.get_received_chunks(&id);
+    Ok(encode(&ChunkInfoResponse { received }))
+}
+
+pub async fn complete_paste(
+    State(db): State<DataStore>,
+    Path(id): Path<String>,
+) -> Result<Vec<u8>, StatusCode> {
+    validate_id(&id)?;
+    if db.get_salt(&id).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    info!(id = %id, "paste completed");
+    Ok(encode(&InitPasteResponse { id }))
 }
 
 pub async fn get_salt(
@@ -125,8 +187,18 @@ pub async fn get_salt(
     Path(id): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
     validate_id(&id)?;
-    if let (Some(salt), Some((try_count, expiration_timestamp, _, _, _, total_chunks, _))) =
-        (db.get_salt(&id), db.get_meta(&id))
+    if let (
+        Some(salt),
+        Some((
+            try_count,
+            expiration_timestamp,
+            data_type,
+            filename,
+            content_type,
+            total_chunks,
+            allow_download,
+        )),
+    ) = (db.get_salt(&id), db.get_meta(&id))
     {
         if try_count == 0 {
             return Err(StatusCode::NOT_FOUND);
@@ -141,11 +213,25 @@ pub async fn get_salt(
             0
         };
 
+        let content_len = db.get_content_size(&id).unwrap_or(0);
+        let total_size = compute_total_size(content_len as usize, total_chunks);
+
+        let nonce = db.get_nonce(&id).ok_or(StatusCode::NOT_FOUND)?;
+        let nonce_arr: [u8; 12] = nonce
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
         let response = GetSaltResponse {
             salt,
             try_count,
             ttl,
             total_chunks,
+            total_size,
+            nonce: nonce_arr,
+            data_type,
+            filename,
+            content_type,
+            allow_download,
         };
         Ok(encode(&response))
     } else {
@@ -178,30 +264,7 @@ pub async fn get_paste(
     headers: HeaderMap,
 ) -> Result<Response<Body>, StatusCode> {
     validate_id(&id)?;
-    if let Some(stored_hash) = db.get_password_hash(&id) {
-        let Some(provided_hash_str) = headers
-            .get("X-Password-Hash")
-            .and_then(|value| value.to_str().ok())
-        else {
-            db.decrement_try_count(&id);
-            db.increment_fail();
-            return Err(StatusCode::UNAUTHORIZED);
-        };
-        let provided_hash = match general_purpose::STANDARD.decode(provided_hash_str) {
-            Ok(h) => h,
-            Err(_) => {
-                db.decrement_try_count(&id);
-                db.increment_fail();
-                return Err(StatusCode::UNAUTHORIZED);
-            }
-        };
-
-        if !constant_time_eq(&provided_hash, &stored_hash) {
-            db.decrement_try_count(&id);
-            db.increment_fail();
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-    }
+    verify_password(&db, &id, &headers)?;
 
     let nonce = db.get_nonce(&id).ok_or(StatusCode::NOT_FOUND)?;
     let file_path = db.get_content_path(&id).ok_or(StatusCode::NOT_FOUND)?;
@@ -255,6 +318,108 @@ pub async fn get_paste(
     Ok(Response::new(Body::from_stream(
         head_stream.chain(file_stream),
     )))
+}
+
+pub async fn get_paste_data(
+    State(db): State<DataStore>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, StatusCode> {
+    validate_id(&id)?;
+    verify_password(&db, &id, &headers)?;
+
+    let file_path = db.get_content_path(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let file_meta = tokio::fs::metadata(&file_path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let file_len = file_meta.len();
+    db.increment_success();
+
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_range);
+
+    if let Some((start, end)) = range {
+        let end = end.min(file_len - 1);
+        let len = end - start + 1;
+
+        let file = tokio::fs::File::open(&file_path)
+            .await
+            .map_err(|_| StatusCode::NOT_FOUND)?;
+
+        let file_stream =
+            stream::unfold((file, start, false), move |(mut f, pos, done)| async move {
+                if done {
+                    return None;
+                }
+                let mut buf = vec![0u8; 65536];
+                let to_read = std::cmp::min(buf.len() as u64, (end + 1) - pos) as usize;
+                if to_read == 0 {
+                    return None;
+                }
+                buf.truncate(to_read);
+                use tokio::io::AsyncSeekExt;
+                let _ = f.seek(std::io::SeekFrom::Start(pos)).await;
+                use tokio::io::AsyncReadExt;
+                match f.read(&mut buf).await {
+                    Ok(0) | Err(_) => None,
+                    Ok(n) => {
+                        buf.truncate(n);
+                        let next_pos = pos + n as u64;
+                        Some((
+                            Ok::<_, std::io::Error>(Bytes::from(buf)),
+                            (f, next_pos, next_pos > end),
+                        ))
+                    }
+                }
+            });
+
+        return Ok(Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(
+                header::CONTENT_RANGE,
+                format!("bytes {}-{}/{}", start, end, file_len),
+            )
+            .header(header::CONTENT_LENGTH, len.to_string())
+            .body(Body::from_stream(file_stream))
+            .unwrap());
+    }
+
+    let file = tokio::fs::File::open(&file_path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let file_stream = stream::unfold(file, |mut f| async {
+        let mut buf = vec![0u8; 65536];
+        match f.read(&mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok::<_, std::io::Error>(Bytes::from(buf)), f))
+            }
+            Err(e) => Some((Err(e), f)),
+        }
+    });
+
+    Ok(Response::builder()
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, file_len.to_string())
+        .body(Body::from_stream(file_stream))
+        .unwrap())
+}
+
+fn parse_range(header: &str) -> Option<(u64, u64)> {
+    let header = header.strip_prefix("bytes=")?;
+    let (start_str, end_str) = header.split_once('-')?;
+    let start: u64 = start_str.parse().ok()?;
+    let end: u64 = if end_str.is_empty() {
+        u64::MAX
+    } else {
+        end_str.parse().ok()?
+    };
+    Some((start, end))
 }
 
 pub async fn get_stats(State(db): State<DataStore>) -> Vec<u8> {

@@ -2,13 +2,14 @@ use crate::BASE_URL;
 use crate::Route;
 use crate::components::PopupContext;
 use crate::sanitize_id;
-use crate::utils::{do_xhr_get, do_xhr_post};
+use crate::utils::{do_xhr_get, do_xhr_post, do_xhr_put};
 use base64::Engine as _;
 use dioxus::prelude::*;
 use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{
-    CHUNK_SIZE, CreatePasteHeader, CreatePasteResponse, DataType, GetStatsResponse, MAX_PASTE_SIZE,
+    CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, DataType, GetStatsResponse,
+    InitPasteResponse, MAX_PASTE_SIZE, UPLOAD_CHUNK_SIZE,
 };
 use mitsuzo_utils::{encrypt_chunk_into, encrypt_setup};
 use wasm_bindgen::JsCast;
@@ -159,34 +160,31 @@ pub fn home_view() -> Element {
                 };
 
                 let header_bytes = bitcode::encode(&header);
-                let mut body = Vec::with_capacity(4 + header_bytes.len());
-                body.extend_from_slice(&(header_bytes.len() as u32).to_le_bytes());
-                body.extend_from_slice(&header_bytes);
-
-                let last_chunk_plain =
-                    file_size_for_chunks as usize - (total_chunks as usize - 1) * CHUNK_SIZE;
-                let enc_capacity = if total_chunks <= 1 {
-                    file_size_for_chunks as usize + 16
-                } else {
-                    (total_chunks as usize - 1) * (CHUNK_SIZE + 16) + last_chunk_plain + 16
-                };
-                body.reserve(enc_capacity);
 
                 progress.set(Some(ProgressState {
                     status: t!("progress-encrypting"),
                     progress: 30.0,
                 }));
 
+                let mut enc_body = Vec::new();
                 let js_file = file_data.read().as_ref().cloned();
 
                 match (text_fallback, js_file) {
                     (Some(text_bytes), _) => {
+                        let chunk_size = if text_bytes.len() <= CHUNK_SIZE {
+                            text_bytes.len() + 16
+                        } else {
+                            (total_chunks as usize - 1) * (CHUNK_SIZE + 16)
+                                + (text_bytes.len() - (total_chunks as usize - 1) * CHUNK_SIZE)
+                                + 16
+                        };
+                        enc_body.reserve(chunk_size);
                         if let Err(e) = encrypt_chunk_into(
                             &text_bytes,
                             &encryption_key,
                             &nonce_bytes,
                             0,
-                            &mut body,
+                            &mut enc_body,
                         ) {
                             popup_ctx
                                 .write()
@@ -196,6 +194,16 @@ pub fn home_view() -> Element {
                         }
                     }
                     (_, Some(file)) => {
+                        let total_cipher_size = if total_chunks == 1 {
+                            file_size_for_chunks as usize + 16
+                        } else {
+                            let full = (total_chunks as usize - 1) * (CHUNK_SIZE + 16);
+                            let last = (file_size_for_chunks as usize
+                                - (total_chunks as usize - 1) * CHUNK_SIZE)
+                                + 16;
+                            full + last
+                        };
+                        enc_body.reserve(total_cipher_size);
                         for i in 0..total_chunks {
                             if i % 8 == 0 {
                                 TimeoutFuture::new(0).await;
@@ -223,7 +231,7 @@ pub fn home_view() -> Element {
                                 &encryption_key,
                                 &nonce_bytes,
                                 i,
-                                &mut body,
+                                &mut enc_body,
                             ) {
                                 popup_ctx.write().show_error(
                                     t!("error-encryption-failed", error: e.to_string()),
@@ -237,70 +245,116 @@ pub fn home_view() -> Element {
                 }
 
                 progress.set(Some(ProgressState {
-                    status: t!("progress-encrypting"),
+                    status: t!("progress-initiating-upload"),
                     progress: 50.0,
                 }));
 
-                progress.set(Some(ProgressState {
-                    status: t!("progress-preparing-upload"),
-                    progress: 50.0,
-                }));
+                let init_result =
+                    do_xhr_post(&format!("{}/api/paste", BASE_URL), header_bytes, |_, _| {}).await;
 
-                let result = do_xhr_post(
-                &format!("{}/api/paste", BASE_URL),
-                body,
-                |loaded, total| {
-                    if total > 0 {
-                        let percent = (loaded as f32 / total as f32) * 50.0;
-                        let status_text = t!("progress-upload-percent", percent: format!("{:.0}", (percent / 50.0) * 100.0));
-                        progress.set(Some(ProgressState {
-                            status: status_text,
-                            progress: 50.0 + percent,
-                        }));
-                    } else if loaded > 0 {
-                        let status_text = t!("progress-upload-kb", kb: format!("{:.1}", loaded as f32 / 1024.0));
-                        progress.set(Some(ProgressState {
-                            status: status_text,
-                            progress: 90.0,
-                        }));
-                    }
-                },
-            ).await;
-
-                match result {
-                    Ok(response) => {
-                        if response.status >= 200 && response.status < 300 {
-                            if let Some(resp_body) = response.body {
-                                match bitcode::decode::<CreatePasteResponse>(&resp_body) {
-                                    Ok(decoded_response) => {
-                                        generated_id.set(Some(decoded_response.id.clone()));
-                                        progress.set(Some(ProgressState {
-                                            status: t!("progress-upload-complete"),
-                                            progress: 100.0,
-                                        }));
-                                    }
-                                    Err(e) => {
-                                        popup_ctx.write().show_error(
-                                            t!("error-parse-response-failed", error: e.to_string()),
-                                        );
-                                        progress.set(None);
-                                    }
-                                }
-                            } else {
-                                popup_ctx.write().show_error(t!("error-empty-response"));
+                let paste_id = match init_result {
+                    Ok(response) if response.status >= 200 && response.status < 300 => {
+                        match response
+                            .body
+                            .and_then(|b| bitcode::decode::<InitPasteResponse>(&b).ok())
+                        {
+                            Some(r) => r.id,
+                            None => {
+                                popup_ctx.write().show_error(
+                                    t!("error-parse-response-failed", error: "init response"),
+                                );
                                 progress.set(None);
+                                return;
                             }
-                        } else {
-                            popup_ctx.write().show_error(
-                            t!("error-create-paste-failed", status: response.status.to_string()),
-                        );
-                            progress.set(None);
                         }
                     }
-                    Err(e) => {
+                    _ => {
                         popup_ctx
                             .write()
-                            .show_error(t!("error-send-request-failed", error: e));
+                            .show_error(t!("error-create-paste-failed", status: "init"));
+                        progress.set(None);
+                        return;
+                    }
+                };
+
+                let total_upload_chunks = enc_body.len().div_ceil(UPLOAD_CHUNK_SIZE);
+
+                let chunk_info = do_xhr_get(
+                    &format!("{}/api/paste/{}/chunks", BASE_URL, paste_id),
+                    vec![],
+                    |_, _| {},
+                )
+                .await;
+                let start_chunk = match chunk_info {
+                    Ok(r) if r.status >= 200 && r.status < 300 => r
+                        .body
+                        .as_ref()
+                        .and_then(|b| bitcode::decode::<ChunkInfoResponse>(b).ok())
+                        .map(|c| c.received)
+                        .unwrap_or(0),
+                    _ => 0,
+                };
+
+                let mut last_update = 0.0;
+                for i in start_chunk..total_upload_chunks as u32 {
+                    let chunk_start = i as usize * UPLOAD_CHUNK_SIZE;
+                    let chunk_end = std::cmp::min(chunk_start + UPLOAD_CHUNK_SIZE, enc_body.len());
+                    let chunk_data = enc_body[chunk_start..chunk_end].to_vec();
+
+                    let upload_result = do_xhr_put(
+                        &format!("{}/api/paste/{}/chunk/{}", BASE_URL, paste_id, i),
+                        chunk_data,
+                        |loaded, total| {
+                            if total > 0 {
+                                let chunk_pct = loaded as f32 / total as f32;
+                                let overall = 50.0 + ((i as f32 + chunk_pct) / total_upload_chunks as f32) * 40.0;
+                                if overall - last_update > 1.0 {
+                                    last_update = overall;
+                                    progress.set(Some(ProgressState {
+                                        status: t!("progress-upload-percent", percent: format!("{:.0}", (overall - 50.0) / 40.0 * 100.0)),
+                                        progress: overall,
+                                    }));
+                                }
+                            }
+                        },
+                    ).await;
+
+                    match upload_result {
+                        Ok(r) if r.status >= 200 && r.status < 300 => {}
+                        _ => {
+                            popup_ctx.write().show_error(
+                                t!("error-create-paste-failed", status: format!("chunk {}", i)),
+                            );
+                            progress.set(None);
+                            return;
+                        }
+                    }
+                }
+
+                progress.set(Some(ProgressState {
+                    status: t!("progress-finalizing"),
+                    progress: 95.0,
+                }));
+
+                let complete_result = do_xhr_post(
+                    &format!("{}/api/paste/{}/complete", BASE_URL, paste_id),
+                    Vec::new(),
+                    |_, _| {},
+                )
+                .await;
+
+                match complete_result {
+                    Ok(response) if response.status >= 200 && response.status < 300 => {
+                        generated_id.set(Some(paste_id));
+                        progress.set(Some(ProgressState {
+                            status: t!("progress-upload-complete"),
+                            progress: 100.0,
+                        }));
+                    }
+                    _ => {
+                        popup_ctx
+                            .write()
+                            .show_error(t!("error-create-paste-failed", status: "complete"));
                         progress.set(None);
                     }
                 }

@@ -2,6 +2,7 @@ use bitcode::{decode, encode};
 use mitsuzo_types::DataType;
 use sled::Db;
 use std::{
+    io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -77,10 +78,9 @@ fn epoch_secs() -> u64 {
 
 impl DataStore {
     #[allow(clippy::too_many_arguments)]
-    pub fn insert(
+    pub fn init_paste(
         &self,
         id: &str,
-        content: &[u8],
         nonce: &[u8],
         salt: &[u8],
         password_hash: &[u8],
@@ -92,7 +92,6 @@ impl DataStore {
         total_chunks: u32,
         allow_download: bool,
     ) {
-        std::fs::write(content_path(&self.files_dir, id), content).unwrap();
         std::fs::write(nonce_path(&self.files_dir, id), nonce).unwrap();
 
         let _ = self.db.insert(format!("pass:{}", id), password_hash);
@@ -113,19 +112,85 @@ impl DataStore {
             allow_download,
         ));
         let _ = self.db.insert(format!("meta:{}", id), meta_value);
+        let _ = self
+            .db
+            .insert(format!("crecv:{}", id), &0u32.to_le_bytes()[..]);
         let _ = self.db.flush();
 
         increment_counter(&self.stats, "pastes_all_time");
         increment_counter(&self.stats, &day_key("pastes_day"));
     }
 
-    pub fn get(&self, id: &str) -> Option<(Vec<u8>, Vec<u8>)> {
-        if self.is_expired(id) {
-            return None;
+    #[allow(clippy::result_unit_err)]
+    pub fn append_chunk(&self, id: &str, chunk_index: u32, data: &[u8]) -> Result<(), ()> {
+        let chunk_key = format!("chunk:{}:{}", id, chunk_index);
+        if self.db.get(&chunk_key).ok().flatten().is_some() {
+            return Ok(());
         }
-        let content = std::fs::read(content_path(&self.files_dir, id)).ok()?;
-        let nonce = std::fs::read(nonce_path(&self.files_dir, id)).ok()?;
-        Some((content, nonce))
+
+        // Use a unique temp file per append to avoid concurrent write interference
+        let path = content_path(&self.files_dir, id);
+        let temp_path = content_path(&self.files_dir, &format!("{}.{}", id, chunk_index));
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temp_path)
+        else {
+            return Err(());
+        };
+        let _ = file.write_all(data);
+        let _ = file.flush();
+        drop(file);
+
+        // Atomically write to final file at correct offset
+        let Ok(mut final_file) = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+        else {
+            return Err(());
+        };
+        let offset = chunk_index as u64 * mitsuzo_types::UPLOAD_CHUNK_SIZE as u64;
+        let _ = final_file.seek(SeekFrom::Start(offset));
+        let _ = final_file.write_all(data);
+        let _ = final_file.flush();
+        let _ = std::fs::remove_file(&temp_path);
+
+        let _ = self.db.insert(chunk_key, b"1");
+        let _ = self
+            .db
+            .update_and_fetch(format!("crecv:{}", id).as_bytes(), |v| {
+                let current = v
+                    .and_then(|b| b.as_ref().try_into().ok())
+                    .map(u32::from_le_bytes)
+                    .unwrap_or(0);
+                Some((current + 1).to_le_bytes().to_vec())
+            });
+        Ok(())
+    }
+
+    pub fn get_received_chunks(&self, id: &str) -> u32 {
+        self.db
+            .get(format!("crecv:{}", id))
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_ref().try_into().ok())
+            .map(u32::from_le_bytes)
+            .unwrap_or(0)
+    }
+
+    fn delete_chunk_keys(&self, id: &str) {
+        let prefix = format!("chunk:{}:", id);
+        let keys: Vec<sled::IVec> = self
+            .db
+            .scan_prefix(prefix.as_bytes())
+            .filter_map(|r| r.ok().map(|(k, _)| k))
+            .collect();
+        for key in keys {
+            let _ = self.db.remove(key);
+        }
     }
 
     pub fn get_password_hash(&self, id: &str) -> Option<Vec<u8>> {
@@ -230,6 +295,8 @@ impl DataStore {
         let _ = self.db.remove(format!("pass:{}", id));
         let _ = self.db.remove(format!("salt:{}", id));
         let _ = self.db.remove(format!("meta:{}", id));
+        let _ = self.db.remove(format!("crecv:{}", id));
+        self.delete_chunk_keys(id);
         let _ = std::fs::remove_file(content_path(&self.files_dir, id));
         let _ = std::fs::remove_file(nonce_path(&self.files_dir, id));
         let _ = self.db.flush();
@@ -307,6 +374,11 @@ impl DataStore {
         }
         let path = content_path(&self.files_dir, id);
         if path.exists() { Some(path) } else { None }
+    }
+
+    pub fn get_content_size(&self, id: &str) -> Option<u64> {
+        let path = content_path(&self.files_dir, id);
+        std::fs::metadata(path).ok().map(|m| m.len())
     }
 
     pub fn id_available(&self, id: &str) -> bool {

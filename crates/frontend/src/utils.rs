@@ -109,6 +109,23 @@ fn setup_upload_progress(xhr: &XmlHttpRequest) -> Result<mpsc::Receiver<XhrProgr
     Ok(progress_rx)
 }
 
+pub fn xhr_put(url: &str, body: Vec<u8>) -> Result<XhrRequest, String> {
+    let xhr = XmlHttpRequest::new().map_err(|e| format!("Failed to create XHR: {:?}", e))?;
+
+    xhr.open("PUT", url)
+        .map_err(|e| format!("Failed to open XHR: {:?}", e))?;
+
+    xhr.set_response_type(web_sys::XmlHttpRequestResponseType::Arraybuffer);
+
+    let response = setup_xhr_response(&xhr)?;
+    let progress = setup_upload_progress(&xhr)?;
+
+    xhr.send_with_opt_u8_array(Some(&body))
+        .map_err(|e| format!("Failed to send XHR: {:?}", e))?;
+
+    Ok(XhrRequest { response, progress })
+}
+
 pub fn xhr_post(url: &str, body: Vec<u8>) -> Result<XhrRequest, String> {
     let xhr = XmlHttpRequest::new().map_err(|e| format!("Failed to create XHR: {:?}", e))?;
 
@@ -160,6 +177,32 @@ where
         mut response,
         mut progress,
     } = xhr_get(url, headers)?;
+    loop {
+        futures::select! {
+            result = response => {
+                break result.map_err(|e| format!("XHR cancelled: {:?}", e));
+            }
+            item = progress.next() => {
+                if let Some(p) = item {
+                    on_progress(p.loaded, p.total);
+                }
+            }
+        }
+    }
+}
+
+pub async fn do_xhr_put<F>(
+    url: &str,
+    body: Vec<u8>,
+    mut on_progress: F,
+) -> Result<XhrResponse, String>
+where
+    F: FnMut(u64, u64),
+{
+    let XhrRequest {
+        mut response,
+        mut progress,
+    } = xhr_put(url, body)?;
     loop {
         futures::select! {
             result = response => {
