@@ -1,0 +1,69 @@
+[workspace]
+members = [
+    "crates/backend",
+    "crates/cli",
+    "crates/frontend",
+    "crates/types",
+    "crates/utils",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.3.0"
+license = "AGPL-3.0-only"
+authors = ["hikari <me@metantesan.com>"]
+edition = "2024"
+repository = "https://github.com/metantesan/mitsuzo"
+
+[workspace.dependencies]
+mitsuzo-types = { path = "crates/types" }
+mitsuzo-utils = { path = "crates/utils" }
+cli = { path = "crates/cli" }
+
+argon2 = "0.5.3"
+sha2 = "0.11.0"
+base64 = "0.22.1"
+bitcode = { version = "0.6.7", features = ["serde"] }
+orion = "0.17"
+getrandom = { version = "0.4", features = ["wasm_js"] }
+serde = { version = "1.0.228", features = ["derive"] }
+dioxus = { version = "0.7", features = ["router", "web"] }
+reqwasm = "0.5.0"
+log = "0.4"
+wasm-logger = "0.2.0"
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "File",
+    "Url",
+    "HtmlAnchorElement",
+    "HtmlInputElement",
+    "HtmlScriptElement",
+    "BlobPropertyBag",
+    "XmlHttpRequest",
+    "XmlHttpRequestUpload",
+    "ProgressEvent",
+    "FileReader",
+    "Storage",
+    "XmlHttpRequestResponseType",
+] }
+gloo-file = { version = "0.4.0", features = ["futures"] }
+gloo-timers = { version = "0.4.0", features = ["futures"] }
+futures = "0.3"
+wasm-bindgen-futures = "0.4"
+dioxus-i18n = "0.5"
+unic-langid = { version = "0.9", features = ["macros"] }
+
+clap = { version = "4", features = ["derive"] }
+dirs = "6.0.0"
+reqwest = "0.13"
+rpassword = "7.5.4"
+serde_yaml = "0.9.34"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+rand = "0.10.1"
+axum = "0.8"
+tower-http = { version = "0.7", features = ["cors", "fs"] }
+sled = "0.34.7"
