@@ -48,7 +48,13 @@ jobs:
       - run: cp target/${{ matrix.target }}/release/${{ env.CRATE_NAME }}${{ matrix.binary_postfix }} ${{ env.BIN_NAME }}${{ matrix.binary_postfix }}
 
       - name: Compress binary
-        run: zip -9 ${{ env.BIN_NAME }}-${{ matrix.target }}.zip ${{ env.BIN_NAME }}${{ matrix.binary_postfix }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a -mx9 ${{ env.BIN_NAME }}-${{ matrix.target }}.zip ${{ env.BIN_NAME }}${{ matrix.binary_postfix }}
+          else
+            zip -9 ${{ env.BIN_NAME }}-${{ matrix.target }}.zip ${{ env.BIN_NAME }}${{ matrix.binary_postfix }}
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
