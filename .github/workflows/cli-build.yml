@@ -61,6 +61,7 @@ jobs:
         with:
           name: ${{ env.BIN_NAME }}-${{ matrix.target }}
           path: ${{ env.BIN_NAME }}-${{ matrix.target }}.zip
+          retention-days: 1
 
   publish:
     needs: build
