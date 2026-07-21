@@ -7,6 +7,8 @@ on:
 env:
   CRATE_NAME: cli
   BIN_NAME: mitsuzo
+  CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
 jobs:
   build:
@@ -20,9 +22,6 @@ jobs:
             target: aarch64-unknown-linux-gnu
             binary_postfix: ""
             deps: gcc-aarch64-linux-gnu
-          - os: macos-13
-            target: x86_64-apple-darwin
-            binary_postfix: ""
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_postfix: ""
