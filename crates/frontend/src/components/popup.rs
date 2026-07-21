@@ -42,9 +42,9 @@ pub fn Popup() -> Element {
     rsx! {
         if let Some(err) = error_opt {
             div {
-                class: "fixed top-4 left-1/2 transform -translate-x-1/2 z-50 bg-red text-text px-6 py-4 rounded-lg shadow-lg max-w-md w-full text-center",
+                class: "fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-danger/10 border border-danger/30 text-text px-6 py-4 rounded-xl shadow-2xl max-w-md w-full text-center backdrop-blur-sm animate-slide-up",
                 button {
-                    class: "absolute top-1 right-2 text-text hover:text-subtext0 text-xl leading-none",
+                    class: "absolute top-1 right-2 text-text-secondary hover:text-text text-xl leading-none transition-colors",
                     onclick: move |_| {
                         ctx.write().clear();
                     },

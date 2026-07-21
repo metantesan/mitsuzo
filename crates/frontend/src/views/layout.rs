@@ -14,12 +14,15 @@ pub fn app_layout() -> Element {
 
     rsx! {
         div {
-            class: "min-h-screen flex flex-col bg-base text-text",
+            class: "min-h-screen flex flex-col bg-bg text-text",
             dir: "{dir}",
+            div {
+                class: "fixed inset-0 pointer-events-none bg-gradient-to-b from-accent/5 via-transparent to-transparent"
+            }
             Popup {}
             Navbar {},
-            div {
-                class: "flex-grow",
+            main {
+                class: "flex-grow animate-fade-in",
                 Outlet::<crate::Route> {}
             },
             Footer {}
