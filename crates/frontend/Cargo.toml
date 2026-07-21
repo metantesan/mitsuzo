@@ -28,6 +28,18 @@ wasm-bindgen-futures.workspace = true
 dioxus-i18n.workspace = true
 unic-langid.workspace = true
 
+[build-dependencies]
+mermaid-rs-renderer.workspace = true
+
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+debug = 0
+strip = "symbols"
+panic = "abort"
+
 [features]
 default = ["web"]
 web = ["dioxus/web"]

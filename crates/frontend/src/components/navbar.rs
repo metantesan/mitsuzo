@@ -3,10 +3,13 @@ use dioxus::prelude::*;
 use dioxus_i18n::{prelude::*, t};
 use unic_langid::langid;
 
+const GITHUB_RELEASES: &str = "https://github.com/metantesan/mitsuzo/releases";
+
 #[component]
 pub fn Navbar() -> Element {
     let mut i18n = i18n();
     let mut menu_open = use_signal(|| false);
+    let current_lang = i18n.language();
 
     rsx! {
         nav {
@@ -35,24 +38,32 @@ pub fn Navbar() -> Element {
                     class: "hover:text-blue-400",
                     {t!("nav-changelog")}
                 }
-                select {
-                    class: "bg-gray-700 text-white rounded px-2 py-1 text-sm border border-gray-600",
-                    value: i18n.language().to_string(),
-                    onchange: move |evt| {
-                        let lang = evt.value();
-                        match lang.as_str() {
-                            "en-US" => i18n.set_language(langid!("en-US")),
-                            "fa-IR" => i18n.set_language(langid!("fa-IR")),
-                            _ => {}
-                        }
-                    },
-                    option {
-                        value: "en-US",
-                        "English"
+                a {
+                    href: GITHUB_RELEASES,
+                    class: "hover:text-green-400",
+                    {t!("nav-download")}
+                }
+                div {
+                    class: "flex border border-gray-600 rounded overflow-hidden",
+                    button {
+                        class: if current_lang == langid!("en-US") { "px-2 py-1 text-sm bg-blue-600" } else { "px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600" },
+                        onclick: move |_| {
+                            i18n.set_language(langid!("en-US"));
+                            if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+                                let _ = s.set_item("mitsuzo-lang", "en-US");
+                            }
+                        },
+                        "EN"
                     }
-                    option {
-                        value: "fa-IR",
-                        "فارسی"
+                    button {
+                        class: if current_lang == langid!("fa-IR") { "px-2 py-1 text-sm bg-blue-600" } else { "px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600" },
+                        onclick: move |_| {
+                            i18n.set_language(langid!("fa-IR"));
+                            if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+                                let _ = s.set_item("mitsuzo-lang", "fa-IR");
+                            }
+                        },
+                        "FA"
                     }
                 }
             }
@@ -96,19 +107,34 @@ pub fn Navbar() -> Element {
                         onclick: move |_| menu_open.set(false),
                         {t!("nav-changelog")}
                     }
-                    select {
-                        class: "bg-gray-700 text-white rounded px-2 py-1 text-sm border border-gray-600 mt-4",
-                        value: i18n.language().to_string(),
-                        onchange: move |evt| {
-                            let lang = evt.value();
-                            match lang.as_str() {
-                                "en-US" => i18n.set_language(langid!("en-US")),
-                                "fa-IR" => i18n.set_language(langid!("fa-IR")),
-                                _ => {}
-                            }
-                        },
-                        option { value: "en-US", "English" }
-                        option { value: "fa-IR", "فارسی" }
+                    a {
+                        href: GITHUB_RELEASES,
+                        class: "text-lg hover:text-green-400",
+                        onclick: move |_| menu_open.set(false),
+                        {t!("nav-download")}
+                    }
+                    div {
+                        class: "flex border border-gray-600 rounded overflow-hidden mt-4",
+                        button {
+                            class: if current_lang == langid!("en-US") { "flex-1 px-2 py-1 text-sm bg-blue-600" } else { "flex-1 px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600" },
+                            onclick: move |_| {
+                                i18n.set_language(langid!("en-US"));
+                                if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+                                    let _ = s.set_item("mitsuzo-lang", "en-US");
+                                }
+                            },
+                            "EN"
+                        }
+                        button {
+                            class: if current_lang == langid!("fa-IR") { "flex-1 px-2 py-1 text-sm bg-blue-600" } else { "flex-1 px-2 py-1 text-sm bg-gray-700 hover:bg-gray-600" },
+                            onclick: move |_| {
+                                i18n.set_language(langid!("fa-IR"));
+                                if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+                                    let _ = s.set_item("mitsuzo-lang", "fa-IR");
+                                }
+                            },
+                            "FA"
+                        }
                     }
                 }
             }
