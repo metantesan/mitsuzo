@@ -8,6 +8,7 @@ nav-download = دانلود
 changelog-title = تغییرات
 changelog-current = فعلی
 
+disable-download = غیرفعال کردن دانلود (فقط پیش‌نمایش)
 home-placeholder = محتوای خود را اینجا وارد کنید...
 or-upload-file = یا یک فایل بارگذاری کنید:
 choose-file = انتخاب فایل...

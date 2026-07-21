@@ -24,7 +24,7 @@ pub fn paste_view(id: String) -> Element {
     let id = sanitize_id(&id);
     let mut password_input = use_signal(String::new);
     let paste_content =
-        use_signal(|| Option::<(Vec<u8>, DataType, Option<String>, Option<String>)>::None);
+        use_signal(|| Option::<(Vec<u8>, DataType, Option<String>, Option<String>, bool)>::None);
     let paste_id_state = use_signal(|| id.clone());
     let try_count: Signal<Option<u32>> = use_signal(|| None);
     let ttl: Signal<Option<u64>> = use_signal(|| None);
@@ -146,7 +146,7 @@ pub fn paste_view(id: String) -> Element {
 
             {
                 match &*paste_content.read() {
-                    Some((bytes, data_type, filename, content_type)) => {
+                    Some((bytes, data_type, filename, content_type, allow_download)) => {
                         let id = paste_id_state.read().clone();
                         match data_type {
                             DataType::Text => rsx! {
@@ -166,7 +166,6 @@ pub fn paste_view(id: String) -> Element {
                                 let owned_id = id.clone();
                                 let owned_filename = filename.clone();
                                 let owned_content_type = content_type.clone();
-
                                 if is_previewable(content_type.as_deref()) {
                                     let preview_bytes = bytes.to_vec();
                                     rsx! {
@@ -189,6 +188,35 @@ pub fn paste_view(id: String) -> Element {
                                                                 src: "{data_url}"
                                                             }
                                                         }
+                                                    } else if ct.starts_with("video/") {
+                                                        let b64_content = general_purpose::STANDARD.encode(&preview_bytes);
+                                                        let data_url = format!("data:{};base64,{}", ct, b64_content);
+                                                        rsx!{
+                                                            video {
+                                                                class: "max-w-full h-auto rounded-lg mx-auto",
+                                                                src: "{data_url}",
+                                                                controls: true,
+                                                            }
+                                                        }
+                                                    } else if ct.starts_with("audio/") {
+                                                        let b64_content = general_purpose::STANDARD.encode(&preview_bytes);
+                                                        let data_url = format!("data:{};base64,{}", ct, b64_content);
+                                                        rsx!{
+                                                            audio {
+                                                                class: "w-full",
+                                                                src: "{data_url}",
+                                                                controls: true,
+                                                            }
+                                                        }
+                                                    } else if ct == "application/pdf" {
+                                                        let b64_content = general_purpose::STANDARD.encode(&preview_bytes);
+                                                        let data_url = format!("data:{};base64,{}", ct, b64_content);
+                                                        rsx!{
+                                                            iframe {
+                                                                class: "w-full h-96 rounded-lg",
+                                                                src: "{data_url}",
+                                                            }
+                                                        }
                                                     } else {
                                                         rsx!{
                                                             pre {
@@ -199,17 +227,19 @@ pub fn paste_view(id: String) -> Element {
                                                     }
                                                 }
                                             }
-                                            button {
-                                                class: "px-6 py-3 bg-green text-crust font-semibold rounded-lg shadow-md hover:bg-teal focus:outline-none focus:ring-2 focus:ring-green focus:ring-offset-2",
-                                                onclick: move |_| {
-                                                    match download_file(preview_bytes.clone(), owned_filename.clone().unwrap_or(owned_id.clone()), owned_content_type.clone()) {
-                                                        Ok(_) => {}
-                                                        Err(e) => {
-                                                            popup_ctx.write().show_error(&e);
+                                            if *allow_download {
+                                                button {
+                                                    class: "px-6 py-3 bg-green text-crust font-semibold rounded-lg shadow-md hover:bg-teal focus:outline-none focus:ring-2 focus:ring-green focus:ring-offset-2",
+                                                    onclick: move |_| {
+                                                        match download_file(preview_bytes.clone(), owned_filename.clone().unwrap_or(owned_id.clone()), owned_content_type.clone()) {
+                                                            Ok(_) => {}
+                                                            Err(e) => {
+                                                                popup_ctx.write().show_error(&e);
+                                                            }
                                                         }
-                                                    }
-                                                },
-                                                {t!("download-file")}
+                                                    },
+                                                    {t!("download-file")}
+                                                }
                                             }
                                         }
                                     }
@@ -226,17 +256,19 @@ pub fn paste_view(id: String) -> Element {
                                                 class: "mb-4 text-overlay0",
                                                 {t!("paste-id", id: id)}
                                             }
-                                            button {
-                                                class: "px-6 py-3 bg-green text-crust font-semibold rounded-lg shadow-md hover:bg-teal focus:outline-none focus:ring-2 focus:ring-green focus:ring-offset-2",
-                                                onclick: move |_| {
-                                                    match download_file(dl_bytes.clone(), owned_filename.clone().unwrap_or(owned_id.clone()), owned_content_type.clone()) {
-                                                        Ok(_) => {}
-                                                        Err(e) => {
-                                                            popup_ctx.write().show_error(&e);
+                                            if *allow_download {
+                                                button {
+                                                    class: "px-6 py-3 bg-green text-crust font-semibold rounded-lg shadow-md hover:bg-teal focus:outline-none focus:ring-2 focus:ring-green focus:ring-offset-2",
+                                                    onclick: move |_| {
+                                                        match download_file(dl_bytes.clone(), owned_filename.clone().unwrap_or(owned_id.clone()), owned_content_type.clone()) {
+                                                            Ok(_) => {}
+                                                            Err(e) => {
+                                                                popup_ctx.write().show_error(&e);
+                                                            }
                                                         }
-                                                    }
-                                                },
-                                                {t!("download-file")}
+                                                    },
+                                                    {t!("download-file")}
+                                                }
                                             }
                                         }
                                     }
@@ -264,7 +296,7 @@ async fn do_decrypt(
     mut try_count: Signal<Option<u32>>,
     mut ttl: Signal<Option<u64>>,
     mut progress: Signal<Option<ProgressState>>,
-    mut paste_content: Signal<Option<(Vec<u8>, DataType, Option<String>, Option<String>)>>,
+    mut     paste_content: Signal<Option<(Vec<u8>, DataType, Option<String>, Option<String>, bool)>>,
 ) {
     progress.set(Some(ProgressState {
         status: t!("progress-downloading-metadata"),
@@ -465,6 +497,7 @@ async fn do_decrypt(
                                 header.data_type,
                                 header.filename,
                                 header.content_type,
+                                header.allow_download,
                             )));
                             progress.set(None);
                         }
@@ -500,7 +533,14 @@ async fn do_decrypt(
 
 fn is_previewable(content_type: Option<&str>) -> bool {
     match content_type {
-        Some(ct) => ct.starts_with("image/") || ct == "text/plain",
+        Some(ct) => {
+            ct.starts_with("image/")
+                || ct.starts_with("text/")
+                || ct == "application/json"
+                || ct.starts_with("video/")
+                || ct.starts_with("audio/")
+                || ct == "application/pdf"
+        }
         None => false,
     }
 }

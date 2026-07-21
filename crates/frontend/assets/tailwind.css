@@ -43,7 +43,6 @@
     --color-crust: #11111b;
     --color-surface0: #313244;
     --color-surface1: #45475a;
-    --color-surface2: #585b70;
     --color-overlay0: #6c7086;
     --color-overlay1: #7f849c;
     --color-subtext0: #a6adc8;
@@ -324,6 +323,9 @@
   .h-3 {
     height: calc(var(--spacing) * 3);
   }
+  .h-96 {
+    height: calc(var(--spacing) * 96);
+  }
   .h-auto {
     height: auto;
   }
@@ -497,9 +499,6 @@
   .bg-overlay0 {
     background-color: var(--color-overlay0);
   }
-  .bg-purple-600 {
-    background-color: var(--color-purple-600);
-  }
   .bg-red {
     background-color: var(--color-red);
   }
@@ -655,6 +654,10 @@
     --tw-duration: 150ms;
     transition-duration: 150ms;
   }
+  .select-none {
+    -webkit-user-select: none;
+    user-select: none;
+  }
   .hover\:bg-mauve\/80 {
     &:hover {
       @media (hover: hover) {
@@ -669,13 +672,6 @@
     &:hover {
       @media (hover: hover) {
         background-color: var(--color-overlay1);
-      }
-    }
-  }
-  .hover\:bg-purple-700 {
-    &:hover {
-      @media (hover: hover) {
-        background-color: var(--color-purple-700);
       }
     }
   }
@@ -747,11 +743,6 @@
   .focus\:ring-mauve {
     &:focus {
       --tw-ring-color: var(--color-mauve);
-    }
-  }
-  .focus\:ring-purple-500 {
-    &:focus {
-      --tw-ring-color: var(--color-purple-500);
     }
   }
   .focus\:ring-offset-2 {

@@ -14,6 +14,20 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.3.8",
+            date: "2026-07",
+            items_en: vec![
+                "Preview support for text/*, application/json, video/*, audio/*, application/pdf",
+                "Disable download (preview-only) checkbox for file uploads",
+                "Fix profile warning — moved [profile.release] to workspace root",
+            ],
+            items_fa: vec![
+                "پشتیبانی از پیش‌نمایش text/*, application/json, video/*, audio/*, application/pdf",
+                "چک‌باکس غیرفعال کردن دانلود (فقط پیش‌نمایش) برای آپلود فایل",
+                "رفع اخطار پروفایل — انتقال [profile.release] به ریشه ورک‌اسپیس",
+            ],
+        },
+        Change {
             version: "v0.3.7",
             date: "2026-07",
             items_en: vec![

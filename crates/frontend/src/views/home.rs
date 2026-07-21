@@ -46,6 +46,7 @@ pub fn home_view() -> Element {
     let mut popup_ctx = use_context::<Signal<PopupContext>>();
     let mut stats: Signal<Option<GetStatsResponse>> = use_signal(|| None);
     let auto_generated = use_signal(|| false);
+    let mut disable_download = use_signal(|| false);
 
     use_future(move || async move {
         let result = do_xhr_get(&format!("{}/api/paste/stats", BASE_URL), vec![], |_, _| {}).await;
@@ -61,6 +62,7 @@ pub fn home_view() -> Element {
 
     let create_paste = {
         let mut auto_generated = auto_generated;
+        let disable_download = disable_download;
         move |_| {
             spawn(async move {
                 let password = password_input.read().clone();
@@ -153,6 +155,7 @@ pub fn home_view() -> Element {
                     filename: file_name.read().clone(),
                     content_type: file_content_type.read().clone(),
                     total_chunks,
+                    allow_download: !*disable_download.read(),
                 };
 
                 let header_bytes = bitcode::encode(&header);
@@ -452,6 +455,19 @@ pub fn home_view() -> Element {
                         value: "{ttl_seconds_input}",
                         max: 43200
                     }
+                }
+            }
+            div {
+                class: "w-full max-w-xl flex items-center gap-2 mb-4",
+                input {
+                    r#type: "checkbox",
+                    id: "no-download",
+                    oninput: move |evt| disable_download.set(evt.checked()),
+                }
+                label {
+                    "for": "no-download",
+                    class: "text-sm text-overlay0 select-none",
+                    {t!("disable-download")}
                 }
             }
             button {

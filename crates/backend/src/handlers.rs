@@ -100,6 +100,7 @@ pub async fn create_paste(State(db): State<DataStore>, body: Bytes) -> Result<Ve
         header.filename,
         header.content_type,
         header.total_chunks,
+        header.allow_download,
     );
 
     info!(id = %id_str, "paste created");
@@ -124,7 +125,7 @@ pub async fn get_salt(
     Path(id): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
     validate_id(&id)?;
-    if let (Some(salt), Some((try_count, expiration_timestamp, _, _, _, total_chunks))) =
+    if let (Some(salt), Some((try_count, expiration_timestamp, _, _, _, total_chunks, _))) =
         (db.get_salt(&id), db.get_meta(&id))
     {
         if try_count == 0 {
@@ -204,7 +205,7 @@ pub async fn get_paste(
 
     let nonce = db.get_nonce(&id).ok_or(StatusCode::NOT_FOUND)?;
     let file_path = db.get_content_path(&id).ok_or(StatusCode::NOT_FOUND)?;
-    let (_try_count, _expiration, data_type, filename, content_type, total_chunks) =
+    let (_try_count, _expiration, data_type, filename, content_type, total_chunks, allow_download) =
         db.get_meta(&id).ok_or(StatusCode::NOT_FOUND)?;
 
     let file_meta = tokio::fs::metadata(&file_path)
@@ -226,6 +227,7 @@ pub async fn get_paste(
         content_type,
         total_size,
         total_chunks,
+        allow_download,
     };
 
     let header_bytes = encode(&header);

@@ -21,6 +21,7 @@ pub struct CreatePasteHeader {
     pub filename: Option<String>,
     pub content_type: Option<String>,
     pub total_chunks: u32,
+    pub allow_download: bool,
 }
 
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
@@ -37,6 +38,7 @@ pub struct GetPasteHeader {
     pub content_type: Option<String>,
     pub total_size: u64,
     pub total_chunks: u32,
+    pub allow_download: bool,
 }
 
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
