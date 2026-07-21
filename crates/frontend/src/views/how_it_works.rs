@@ -5,7 +5,6 @@ const DIAGRAM_SVG: &str = include_str!(concat!(env!("OUT_DIR"), "/diagram.svg"))
 
 #[component]
 pub fn how_it_works_view() -> Element {
-
     rsx! {
         div {
             class: "container mx-auto p-4 text-text max-w-4xl",

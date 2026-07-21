@@ -296,7 +296,7 @@ async fn do_decrypt(
     mut try_count: Signal<Option<u32>>,
     mut ttl: Signal<Option<u64>>,
     mut progress: Signal<Option<ProgressState>>,
-    mut     paste_content: Signal<Option<(Vec<u8>, DataType, Option<String>, Option<String>, bool)>>,
+    mut paste_content: Signal<Option<(Vec<u8>, DataType, Option<String>, Option<String>, bool)>>,
 ) {
     progress.set(Some(ProgressState {
         status: t!("progress-downloading-metadata"),

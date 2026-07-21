@@ -30,12 +30,8 @@ fn get_changelog() -> Vec<Change> {
         Change {
             version: "v0.3.7",
             date: "2026-07",
-            items_en: vec![
-                "Catppuccin Mocha theme — new color palette across the entire UI",
-            ],
-            items_fa: vec![
-                "تم Catppuccin Mocha — پالت رنگی جدید در سراسر رابط کاربری",
-            ],
+            items_en: vec!["Catppuccin Mocha theme — new color palette across the entire UI"],
+            items_fa: vec!["تم Catppuccin Mocha — پالت رنگی جدید در سراسر رابط کاربری"],
         },
         Change {
             version: "v0.3.6",

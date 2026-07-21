@@ -152,7 +152,15 @@ impl DataStore {
     pub fn get_meta(
         &self,
         id: &str,
-    ) -> Option<(u32, u64, DataType, Option<String>, Option<String>, u32, bool)> {
+    ) -> Option<(
+        u32,
+        u64,
+        DataType,
+        Option<String>,
+        Option<String>,
+        u32,
+        bool,
+    )> {
         match self.db.get(format!("meta:{}", id)) {
             Ok(Some(value)) => decode(&value).ok(),
             Ok(None) => None,
@@ -166,9 +174,24 @@ impl DataStore {
             .db
             .update_and_fetch(key.as_bytes(), |value| {
                 let value = value.as_ref()?;
-                let (try_count, expiration, data_type, filename, content_type, total_chunks, allow_download) =
-                    decode::<(u32, u64, DataType, Option<String>, Option<String>, u32, bool)>(value)
-                        .ok()?;
+                let (
+                    try_count,
+                    expiration,
+                    data_type,
+                    filename,
+                    content_type,
+                    total_chunks,
+                    allow_download,
+                ) = decode::<(
+                    u32,
+                    u64,
+                    DataType,
+                    Option<String>,
+                    Option<String>,
+                    u32,
+                    bool,
+                )>(value)
+                .ok()?;
                 if try_count == 0 {
                     return None;
                 }
@@ -187,8 +210,15 @@ impl DataStore {
             .ok()
             .flatten();
         if let Some(meta) = result {
-            if let Ok((0, _, _, _, _, _, _)) =
-                decode::<(u32, u64, DataType, Option<String>, Option<String>, u32, bool)>(&meta)
+            if let Ok((0, _, _, _, _, _, _)) = decode::<(
+                u32,
+                u64,
+                DataType,
+                Option<String>,
+                Option<String>,
+                u32,
+                bool,
+            )>(&meta)
             {
                 self.delete_paste(id);
             }
@@ -211,9 +241,15 @@ impl DataStore {
 
         for item in self.db.scan_prefix(b"meta:") {
             let Ok((key, value)) = item else { continue };
-            let Ok((_, expiration_timestamp, _, _, _, _, _)) =
-                decode::<(u32, u64, DataType, Option<String>, Option<String>, u32, bool)>(&value)
-            else {
+            let Ok((_, expiration_timestamp, _, _, _, _, _)) = decode::<(
+                u32,
+                u64,
+                DataType,
+                Option<String>,
+                Option<String>,
+                u32,
+                bool,
+            )>(&value) else {
                 continue;
             };
             if expiration_timestamp > 0
@@ -235,9 +271,15 @@ impl DataStore {
             let Ok(id_str) = std::str::from_utf8(&key[5..]) else {
                 continue;
             };
-            let Ok((_, _, data_type, filename, _, _, _)) =
-                decode::<(u32, u64, DataType, Option<String>, Option<String>, u32, bool)>(&value)
-            else {
+            let Ok((_, _, data_type, filename, _, _, _)) = decode::<(
+                u32,
+                u64,
+                DataType,
+                Option<String>,
+                Option<String>,
+                u32,
+                bool,
+            )>(&value) else {
                 continue;
             };
             let size = std::fs::metadata(content_path(&self.files_dir, id_str))
@@ -270,9 +312,15 @@ impl DataStore {
     pub fn id_available(&self, id: &str) -> bool {
         match self.db.get(format!("meta:{}", id)) {
             Ok(Some(value)) => {
-            let Ok((_, expiration_timestamp, _, _, _, _, _)) =
-                    decode::<(u32, u64, DataType, Option<String>, Option<String>, u32, bool)>(&value)
-                else {
+                let Ok((_, expiration_timestamp, _, _, _, _, _)) = decode::<(
+                    u32,
+                    u64,
+                    DataType,
+                    Option<String>,
+                    Option<String>,
+                    u32,
+                    bool,
+                )>(&value) else {
                     return true;
                 };
                 expiration_timestamp > 0 && epoch_secs() > expiration_timestamp
