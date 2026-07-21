@@ -58,6 +58,7 @@ jobs:
           fi
 
       - name: Verify artifact exists
+        shell: bash
         run: ls -la ${{ env.BIN_NAME }}-${{ matrix.target }}.zip
 
       - name: Upload artifact
