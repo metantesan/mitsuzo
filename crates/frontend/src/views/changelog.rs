@@ -14,6 +14,16 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.3.7",
+            date: "2026-07",
+            items_en: vec![
+                "Catppuccin Mocha theme — new color palette across the entire UI",
+            ],
+            items_fa: vec![
+                "تم Catppuccin Mocha — پالت رنگی جدید در سراسر رابط کاربری",
+            ],
+        },
+        Change {
             version: "v0.3.6",
             date: "2026-07",
             items_en: vec![
@@ -121,7 +131,7 @@ pub fn changelog_view() -> Element {
         div {
             class: "container mx-auto p-4 max-w-3xl",
             h1 {
-                class: "text-3xl font-bold text-white mb-8 text-center",
+                class: "text-3xl font-bold text-text mb-8 text-center",
                 {t!("changelog-title")}
             }
             {changelog.into_iter().map(|entry| {
@@ -130,9 +140,9 @@ pub fn changelog_view() -> Element {
                 let date = entry.date.to_string();
                 let items = if is_fa { entry.items_fa.clone() } else { entry.items_en.clone() };
                 let card_class = if is_current {
-                    "mb-6 p-5 bg-gray-800 rounded-lg ring-2 ring-blue-500".to_string()
+                    "mb-6 p-5 bg-surface0 rounded-lg ring-2 ring-blue".to_string()
                 } else {
-                    "mb-6 p-5 bg-gray-800 rounded-lg".to_string()
+                    "mb-6 p-5 bg-surface0 rounded-lg".to_string()
                 };
                 rsx! {
                     div {
@@ -140,22 +150,22 @@ pub fn changelog_view() -> Element {
                         div {
                             class: "flex items-center justify-between mb-3",
                             h2 {
-                                class: "text-xl font-bold text-white",
+                                class: "text-xl font-bold text-text",
                                 "{version}"
                             }
                             span {
-                                class: "text-sm text-gray-400",
+                                class: "text-sm text-overlay0",
                                 "{date}"
                             }
                         }
                         if is_current {
                             span {
-                                class: "inline-block mb-3 px-2 py-0.5 text-xs font-semibold bg-blue-600 text-white rounded",
+                                class: "inline-block mb-3 px-2 py-0.5 text-xs font-semibold bg-blue text-text rounded",
                                 {t!("changelog-current")}
                             }
                         }
                         ul {
-                            class: "list-disc list-inside text-gray-300 space-y-1",
+                            class: "list-disc list-inside text-subtext0 space-y-1",
                             for item in items {
                                 li { "{item}" }
                             }

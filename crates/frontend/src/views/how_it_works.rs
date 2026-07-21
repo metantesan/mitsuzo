@@ -8,24 +8,24 @@ pub fn how_it_works_view() -> Element {
 
     rsx! {
         div {
-            class: "container mx-auto p-4 text-white max-w-4xl",
+            class: "container mx-auto p-4 text-text max-w-4xl",
             h1 {
                 class: "text-4xl font-extrabold mb-8 text-center",
                 {t!("how-it-works")}
             }
 
             section {
-                class: "mb-8 p-6 bg-gray-800 rounded-lg",
+                class: "mb-8 p-6 bg-surface0 rounded-lg",
                 h2 {
-                    class: "text-2xl font-bold mb-4 text-blue-400",
+                    class: "text-2xl font-bold mb-4 text-blue",
                     {t!("e2e-encryption")}
                 }
                 p {
-                    class: "text-gray-300 mb-4",
+                    class: "text-subtext0 mb-4",
                     {t!("e2e-desc")}
                 }
                 ul {
-                    class: "list-disc list-inside text-gray-300 space-y-2",
+                    class: "list-disc list-inside text-subtext0 space-y-2",
                     li { code { "Argon2id(password, salt)" } " → 32-byte master key (19456 KiB memory, 2 iterations)" }
                     li { code { "HKDF-SHA256(master, \"mitsuzo-encryption-key\")" } " → 32-byte encryption key" }
                     li { code { "HKDF-SHA256(master, \"mitsuzo-validation-key\")" } " → 32-byte validation key" }
@@ -37,17 +37,17 @@ pub fn how_it_works_view() -> Element {
             }
 
             section {
-                class: "mb-8 p-6 bg-gray-800 rounded-lg",
+                class: "mb-8 p-6 bg-surface0 rounded-lg",
                 h2 {
-                    class: "text-2xl font-bold mb-4 text-blue-400",
+                    class: "text-2xl font-bold mb-4 text-blue",
                     {t!("zk-validation")}
                 }
                 p {
-                    class: "text-gray-300 mb-4",
+                    class: "text-subtext0 mb-4",
                     {t!("zk-desc")}
                 }
                 ol {
-                    class: "list-decimal list-inside text-gray-300 space-y-2 mb-4",
+                    class: "list-decimal list-inside text-subtext0 space-y-2 mb-4",
                     li { {t!("zk-step1")} }
                     li { {t!("zk-step2")} }
                     li { {t!("zk-step3")} }
@@ -55,15 +55,15 @@ pub fn how_it_works_view() -> Element {
                     li { {t!("zk-step5")} }
                 }
                 p {
-                    class: "text-gray-400 text-sm italic",
+                    class: "text-overlay0 text-sm italic",
                     {t!("zk-note")}
                 }
             }
 
             section {
-                class: "mb-8 p-6 bg-gray-800 rounded-lg",
+                class: "mb-8 p-6 bg-surface0 rounded-lg",
                 h2 {
-                    class: "text-2xl font-bold mb-4 text-blue-400",
+                    class: "text-2xl font-bold mb-4 text-blue",
                     {t!("workflow-diagram")}
                 }
                 div {
@@ -73,17 +73,17 @@ pub fn how_it_works_view() -> Element {
             }
 
             section {
-                class: "mb-8 p-6 bg-gray-800 rounded-lg",
+                class: "mb-8 p-6 bg-surface0 rounded-lg",
                 h2 {
-                    class: "text-2xl font-bold mb-4 text-blue-400",
+                    class: "text-2xl font-bold mb-4 text-blue",
                     {t!("self-destructing")}
                 }
                 p {
-                    class: "text-gray-300 mb-4",
+                    class: "text-subtext0 mb-4",
                     {t!("self-destruct-desc")}
                 }
                 ul {
-                    class: "list-disc list-inside text-gray-300 space-y-2",
+                    class: "list-disc list-inside text-subtext0 space-y-2",
                     li { {t!("sd-item1")} }
                     li { {t!("sd-item2")} }
                     li { {t!("sd-item3")} }
@@ -92,17 +92,17 @@ pub fn how_it_works_view() -> Element {
             }
 
             section {
-                class: "mb-8 p-6 bg-gray-800 rounded-lg",
+                class: "mb-8 p-6 bg-surface0 rounded-lg",
                 h2 {
-                    class: "text-2xl font-bold mb-4 text-blue-400",
+                    class: "text-2xl font-bold mb-4 text-blue",
                     {t!("proof-safety")}
                 }
                 p {
-                    class: "text-gray-300 mb-4",
+                    class: "text-subtext0 mb-4",
                     {t!("proof-safety-desc")}
                 }
                 ul {
-                    class: "list-disc list-inside text-gray-300 space-y-2",
+                    class: "list-disc list-inside text-subtext0 space-y-2",
                     li { {t!("ps-item1")} }
                     li { {t!("ps-item2")} }
                     li { {t!("ps-item3")} }
@@ -111,42 +111,42 @@ pub fn how_it_works_view() -> Element {
             }
 
             section {
-                class: "mb-8 p-6 bg-gray-800 rounded-lg",
+                class: "mb-8 p-6 bg-surface0 rounded-lg",
                 h2 {
-                    class: "text-2xl font-bold mb-4 text-blue-400",
+                    class: "text-2xl font-bold mb-4 text-blue",
                     {t!("cli-usage")}
                 }
                 p {
-                    class: "text-gray-300 mb-4",
+                    class: "text-subtext0 mb-4",
                     {t!("cli-desc")}
                 }
                 div {
-                    class: "bg-gray-900 rounded p-4 font-mono text-sm text-green-400 space-y-1",
+                    class: "bg-base rounded p-4 font-mono text-sm text-green space-y-1",
                     p { {t!("cli-create")} }
                     p { {t!("cli-get")} }
                 }
                 p {
-                    class: "text-gray-400 text-sm mt-2",
+                    class: "text-overlay0 text-sm mt-2",
                     a {
                         href: "https://github.com/metantesan/mitsuzo/releases",
-                        class: "text-blue-400 hover:underline",
+                        class: "text-blue hover:underline",
                         "Download pre-built binaries on GitHub"
                     }
                 }
             }
 
             section {
-                class: "p-6 bg-gray-800 rounded-lg",
+                class: "p-6 bg-surface0 rounded-lg",
                 h2 {
-                    class: "text-2xl font-bold mb-4 text-blue-400",
+                    class: "text-2xl font-bold mb-4 text-blue",
                     {t!("stats-title-section")}
                 }
                 p {
-                    class: "text-gray-300 mb-4",
+                    class: "text-subtext0 mb-4",
                     {t!("stats-desc-section")}
                 }
                 ul {
-                    class: "list-disc list-inside text-gray-300 space-y-2",
+                    class: "list-disc list-inside text-subtext0 space-y-2",
                     li { "Total pastes created (all-time / daily)" }
                     li { "Total successful decryptions (all-time / daily)" }
                     li { "Total failed password attempts (all-time / daily)" }

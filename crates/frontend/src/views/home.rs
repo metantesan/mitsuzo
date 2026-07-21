@@ -324,21 +324,21 @@ pub fn home_view() -> Element {
         div {
             class: "container mx-auto p-4 flex flex-col items-center justify-center min-h-screen",
             h1 {
-                class: "text-4xl font-extrabold text-white mb-8",
+                class: "text-4xl font-extrabold text-text mb-8",
                 {t!("app-title")}
             }
 
             if let Some(prog) = progress.read().as_ref() {
                 div {
-                    class: "w-full max-w-xl mb-4 p-4 bg-gray-800 rounded-lg",
+                    class: "w-full max-w-xl mb-4 p-4 bg-surface0 rounded-lg",
                     div {
-                        class: "text-sm font-semibold mb-2 text-white text-center",
+                        class: "text-sm font-semibold mb-2 text-text text-center",
                         "{prog.status}"
                     }
                     div {
-                        class: "w-full bg-gray-700 rounded-full h-3",
+                        class: "w-full bg-surface0 rounded-full h-3",
                         div {
-                            class: "bg-blue-500 h-3 rounded-full transition-all duration-150",
+                            class: "bg-blue h-3 rounded-full transition-all duration-150",
                             style: "width: {prog.progress}%"
                         }
                     }
@@ -347,14 +347,14 @@ pub fn home_view() -> Element {
 
             if let Some(name) = file_name.read().as_ref() {
                 div {
-                    class: "w-full max-w-xl p-4 mb-4 bg-gray-700 text-white rounded-lg flex justify-between items-center",
+                    class: "w-full max-w-xl p-4 mb-4 bg-surface0 text-text rounded-lg flex justify-between items-center",
                     span { "{name}" }
                     span {
-                        class: "text-gray-400 text-sm ml-2",
+                        class: "text-overlay0 text-sm ml-2",
                         "{file_size_text()}"
                     }
                     button {
-                        class: "text-red-500 hover:text-red-700",
+                        class: "text-red hover:text-maroon",
                         onclick: move |_| {
                             file_name.set(None);
                             file_data.set(None);
@@ -366,7 +366,7 @@ pub fn home_view() -> Element {
                 }
             } else {
                 textarea {
-                    class: "w-full max-w-xl p-4 mb-4 bg-gray-800 text-white rounded-lg border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500",
+                    class: "w-full max-w-xl p-4 mb-4 bg-surface0 text-text rounded-lg border border-surface0 focus:outline-none focus:ring-2 focus:ring-blue",
                     rows: "10",
                     oninput: move |evt| content.set(evt.value()),
                     placeholder: "{t!(\"home-placeholder\")}",
@@ -377,7 +377,7 @@ pub fn home_view() -> Element {
             div {
                 class: "w-full max-w-xl mb-4",
                 label {
-                    class: "block text-gray-400 text-sm font-bold mb-2",
+                    class: "block text-overlay0 text-sm font-bold mb-2",
                     "for": "file-upload",
                     {t!("or-upload-file")}
                 }
@@ -405,7 +405,7 @@ pub fn home_view() -> Element {
                         }
                     }
                     label {
-                        class: "w-full p-4 bg-gray-800 text-gray-400 rounded-lg border border-gray-700 border-dashed cursor-pointer block text-center",
+                        class: "w-full p-4 bg-surface0 text-overlay0 rounded-lg border border-surface0 border-dashed cursor-pointer block text-center",
                         "for": "file-upload",
                         {t!("choose-file")}
                     }
@@ -413,14 +413,15 @@ pub fn home_view() -> Element {
             }
 
             input {
-                class: "w-full max-w-xl p-4 bg-gray-800 text-white rounded-lg border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500",
+                class: "w-full max-w-xl p-4 bg-surface0 text-text rounded-lg border border-surface0 focus:outline-none focus:ring-2 focus:ring-blue",
                 r#type: "password",
                 placeholder: "{t!(\"password-placeholder\")}",
+                autocomplete: "new-password",
                 oninput: move |evt| password_input.set(evt.value()),
                 value: "{password_input}",
             }
             p {
-                class: "w-full max-w-xl text-xs text-gray-500 mb-4 text-right",
+                class: "w-full max-w-xl text-xs text-overlay0 mb-4 text-right",
                 {t!("password-auto-gen-hint")}
             }
             div {
@@ -428,11 +429,11 @@ pub fn home_view() -> Element {
                 div {
                     class: "w-1/2",
                     label {
-                        class: "block text-gray-400 text-sm font-bold mb-2",
+                        class: "block text-overlay0 text-sm font-bold mb-2",
                         {t!("try-count-label")}
                     }
                     input {
-                        class: "w-full p-4 bg-gray-800 text-white rounded-lg border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500",
+                        class: "w-full p-4 bg-surface0 text-text rounded-lg border border-surface0 focus:outline-none focus:ring-2 focus:ring-blue",
                         r#type: "number",
                         oninput: move |evt| try_count_input.set(evt.value()),
                         value: "{try_count_input}",
@@ -441,11 +442,11 @@ pub fn home_view() -> Element {
                 div {
                     class: "w-1/2",
                     label {
-                        class: "block text-gray-400 text-sm font-bold mb-2",
+                        class: "block text-overlay0 text-sm font-bold mb-2",
                         {t!("ttl-label")}
                     }
                     input {
-                        class: "w-full p-4 bg-gray-800 text-white rounded-lg border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500",
+                        class: "w-full p-4 bg-surface0 text-text rounded-lg border border-surface0 focus:outline-none focus:ring-2 focus:ring-blue",
                         r#type: "number",
                         oninput: move |evt| ttl_seconds_input.set(evt.value()),
                         value: "{ttl_seconds_input}",
@@ -454,7 +455,7 @@ pub fn home_view() -> Element {
                 }
             }
             button {
-                class: "px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2",
+                class: "px-6 py-3 bg-blue text-crust font-semibold rounded-lg shadow-md hover:bg-sapphire focus:outline-none focus:ring-2 focus:ring-blue focus:ring-offset-2",
                 onclick: create_paste,
                 {t!("create-paste")}
             }
@@ -472,13 +473,13 @@ pub fn home_view() -> Element {
                 });
                 rsx!{
                     div {
-                        class: "mt-4 p-4 bg-green-600 text-white rounded-lg shadow-md",
+                        class: "mt-4 p-4 bg-green text-text rounded-lg shadow-md",
                         p { class: "font-bold text-lg", {{t!("paste-created")}} }
                         div {
                             class: "mt-2",
-                            p { class: "text-sm text-green-200", "Full Link:" }
+                            p { class: "text-sm text-subtext1", "Full Link:" }
                             input {
-                                class: "w-full p-2 mt-1 bg-green-700 text-white rounded text-sm font-mono",
+                                class: "w-full p-2 mt-1 bg-teal text-text rounded text-sm font-mono",
                                 value: "{paste_url}",
                                 readonly: "true",
                                 onclick: move |_| {},
@@ -487,25 +488,25 @@ pub fn home_view() -> Element {
                         div {
                             class: "mt-3 grid grid-cols-2 gap-2",
                             div {
-                                p { class: "text-sm text-green-200", "Paste ID:" }
+                                p { class: "text-sm text-subtext1", "Paste ID:" }
                                 input {
-                                    class: "w-full p-2 mt-1 bg-green-700 text-white rounded text-sm font-mono",
+                                    class: "w-full p-2 mt-1 bg-teal text-text rounded text-sm font-mono",
                                     value: "{id}",
                                     readonly: "true",
                                 }
                             }
                             if is_auto {
                                 div {
-                                    p { class: "text-sm text-green-200", "Passcode:" }
+                                    p { class: "text-sm text-subtext1", "Passcode:" }
                                     input {
-                                        class: "w-full p-2 mt-1 bg-green-700 text-white rounded text-sm font-mono",
+                                        class: "w-full p-2 mt-1 bg-teal text-text rounded text-sm font-mono",
                                         value: "{password}",
                                         readonly: "true",
                                     }
                                 }
                             }
                         }
-                        p { class: "mt-2 text-xs text-green-200", {{t!("remember-password")}} }
+                        p { class: "mt-2 text-xs text-subtext1", {{t!("remember-password")}} }
                     }
                 }
             })}
@@ -513,72 +514,72 @@ pub fn home_view() -> Element {
             div {
                 class: "mt-8 w-full max-w-xl",
                 h2 {
-                    class: "text-2xl font-bold text-white mb-4",
+                    class: "text-2xl font-bold text-text mb-4",
                     {t!("view-existing-paste")}
                 }
                 input {
-                    class: "w-full p-4 mb-4 bg-gray-800 text-white rounded-lg border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500",
+                    class: "w-full p-4 mb-4 bg-surface0 text-text rounded-lg border border-surface0 focus:outline-none focus:ring-2 focus:ring-blue",
                     r#type: "text",
                     placeholder: "{t!(\"enter-paste-id\")}",
                     oninput: move |evt| bin_id_input.set(sanitize_id(&evt.value())),
                     value: "{bin_id_input}",
                 }
                 button {
-                    class: "px-6 py-3 bg-purple-600 text-white font-semibold rounded-lg shadow-md hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2",
+                    class: "px-6 py-3 bg-mauve text-crust font-semibold rounded-lg shadow-md hover:bg-mauve/80 focus:outline-none focus:ring-2 focus:ring-mauve focus:ring-offset-2",
                     onclick: go_to_paste,
                     {t!("view-paste")}
                 }
             }
 
             div {
-                class: "mt-8 w-full max-w-xl p-6 bg-gray-800 rounded-lg",
+                class: "mt-8 w-full max-w-xl p-6 bg-surface0 rounded-lg",
                 h2 {
-                    class: "text-xl font-bold text-white mb-4 text-center",
+                    class: "text-xl font-bold text-text mb-4 text-center",
                     {t!("stats-title")}
                 }
                 p {
-                    class: "text-xs text-gray-500 text-center mb-4",
+                    class: "text-xs text-overlay0 text-center mb-4",
                     {t!("stats-description")}
                 }
                 h3 {
-                    class: "text-sm font-semibold text-white text-center",
+                    class: "text-sm font-semibold text-text text-center",
                     {t!("all-time")}
                 }
                 div {
                     class: "grid grid-cols-3 gap-4 text-center",
                     div {
-                        p { class: "text-2xl font-bold text-white", "{format_count(stats.read().as_ref().map(|s| s.pastes_all_time).unwrap_or(0))}" }
-                        p { class: "text-sm text-gray-400", {t!("created")} }
+                        p { class: "text-2xl font-bold text-text", "{format_count(stats.read().as_ref().map(|s| s.pastes_all_time).unwrap_or(0))}" }
+                        p { class: "text-sm text-overlay0", {t!("created")} }
                     }
                     div {
-                        p { class: "text-2xl font-bold text-green-400", "{format_count(stats.read().as_ref().map(|s| s.requests_success_all_time).unwrap_or(0))}" }
-                        p { class: "text-sm text-gray-400", {t!("decrypted")} }
+                        p { class: "text-2xl font-bold text-green", "{format_count(stats.read().as_ref().map(|s| s.requests_success_all_time).unwrap_or(0))}" }
+                        p { class: "text-sm text-overlay0", {t!("decrypted")} }
                     }
                     div {
-                        p { class: "text-2xl font-bold text-red-400", "{format_count(stats.read().as_ref().map(|s| s.requests_fail_all_time).unwrap_or(0))}" }
-                        p { class: "text-sm text-gray-400", {t!("wrong-password")} }
+                        p { class: "text-2xl font-bold text-red", "{format_count(stats.read().as_ref().map(|s| s.requests_fail_all_time).unwrap_or(0))}" }
+                        p { class: "text-sm text-overlay0", {t!("wrong-password")} }
                     }
                 }
                 div {
-                    class: "border-t border-gray-700 my-4"
+                    class: "border-t border-surface0 my-4"
                 }
                 h3 {
-                    class: "text-sm font-semibold text-gray-400 text-center mb-2",
+                    class: "text-sm font-semibold text-overlay0 text-center mb-2",
                     {t!("today")}
                 }
                 div {
                     class: "grid grid-cols-3 gap-4 text-center",
                     div {
-                        p { class: "text-2xl font-bold text-white", "{format_count(stats.read().as_ref().map(|s| s.pastes_daily).unwrap_or(0))}" }
-                        p { class: "text-sm text-gray-400", {t!("created")} }
+                        p { class: "text-2xl font-bold text-text", "{format_count(stats.read().as_ref().map(|s| s.pastes_daily).unwrap_or(0))}" }
+                        p { class: "text-sm text-overlay0", {t!("created")} }
                     }
                     div {
-                        p { class: "text-2xl font-bold text-green-400", "{format_count(stats.read().as_ref().map(|s| s.requests_success_daily).unwrap_or(0))}" }
-                        p { class: "text-sm text-gray-400", {t!("decrypted")} }
+                        p { class: "text-2xl font-bold text-green", "{format_count(stats.read().as_ref().map(|s| s.requests_success_daily).unwrap_or(0))}" }
+                        p { class: "text-sm text-overlay0", {t!("decrypted")} }
                     }
                     div {
-                        p { class: "text-2xl font-bold text-red-400", "{format_count(stats.read().as_ref().map(|s| s.requests_fail_daily).unwrap_or(0))}" }
-                        p { class: "text-sm text-gray-400", {t!("wrong-password")} }
+                        p { class: "text-2xl font-bold text-red", "{format_count(stats.read().as_ref().map(|s| s.requests_fail_daily).unwrap_or(0))}" }
+                        p { class: "text-sm text-overlay0", {t!("wrong-password")} }
                     }
                 }
             }
