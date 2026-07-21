@@ -105,11 +105,11 @@ pub fn Navbar() -> Element {
             }
             if menu_open() {
                 div {
-                    class: "fixed inset-0 bg-bg/60 z-40",
+                    class: "fixed inset-0 bg-bg/80 z-40",
                     onclick: move |_| menu_open.set(false),
                 }
                 div {
-                    class: "fixed top-0 right-0 w-64 h-full bg-surface border-l border-border z-50 p-6 flex flex-col gap-4 shadow-2xl animate-slide-up",
+                    class: "fixed top-0 right-0 w-64 h-full bg-elevated border-l border-border z-50 p-6 flex flex-col gap-4 shadow-2xl animate-slide-up",
                     div {
                         class: "flex items-center justify-between mb-2",
                         span {

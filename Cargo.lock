@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "axum",
  "base64",
@@ -478,7 +478,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "cli"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64",
  "bitcode",
@@ -2555,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuzo-frontend"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64",
  "bitcode",
@@ -2581,7 +2581,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuzo-types"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bitcode",
  "serde",
@@ -2589,7 +2589,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuzo-utils"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "argon2",
  "getrandom 0.4.3",
