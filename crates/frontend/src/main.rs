@@ -16,7 +16,7 @@ pub const BASE_URL: &str = match option_env!("BASE_URL") {
     None => "http://localhost:3030",
 };
 
-#[derive(Routable, Clone)]
+#[derive(Routable, Clone, PartialEq)]
 #[rustfmt::skip]
 enum Route {
     #[layout(app_layout)]

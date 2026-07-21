@@ -14,6 +14,32 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.4.0",
+            date: "2026-07",
+            items_en: vec![
+                "Complete visual overhaul — \"Warm Vault\" dark theme with amber accent palette",
+                "Custom scrollbar, text selection, and focus ring styling across the entire UI",
+                "Typography: Karla (UI) + JetBrains Mono (code) via Google Fonts",
+                "Sticky navbar with backdrop blur, active page indicator underline, hover transitions",
+                "Redesigned cards, inputs, buttons with consistent border and transition system",
+                "All E2E encryption list items now properly use i18n translations (EN/FA)",
+                "Fixed Persian translations: self-destruct description now says تلاش instead of بازدید",
+                "Animated page transitions (fade-in) and slide-in popup notifications",
+                "Navbar active route highlighting with animated underline indicator",
+            ],
+            items_fa: vec![
+                "بازطراحی کامل ظاهری — تم تیره «Warm Vault» با پالت کهربایی",
+                "استایل اختصاصی اسکرول‌بار، انتخاب متن، و حلقه فوکوس در سراسر رابط کاربری",
+                "تایپوگرافی: Karla (رابط کاربری) + JetBrains Mono (کد) از Google Fonts",
+                "نوار ناوبری چسبنده با افکت محو، نشانگر صفحه فعال، transition هاور",
+                "بازطراحی کارت‌ها، ورودی‌ها، دکمه‌ها با سیستم حاشیه و transition یکپارچه",
+                "تمام آیتم‌های لیست رمزگذاری E2E اکنون از ترجمه i18n استفاده می‌کنند",
+                "رفع ترجمه فارسی توضیحات خودمخرب — تغییر «بازدید» به «تلاش»",
+                "انیمیشن انتقال صفحه (fade-in) و اعلان پاپ‌آپ با slide-in",
+                "نشانگر مسیر فعال در ناوبری با خط زیر متحرک",
+            ],
+        },
+        Change {
             version: "v0.3.8",
             date: "2026-07",
             items_en: vec![
@@ -150,9 +176,9 @@ pub fn changelog_view() -> Element {
                 let date = entry.date.to_string();
                 let items = if is_fa { entry.items_fa.clone() } else { entry.items_en.clone() };
                 let card_class = if is_current {
-                    "mb-6 p-5 bg-surface0 rounded-lg ring-2 ring-blue".to_string()
+                    "mb-6 p-5 bg-surface rounded-lg ring-2 ring-accent".to_string()
                 } else {
-                    "mb-6 p-5 bg-surface0 rounded-lg".to_string()
+                    "mb-6 p-5 bg-surface rounded-lg".to_string()
                 };
                 rsx! {
                     div {
@@ -164,18 +190,18 @@ pub fn changelog_view() -> Element {
                                 "{version}"
                             }
                             span {
-                                class: "text-sm text-overlay0",
+                                class: "text-sm text-muted",
                                 "{date}"
                             }
                         }
                         if is_current {
                             span {
-                                class: "inline-block mb-3 px-2 py-0.5 text-xs font-semibold bg-blue text-text rounded",
+                                class: "inline-block mb-3 px-2 py-0.5 text-xs font-semibold bg-accent text-bg rounded",
                                 {t!("changelog-current")}
                             }
                         }
                         ul {
-                            class: "list-disc list-inside text-subtext0 space-y-1",
+                            class: "list-disc list-inside text-text-secondary space-y-1",
                             for item in items {
                                 li { "{item}" }
                             }

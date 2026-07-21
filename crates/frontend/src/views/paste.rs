@@ -92,16 +92,16 @@ pub fn paste_view(id: String) -> Element {
 
     rsx! {
         div {
-            class: "container mx-auto p-4",
+            class: "max-w-2xl mx-auto px-4 py-8",
             h1 {
-                class: "text-3xl font-bold text-center mb-6",
+                class: "text-3xl font-bold text-center mb-8 tracking-tight",
                 {t!("paste-view-title")}
             }
 
             div {
                 class: "mb-4",
                 input {
-                    class: "w-full p-4 mb-2 bg-surface0 text-text rounded-lg border border-surface0 focus:outline-none focus:ring-2 focus:ring-blue",
+                    class: "w-full p-4 mb-2 bg-surface text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
                     r#type: "password",
                     placeholder: "{t!(\"decrypt-password-placeholder\")}",
                     autocomplete: "new-password",
@@ -109,7 +109,7 @@ pub fn paste_view(id: String) -> Element {
                     value: "{password_input}",
                 }
                 button {
-                    class: "px-6 py-3 bg-blue text-crust font-semibold rounded-lg shadow-md hover:bg-sapphire focus:outline-none focus:ring-2 focus:ring-blue focus:ring-offset-2",
+                    class: "px-6 py-3 bg-accent text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200",
                     onclick: fetch_and_decrypt,
                     {t!("decrypt-paste")}
                 }
@@ -117,15 +117,15 @@ pub fn paste_view(id: String) -> Element {
 
             if let Some(prog) = progress.read().as_ref() {
                 div {
-                    class: "w-full max-w-md mx-auto mb-4 p-4 bg-surface0 rounded-lg",
+                    class: "w-full max-w-md mx-auto mb-4 p-4 bg-surface rounded-lg",
                     div {
                         class: "text-sm font-semibold mb-2 text-text text-center",
                         "{prog.status}"
                     }
                     div {
-                        class: "w-full bg-surface0 rounded-full h-3",
+                        class: "w-full bg-surface rounded-full h-3",
                         div {
-                            class: "bg-blue h-3 rounded-full transition-all duration-150",
+                            class: "bg-accent h-3 rounded-full transition-all duration-150",
                             style: "width: {prog.progress}%"
                         }
                     }
@@ -133,7 +133,7 @@ pub fn paste_view(id: String) -> Element {
             }
 
             div {
-                class: "text-center text-overlay0 my-4",
+                class: "text-center text-muted my-4",
                 match *try_count.read() {
                     Some(count) if count > 0 => rsx! { p { {t!("tries-left", count: count)} } },
                     _ => rsx! { Fragment {} },
@@ -151,13 +151,13 @@ pub fn paste_view(id: String) -> Element {
                         match data_type {
                             DataType::Text => rsx! {
                                 div {
-                                    class: "bg-surface0 p-6 rounded-lg shadow-lg",
+                                    class: "bg-surface p-6 rounded-lg shadow-lg",
                                     h2 {
                                         class: "text-xl font-semibold mb-4",
                                         {t!("paste-id", id: id)}
                                     }
                                     pre {
-                                        class: "bg-base p-4 rounded-md text-left whitespace-pre-wrap break-words overflow-auto text-subtext1",
+                                        class: "bg-bg p-4 rounded-md text-left whitespace-pre-wrap break-words overflow-auto text-text-secondary",
                                         {String::from_utf8_lossy(bytes).to_string()}
                                     }
                                 }
@@ -170,7 +170,7 @@ pub fn paste_view(id: String) -> Element {
                                     let preview_bytes = bytes.to_vec();
                                     rsx! {
                                         div {
-                                            class: "bg-surface0 p-6 rounded-lg shadow-lg text-center",
+                                            class: "bg-surface p-6 rounded-lg shadow-lg text-center",
                                             h2 {
                                                 class: "text-xl font-semibold mb-4",
                                                 {t!("file-preview")}
@@ -220,7 +220,7 @@ pub fn paste_view(id: String) -> Element {
                                                     } else {
                                                         rsx!{
                                                             pre {
-                                                                class: "bg-base p-4 rounded-md text-left whitespace-pre-wrap break-words overflow-auto text-subtext1",
+                                                                class: "bg-bg p-4 rounded-md text-left whitespace-pre-wrap break-words overflow-auto text-text-secondary",
                                                                 {String::from_utf8_lossy(bytes).to_string()}
                                                             }
                                                         }
@@ -229,7 +229,7 @@ pub fn paste_view(id: String) -> Element {
                                             }
                                             if *allow_download {
                                                 button {
-                                                    class: "px-6 py-3 bg-green text-crust font-semibold rounded-lg shadow-md hover:bg-teal focus:outline-none focus:ring-2 focus:ring-green focus:ring-offset-2",
+                                                    class: "px-6 py-3 bg-success text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200",
                                                     onclick: move |_| {
                                                         match download_file(preview_bytes.clone(), owned_filename.clone().unwrap_or(owned_id.clone()), owned_content_type.clone()) {
                                                             Ok(_) => {}
@@ -247,18 +247,18 @@ pub fn paste_view(id: String) -> Element {
                                     let dl_bytes = bytes.to_vec();
                                     rsx! {
                                         div {
-                                            class: "bg-surface0 p-6 rounded-lg shadow-lg text-center",
+                                            class: "bg-surface p-6 rounded-lg shadow-lg text-center",
                                             h2 {
                                                 class: "text-xl font-semibold mb-4",
                                                 {t!("file-ready-download")}
                                             }
                                             p {
-                                                class: "mb-4 text-overlay0",
+                                                class: "mb-4 text-muted",
                                                 {t!("paste-id", id: id)}
                                             }
                                             if *allow_download {
                                                 button {
-                                                    class: "px-6 py-3 bg-green text-crust font-semibold rounded-lg shadow-md hover:bg-teal focus:outline-none focus:ring-2 focus:ring-green focus:ring-offset-2",
+                                                    class: "px-6 py-3 bg-success text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200",
                                                     onclick: move |_| {
                                                         match download_file(dl_bytes.clone(), owned_filename.clone().unwrap_or(owned_id.clone()), owned_content_type.clone()) {
                                                             Ok(_) => {}
@@ -278,7 +278,7 @@ pub fn paste_view(id: String) -> Element {
                     },
                     None => rsx! {
                         div {
-                            class: "text-center text-overlay0",
+                            class: "text-center text-muted",
                             {t!("enter-password-desc")}
                         }
                     }
