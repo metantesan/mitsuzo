@@ -130,3 +130,4 @@ cli-download-link = Download pre-built binaries on GitHub
 footer-created = Created by
 footer-author = hikari
 footer-github = GitHub
+footer-tagline = Built for one. Available to anyone who needs it.

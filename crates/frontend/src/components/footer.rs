@@ -11,7 +11,7 @@ pub fn Footer() -> Element {
     rsx! {
         footer {
             class: "bg-surface p-4 text-text-secondary text-sm text-center mt-auto border-t border-border",
-            "{APP_VERSION} · {t!(\"footer-created\")} ",
+            "{t!(\"footer-tagline\")} · {APP_VERSION} · {t!(\"footer-created\")} ",
             a {
                 href: "https://metantesan.com",
                 class: "text-accent hover:text-accent-hover transition-colors",
