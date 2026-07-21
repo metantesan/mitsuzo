@@ -35,10 +35,16 @@ pub fn Navbar() -> Element {
 
     let en_active = current_lang == langid!("en-US");
     let fa_active = current_lang == langid!("fa-IR");
+    let is_rtl = fa_active;
+    let menu_panel_cls = if is_rtl {
+        "fixed top-0 left-0 w-64 h-full bg-elevated border-r border-border z-50 p-6 flex flex-col gap-4 shadow-2xl animate-slide-up"
+    } else {
+        "fixed top-0 right-0 w-64 h-full bg-elevated border-l border-border z-50 p-6 flex flex-col gap-4 shadow-2xl animate-slide-up"
+    };
 
     rsx! {
         nav {
-            class: "sticky top-0 z-30 bg-bg/80 backdrop-blur-lg border-b border-border",
+            class: "sticky top-0 z-30 bg-surface border-b border-border",
             div {
                 class: "max-w-5xl mx-auto px-4 h-14 flex items-center justify-between",
                 Link {
@@ -105,11 +111,11 @@ pub fn Navbar() -> Element {
             }
             if menu_open() {
                 div {
-                    class: "fixed inset-0 bg-bg/80 z-40",
+                    class: "fixed inset-0 bg-black/50 z-40",
                     onclick: move |_| menu_open.set(false),
                 }
                 div {
-                    class: "fixed top-0 right-0 w-64 h-full bg-elevated border-l border-border z-50 p-6 flex flex-col gap-4 shadow-2xl animate-slide-up",
+                    class: "{menu_panel_cls}",
                     div {
                         class: "flex items-center justify-between mb-2",
                         span {
