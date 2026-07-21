@@ -37,6 +37,13 @@ pub async fn fallback_to_index() -> impl IntoResponse {
     Html(index_html)
 }
 
+fn validate_id(id: &str) -> Result<(), StatusCode> {
+    id.chars()
+        .all(|c| c.is_ascii_digit())
+        .then_some(())
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
 pub async fn create_paste(State(db): State<DataStore>, body: Bytes) -> Result<Vec<u8>, StatusCode> {
     let (header_bytes, content) = read_framed(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -60,6 +67,11 @@ pub async fn create_paste(State(db): State<DataStore>, body: Bytes) -> Result<Ve
         None => return Err(StatusCode::BAD_REQUEST),
     };
 
+    let try_count = match header.try_count {
+        Some(count) if count > 0 && count <= 100 => count,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
     let mut rng = rand::rng();
     let id: u32 = rng.random_range(100_000..1_000_000);
     let id_str = id.to_string();
@@ -70,7 +82,7 @@ pub async fn create_paste(State(db): State<DataStore>, body: Bytes) -> Result<Ve
         &header.nonce,
         &header.salt,
         &header.password_hash,
-        header.try_count,
+        Some(try_count),
         ttl_seconds,
         header.data_type,
         header.filename,
@@ -99,6 +111,7 @@ pub async fn get_salt(
     State(db): State<DataStore>,
     Path(id): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
+    validate_id(&id)?;
     if let (Some(salt), Some((try_count, expiration_timestamp, _, _, _, total_chunks))) =
         (db.get_salt(&id), db.get_meta(&id))
     {
@@ -151,6 +164,7 @@ pub async fn get_paste(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response<Body>, StatusCode> {
+    validate_id(&id)?;
     if let Some(stored_hash) = db.get_password_hash(&id) {
         let provided_hash_str = headers
             .get("X-Password-Hash")

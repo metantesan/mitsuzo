@@ -159,33 +159,37 @@ impl DataStore {
     }
 
     pub fn decrement_try_count(&self, id: &str) {
-        if let Some((
-            try_count,
-            expiration_timestamp,
-            data_type,
-            filename,
-            content_type,
-            total_chunks,
-        )) = self.get_meta(id)
-        {
-            if try_count == 0 {
-                return;
-            }
-            let new_try_count = try_count - 1;
-            if new_try_count == 0 {
-                self.delete_paste(id);
-            } else {
+        let key = format!("meta:{}", id);
+        let result = self
+            .db
+            .update_and_fetch(key.as_bytes(), |value| {
+                let value = value.as_ref()?;
+                let (try_count, expiration, data_type, filename, content_type, total_chunks) =
+                    decode::<(u32, u64, DataType, Option<String>, Option<String>, u32)>(value)
+                        .ok()?;
+                if try_count == 0 {
+                    return None;
+                }
+                let new_try_count = try_count - 1;
                 let encoded = encode(&(
                     new_try_count,
-                    expiration_timestamp,
+                    expiration,
                     data_type,
                     filename,
                     content_type,
                     total_chunks,
                 ));
-                let _ = self.db.insert(format!("meta:{}", id), encoded);
-                let _ = self.db.flush();
+                Some(encoded)
+            })
+            .ok()
+            .flatten();
+        if let Some(meta) = result {
+            if let Ok((0, _, _, _, _, _)) =
+                decode::<(u32, u64, DataType, Option<String>, Option<String>, u32)>(&meta)
+            {
+                self.delete_paste(id);
             }
+            let _ = self.db.flush();
         }
     }
 
