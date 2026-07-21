@@ -14,6 +14,30 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.3.6",
+            date: "2026-07",
+            items_en: vec![
+                "Native Rust mermaid renderer (mermaid-rs-renderer) — pre-rendered SVG, no JS runtime",
+                "WASM binary ~90% smaller (profile opts, debug stripping, wasm-opt)",
+                "HKDF-based key derivation documented in How It Works page",
+                "Language preference saved to localStorage and restored on reload",
+                "EN/FA toggle buttons replace dropdown for one-click language switching",
+                "Persian translation for stats labels, download, author, and GitHub",
+                "GitHub link in footer, Download link in navbar",
+                "Localized \"Leave empty for auto-generated password\" hint",
+            ],
+            items_fa: vec![
+                "رندر بومی Mermaid با Rust — SVG پیش‌ساخته در زمان کامپایل، بدون JS در زمان اجرا",
+                "بهینه‌سازی WASM با کاهش ~۹۰٪ حجم",
+                "مستندسازی کلید مشتق‌شده با HKDF در صفحه نحوه کارکرد",
+                "ذخیره زبان انتخاب‌شده در localStorage و بازیابی در بارگذاری بعدی",
+                "دکمه‌های EN/FA برای تغییر زبان یک‌کلیکی",
+                "ترجمه فارسی برچسب‌های آمار، دانلود، نویسنده و گیت‌هاب",
+                "لینک گیت‌هاب در فوتر، لینک دانلود در نوار ناوبری",
+                "راهنمای ترجمه‌شده «برای رمز عبور خودکار خالی بگذارید»",
+            ],
+        },
+        Change {
             version: "v0.3.0",
             date: "2026-07",
             items_en: vec![

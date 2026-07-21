@@ -15,7 +15,13 @@ pub fn Footer() -> Element {
             a {
                 href: "https://metantesan.com",
                 class: "text-blue-400 hover:underline",
-                "hikari"
+                {t!("footer-author")}
+            }
+            " · ",
+            a {
+                href: "https://github.com/metantesan/mitsuzo",
+                class: "text-blue-400 hover:underline",
+                {t!("footer-github")}
             }
             "."
         }

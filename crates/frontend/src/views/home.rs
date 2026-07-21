@@ -421,7 +421,7 @@ pub fn home_view() -> Element {
             }
             p {
                 class: "w-full max-w-xl text-xs text-gray-500 mb-4 text-right",
-                "Leave empty for auto-generated password"
+                {t!("password-auto-gen-hint")}
             }
             div {
                 class: "w-full max-w-xl flex space-x-4 mb-4",

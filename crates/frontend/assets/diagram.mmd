@@ -1,0 +1,35 @@
+sequenceDiagram
+    participant U as User
+    participant B as Browser/CLI
+    participant S as Server
+
+    Note over U,S:CREATE PASTE
+    U->>B:Text/File + Password (or empty for auto-generated)
+    B->>B:Generate salt(16B) + nonce(12B)
+    B->>B:master = Argon2id(password, salt, 32B)
+    B->>B:enc_key = HKDF(master, "mitsuzo-encryption-key")
+    B->>B:val_key = HKDF(master, "mitsuzo-validation-key")
+    B->>B:hash = HMAC-SHA256(val_key, salt)
+    B->>B:Encrypt chunks with ChaCha20-Poly1305(enc_key)
+    Note right of B:Derived nonce = base_nonce XOR chunk_index
+    B->>S:POST /api/paste [framed: header + encrypted_chunks]
+    Note right of S:Stores: files/{id} + files/{id}.nonce
+Sled DB: pass, salt, meta
+    S->>B:Return paste ID
+
+    Note over U,S:VIEW PASTE
+    U->>B:Paste ID + Password (from URL #hash)
+    B->>S:GET /api/paste/{id}/salt
+    S->>B:Return {salt, try_count, ttl, total_chunks}
+    B->>B:Re-derive keys (Argon2id + HKDF)
+    B->>B:hash = HMAC-SHA256(val_key, salt)
+    B->>S:GET /api/paste/{id} + X-Password-Hash
+    alt Hash matches (constant-time compare)
+        S->>B:Framed: GetPasteHeader + encrypted_chunks
+        B->>B:Decrypt chunks with derived nonce
+        B->>U:Display plaintext / Download file
+    else Hash mismatch
+        S->>S:try_count--
+        S->>S:if try_count==0, delete paste
+        S->>B:401 Unauthorized
+    end

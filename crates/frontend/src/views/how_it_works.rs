@@ -1,29 +1,10 @@
 use dioxus::prelude::*;
 use dioxus_i18n::t;
-use wasm_bindgen::JsCast;
 
-const MERMAID_JS: &str = include_str!("../../assets/mermaid.min.js");
+const DIAGRAM_SVG: &str = include_str!(concat!(env!("OUT_DIR"), "/diagram.svg"));
 
 #[component]
 pub fn how_it_works_view() -> Element {
-    use_effect(|| {
-        let window = web_sys::window().unwrap();
-        let document = window.document().unwrap();
-
-        let script = document.create_element("script").unwrap();
-        let script: web_sys::HtmlScriptElement = script.dyn_into().unwrap();
-        let _ = script.set_text(MERMAID_JS);
-        document.body().unwrap().append_child(&script).unwrap();
-
-        let init_fn = js_sys::Function::new_with_args(
-            "",
-            r#"
-                mermaid.initialize({startOnLoad:false,theme:'dark'});
-                setTimeout(function() { mermaid.run(); }, 100);
-            "#,
-        );
-        let _ = init_fn.call0(&wasm_bindgen::JsValue::NULL);
-    });
 
     rsx! {
         div {
@@ -41,15 +22,17 @@ pub fn how_it_works_view() -> Element {
                 }
                 p {
                     class: "text-gray-300 mb-4",
-                    {t!("e2e-desc", algo1: "ChaCha20-Poly1305", algo2: "Argon2id")}
+                    {t!("e2e-desc")}
                 }
                 ul {
                     class: "list-disc list-inside text-gray-300 space-y-2",
-                    li { code { "Argon2id(password, salt)" } " → 64 bytes: 32-byte encryption_key + 32-byte validation_key" }
-                    li { "Encryption: " code { "ChaCha20-Poly1305(encryption_key, nonce, plaintext)" } " → ciphertext" }
-                    li { "Files larger than 64KB are split into chunks, each encrypted with a unique nonce" }
-                    li { {t!("e2e-item3")} }
-                    li { {t!("e2e-item4")} }
+                    li { code { "Argon2id(password, salt)" } " → 32-byte master key (19456 KiB memory, 2 iterations)" }
+                    li { code { "HKDF-SHA256(master, \"mitsuzo-encryption-key\")" } " → 32-byte encryption key" }
+                    li { code { "HKDF-SHA256(master, \"mitsuzo-validation-key\")" } " → 32-byte validation key" }
+                    li { code { "ChaCha20-Poly1305(encryption_key, derived_nonce, plaintext)" } " → ciphertext" }
+                    li { "Files >64KB are split into 64KB chunks, each encrypted with a unique derived nonce" }
+                    li { "Unique 16-byte salt and 12-byte base nonce per paste" }
+                    li { "Server never sees your password or plaintext" }
                 }
             }
 
@@ -65,10 +48,10 @@ pub fn how_it_works_view() -> Element {
                 }
                 ol {
                     class: "list-decimal list-inside text-gray-300 space-y-2 mb-4",
-                    li { {t!("zk-step1", algo1: "Argon2id")} }
-                    li { {t!("zk-step2", hash: "HMAC-SHA256")} }
+                    li { {t!("zk-step1")} }
+                    li { {t!("zk-step2")} }
                     li { {t!("zk-step3")} }
-                    li { {t!("zk-step4", header: "X-Password-Hash")} }
+                    li { {t!("zk-step4")} }
                     li { {t!("zk-step5")} }
                 }
                 p {
@@ -84,44 +67,8 @@ pub fn how_it_works_view() -> Element {
                     {t!("workflow-diagram")}
                 }
                 div {
-                    class: "mermaid",
-                    {r#"
-sequenceDiagram
-    participant U as User
-    participant B as Browser
-    participant S as Server
-
-    Note over U,S:CREATE PASTE
-    U->>B:Text/File + Password (or empty for auto-generated)
-    B->>B:Generate random salt (16 bytes)
-    B->>B:raw = Argon2id(password, salt, 64 bytes)
-    B->>B:Split: encryption_key[0..32] + validation_key[32..64]
-    B->>B:If file >64KB, split into chunks, encrypt each with derived nonce
-    B->>B:Encrypt with ChaCha20-Poly1305(encryption_key)
-    B->>B:hash = HMAC-SHA256(validation_key, salt)
-    B->>S:POST /api/paste {encrypted_chunks,nonce,salt,hash,total_chunks}
-    Note right of S:Stores: id → (encrypted,nonce,salt,hash,total_chunks)
-    S->>B:Return paste ID
-
-    Note over U,S:VIEW PASTE (via link with #password in URL hash)
-    U->>B:Paste ID + Password (auto-extracted from hash)
-    B->>S:GET /api/paste/{id}/salt
-    S->>B:Return {salt,try_count,ttl,total_chunks}
-    B->>B:raw = Argon2id(password, salt, 64 bytes)
-    B->>B:Split: encryption_key + validation_key
-    B->>B:hash = HMAC-SHA256(validation_key, salt)
-    B->>S:GET /api/paste/{id} + Header X-Password-Hash
-    alt Hash matches
-        S->>B:Return {encrypted_chunks,nonce,total_chunks}
-        B->>B:Split chunks, decrypt each with derived nonce
-        B->>B:Reassemble plaintext
-        B->>U:Display plaintext
-    else Hash mismatch
-        S->>S:try_count--
-        S->>S:if try_count==0, delete paste
-        S->>B:401 Unauthorized
-    end
-"#}
+                    class: "mermaid overflow-auto",
+                    dangerous_inner_html: DIAGRAM_SVG,
                 }
             }
 
@@ -145,7 +92,7 @@ sequenceDiagram
             }
 
             section {
-                class: "p-6 bg-gray-800 rounded-lg",
+                class: "mb-8 p-6 bg-gray-800 rounded-lg",
                 h2 {
                     class: "text-2xl font-bold mb-4 text-blue-400",
                     {t!("proof-safety")}
@@ -160,6 +107,50 @@ sequenceDiagram
                     li { {t!("ps-item2")} }
                     li { {t!("ps-item3")} }
                     li { {t!("ps-item4")} }
+                }
+            }
+
+            section {
+                class: "mb-8 p-6 bg-gray-800 rounded-lg",
+                h2 {
+                    class: "text-2xl font-bold mb-4 text-blue-400",
+                    {t!("cli-usage")}
+                }
+                p {
+                    class: "text-gray-300 mb-4",
+                    {t!("cli-desc")}
+                }
+                div {
+                    class: "bg-gray-900 rounded p-4 font-mono text-sm text-green-400 space-y-1",
+                    p { {t!("cli-create")} }
+                    p { {t!("cli-get")} }
+                }
+                p {
+                    class: "text-gray-400 text-sm mt-2",
+                    a {
+                        href: "https://github.com/metantesan/mitsuzo/releases",
+                        class: "text-blue-400 hover:underline",
+                        "Download pre-built binaries on GitHub"
+                    }
+                }
+            }
+
+            section {
+                class: "p-6 bg-gray-800 rounded-lg",
+                h2 {
+                    class: "text-2xl font-bold mb-4 text-blue-400",
+                    {t!("stats-title-section")}
+                }
+                p {
+                    class: "text-gray-300 mb-4",
+                    {t!("stats-desc-section")}
+                }
+                ul {
+                    class: "list-disc list-inside text-gray-300 space-y-2",
+                    li { "Total pastes created (all-time / daily)" }
+                    li { "Total successful decryptions (all-time / daily)" }
+                    li { "Total failed password attempts (all-time / daily)" }
+                    li { "Viewable at the homepage and " code { "GET /api/paste/stats" } }
                 }
             }
         }

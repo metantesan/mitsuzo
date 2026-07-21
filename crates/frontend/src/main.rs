@@ -68,8 +68,15 @@ fn main() {
 }
 
 fn app() -> Element {
+    let default_lang = web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item("mitsuzo-lang").ok().flatten())
+        .filter(|v| v == "fa-IR")
+        .map(|_| langid!("fa-IR"))
+        .unwrap_or(langid!("en-US"));
+
     use_init_i18n(|| {
-        I18nConfig::new(langid!("en-US"))
+        I18nConfig::new(default_lang)
             .with_locale((langid!("en-US"), include_str!("i18n/en-US.ftl")))
             .with_locale((langid!("fa-IR"), include_str!("i18n/fa-IR.ftl")))
     });
