@@ -14,6 +14,28 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.6.0",
+            date: "2026-07",
+            items_en: vec![
+                "Burn-after-read mode — paste auto-deletes after first successful decryption",
+                "Cryptographic burn receipt (HMAC-SHA256 + SHA256) verifies client decrypted content",
+                "Rate limiting on paste creation (10/minute per IP) to prevent spam",
+                "Drag-and-drop file upload across the entire form area",
+                "TTL preset buttons (5min, 1hr, 12hr) with custom fallback",
+                "Try-count preset buttons (1, 5, 25, 100) with custom fallback",
+                "Burn-after-read support in CLI with --burn-after-read flag",
+            ],
+            items_fa: vec![
+                "حالت حذف پس از مشاهده — Paste پس از اولین رمزگشایی موفق حذف می‌شود",
+                "رسید رمزنگاری (HMAC-SHA256 + SHA256) رمزگشایی محتوا را اثبات می‌کند",
+                "محدودیت نرخ در ایجاد Paste (۱۰ بار در دقیقه به ازای هر IP)",
+                "آپلود فایل با کشیدن و رها کردن در کل فرم",
+                "دکمه‌های پیش‌انتخاب TTL (۵ دقیقه، ۱ ساعت، ۱۲ ساعت) با گزینه دلخواه",
+                "دکمه‌های پیش‌انتخاب تعداد تلاش (۱، ۵، ۲۵، ۱۰۰) با گزینه دلخواه",
+                "پشتیبانی از حذف پس از مشاهده در CLI با پرچم --burn-after-read",
+            ],
+        },
+        Change {
             version: "v0.5.0",
             date: "2026-07",
             items_en: vec![

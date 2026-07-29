@@ -91,6 +91,8 @@ impl DataStore {
         content_type: Option<String>,
         total_chunks: u32,
         allow_download: bool,
+        burn_after_read: bool,
+        burn_receipt_hash: &[u8],
     ) {
         std::fs::write(nonce_path(&self.files_dir, id), nonce).unwrap();
 
@@ -110,11 +112,13 @@ impl DataStore {
             content_type,
             total_chunks,
             allow_download,
+            burn_after_read,
         ));
         let _ = self.db.insert(format!("meta:{}", id), meta_value);
         let _ = self
             .db
             .insert(format!("crecv:{}", id), &0u32.to_le_bytes()[..]);
+        let _ = self.db.insert(format!("burn:{}", id), burn_receipt_hash);
         let _ = self.db.flush();
 
         increment_counter(&self.stats, "pastes_all_time");
@@ -225,6 +229,7 @@ impl DataStore {
         Option<String>,
         u32,
         bool,
+        bool,
     )> {
         match self.db.get(format!("meta:{}", id)) {
             Ok(Some(value)) => decode(&value).ok(),
@@ -247,6 +252,7 @@ impl DataStore {
                     content_type,
                     total_chunks,
                     allow_download,
+                    burn_after_read,
                 ) = decode::<(
                     u32,
                     u64,
@@ -254,6 +260,7 @@ impl DataStore {
                     Option<String>,
                     Option<String>,
                     u32,
+                    bool,
                     bool,
                 )>(value)
                 .ok()?;
@@ -269,19 +276,21 @@ impl DataStore {
                     content_type,
                     total_chunks,
                     allow_download,
+                    burn_after_read,
                 ));
                 Some(encoded)
             })
             .ok()
             .flatten();
         if let Some(meta) = result {
-            if let Ok((0, _, _, _, _, _, _)) = decode::<(
+            if let Ok((0, _, _, _, _, _, _, _)) = decode::<(
                 u32,
                 u64,
                 DataType,
                 Option<String>,
                 Option<String>,
                 u32,
+                bool,
                 bool,
             )>(&meta)
             {
@@ -296,10 +305,31 @@ impl DataStore {
         let _ = self.db.remove(format!("salt:{}", id));
         let _ = self.db.remove(format!("meta:{}", id));
         let _ = self.db.remove(format!("crecv:{}", id));
+        let _ = self.db.remove(format!("burn:{}", id));
         self.delete_chunk_keys(id);
         let _ = std::fs::remove_file(content_path(&self.files_dir, id));
         let _ = std::fs::remove_file(nonce_path(&self.files_dir, id));
         let _ = self.db.flush();
+    }
+
+    pub fn get_burn_receipt_hash(&self, id: &str) -> Option<Vec<u8>> {
+        if self.is_expired(id) {
+            return None;
+        }
+        self.db
+            .get(format!("burn:{}", id))
+            .ok()?
+            .map(|v| v.to_vec())
+    }
+
+    pub fn mark_burned(&self, id: &str) -> bool {
+        let burned_key = format!("burned:{}", id);
+        if self.db.get(&burned_key).ok().flatten().is_some() {
+            return false;
+        }
+        let _ = self.db.insert(&burned_key, b"1");
+        let _ = self.db.flush();
+        true
     }
 
     pub fn cleanup_expired(&self) -> usize {
@@ -308,13 +338,14 @@ impl DataStore {
 
         for item in self.db.scan_prefix(b"meta:") {
             let Ok((key, value)) = item else { continue };
-            let Ok((_, expiration_timestamp, _, _, _, _, _)) = decode::<(
+            let Ok((_, expiration_timestamp, _, _, _, _, _, _)) = decode::<(
                 u32,
                 u64,
                 DataType,
                 Option<String>,
                 Option<String>,
                 u32,
+                bool,
                 bool,
             )>(&value) else {
                 continue;
@@ -338,13 +369,14 @@ impl DataStore {
             let Ok(id_str) = std::str::from_utf8(&key[5..]) else {
                 continue;
             };
-            let Ok((_, _, data_type, filename, _, _, _)) = decode::<(
+            let Ok((_, _, data_type, filename, _, _, _, _)) = decode::<(
                 u32,
                 u64,
                 DataType,
                 Option<String>,
                 Option<String>,
                 u32,
+                bool,
                 bool,
             )>(&value) else {
                 continue;
@@ -358,7 +390,7 @@ impl DataStore {
     }
 
     fn is_expired(&self, id: &str) -> bool {
-        if let Some((_, expiration_timestamp, _, _, _, _, _)) = self.get_meta(id) {
+        if let Some((_, expiration_timestamp, _, _, _, _, _, _)) = self.get_meta(id) {
             let current_time = epoch_secs();
             if expiration_timestamp > 0 && current_time > expiration_timestamp {
                 self.delete_paste(id);
@@ -384,13 +416,14 @@ impl DataStore {
     pub fn id_available(&self, id: &str) -> bool {
         match self.db.get(format!("meta:{}", id)) {
             Ok(Some(value)) => {
-                let Ok((_, expiration_timestamp, _, _, _, _, _)) = decode::<(
+                let Ok((_, expiration_timestamp, _, _, _, _, _, _)) = decode::<(
                     u32,
                     u64,
                     DataType,
                     Option<String>,
                     Option<String>,
                     u32,
+                    bool,
                     bool,
                 )>(&value) else {
                     return true;

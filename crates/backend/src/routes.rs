@@ -1,5 +1,5 @@
-use crate::db::DataStore;
 use crate::handlers;
+use crate::AppState;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -12,7 +12,7 @@ use tower_http::{
     services::ServeDir,
 };
 
-pub fn api_router(db: DataStore) -> Router {
+pub fn api_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
@@ -35,13 +35,14 @@ pub fn api_router(db: DataStore) -> Router {
         .route("/paste/{id}/complete", post(handlers::complete_paste))
         .route("/paste/{id}/salt", get(handlers::get_salt))
         .route("/paste/{id}/data", get(handlers::get_paste_data))
+        .route("/paste/{id}/burn", post(handlers::burn_paste))
         .route("/paste/stats", get(handlers::get_stats))
-        .with_state(db)
+        .with_state(state)
         .layer(cors)
         .layer(DefaultBodyLimit::max(UPLOAD_CHUNK_SIZE))
 }
 
-pub fn app_router(db: DataStore) -> Router {
+pub fn app_router(state: AppState) -> Router {
     let assets_path = std::env::current_exe()
         .unwrap()
         .parent()
@@ -50,7 +51,7 @@ pub fn app_router(db: DataStore) -> Router {
 
     Router::new()
         .route("/", get(handlers::serve_index))
-        .nest("/api", api_router(db))
+        .nest("/api", api_router(state))
         .nest_service("/assets", ServeDir::new(assets_path))
         .fallback(get(handlers::fallback_to_index))
 }

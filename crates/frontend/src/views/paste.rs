@@ -1,14 +1,15 @@
 use crate::BASE_URL;
 use crate::components::PopupContext;
 use crate::sanitize_id;
-use crate::utils::{copy_to_clipboard, do_xhr_get};
+use crate::utils::{copy_to_clipboard, do_xhr_get, do_xhr_post};
 use base64::{Engine as _, engine::general_purpose};
 use dioxus::prelude::*;
 use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{DataType, GetSaltResponse};
 use mitsuzo_utils::{
-    compute_password_hash, decrypt_chunk_into, derive_keys, get_chunk_bounds, get_plaintext_size,
+    compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_keys,
+    get_chunk_bounds, get_plaintext_size,
 };
 use wasm_bindgen::JsCast;
 use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
@@ -28,6 +29,8 @@ pub fn paste_view(id: String) -> Element {
     let paste_id_state = use_signal(|| id.clone());
     let try_count: Signal<Option<u32>> = use_signal(|| None);
     let ttl: Signal<Option<u64>> = use_signal(|| None);
+    let burn_after_read = use_signal(|| false);
+    let salt: Signal<Option<Vec<u8>>> = use_signal(|| None);
     let progress: Signal<Option<ProgressState>> = use_signal(|| None);
     let mut popup_ctx = use_context::<Signal<PopupContext>>();
 
@@ -61,6 +64,8 @@ pub fn paste_view(id: String) -> Element {
                 ttl,
                 progress,
                 paste_content,
+                burn_after_read,
+                salt,
             ));
         }
     };
@@ -85,6 +90,8 @@ pub fn paste_view(id: String) -> Element {
                     ttl,
                     progress,
                     paste_content,
+                    burn_after_read,
+                    salt,
                 ));
             }
         }
@@ -142,6 +149,11 @@ pub fn paste_view(id: String) -> Element {
                     Some(time) if time < u64::MAX => rsx! { p { {t!("time-left", time: time)} } },
                     _ => rsx! { Fragment {} },
                 },
+                {if *burn_after_read.read() {
+                    rsx! { p { class: "text-accent font-semibold", {t!("burn-notice")} } }
+                } else {
+                    rsx! { Fragment {} }
+                }}
             }
 
             {
@@ -338,7 +350,7 @@ pub fn paste_view(id: String) -> Element {
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 async fn do_decrypt(
     current_id: String,
     current_password: String,
@@ -347,6 +359,8 @@ async fn do_decrypt(
     mut ttl: Signal<Option<u64>>,
     mut progress: Signal<Option<ProgressState>>,
     mut paste_content: Signal<Option<(Vec<u8>, DataType, Option<String>, Option<String>, bool)>>,
+    mut burn_after_read: Signal<bool>,
+    mut salt: Signal<Option<Vec<u8>>>,
 ) {
     progress.set(Some(ProgressState {
         status: t!("progress-downloading-metadata"),
@@ -370,13 +384,14 @@ async fn do_decrypt(
     .await;
 
     let (
-        salt,
+        salt_bytes,
         total_chunks,
         header_nonce,
         header_data_type,
         header_filename,
         header_content_type,
         header_allow_download,
+        header_burn_after_read,
     ) = match salt_result {
         Ok(response) => {
             if response.status >= 200 && response.status < 300 {
@@ -385,6 +400,8 @@ async fn do_decrypt(
                         Ok(decoded) => {
                             try_count.set(Some(decoded.try_count));
                             ttl.set(Some(decoded.ttl));
+                            burn_after_read.set(decoded.burn_after_read);
+                            salt.set(Some(decoded.salt.clone()));
                             (
                                 decoded.salt,
                                 decoded.total_chunks,
@@ -393,6 +410,7 @@ async fn do_decrypt(
                                 decoded.filename,
                                 decoded.content_type,
                                 decoded.allow_download,
+                                decoded.burn_after_read,
                             )
                         }
                         Err(e) => {
@@ -432,7 +450,7 @@ async fn do_decrypt(
         progress: 40.0,
     }));
 
-    let (_encryption_key, validation_key) = match derive_keys(&current_password, &salt) {
+    let (_encryption_key, validation_key) = match derive_keys(&current_password, &salt_bytes) {
         Ok(keys) => keys,
         Err(e) => {
             popup_ctx
@@ -443,7 +461,7 @@ async fn do_decrypt(
         }
     };
 
-    let password_hash = compute_password_hash(&validation_key, &salt);
+    let password_hash = compute_password_hash(&validation_key, &salt_bytes);
     let encoded_hash = general_purpose::STANDARD.encode(password_hash);
 
     progress.set(Some(ProgressState {
@@ -479,7 +497,7 @@ async fn do_decrypt(
                 if let Some(content) = response.body {
                     let paste_total_chunks = total_chunks;
 
-                    let (encryption_key, _) = match derive_keys(&current_password, &salt) {
+                    let (encryption_key, _) = match derive_keys(&current_password, &salt_bytes) {
                         Ok(k) => k,
                         Err(e) => {
                             popup_ctx
@@ -521,6 +539,27 @@ async fn do_decrypt(
 
                     match result {
                         Ok(()) => {
+                            if header_burn_after_read {
+                                progress.set(Some(ProgressState {
+                                    status: t!("burn-progress"),
+                                    progress: 95.0,
+                                }));
+                                let receipt = compute_burn_receipt(&encryption_key);
+                                let burn_result = do_xhr_post(
+                                    &format!("{}/api/paste/{}/burn", BASE_URL, current_id),
+                                    receipt.to_vec(),
+                                    |_, _| {},
+                                ).await;
+                                match burn_result {
+                                    Ok(r) if r.status >= 200 && r.status < 300 => {
+                                        popup_ctx.write().show_error(t!("burn-complete"));
+                                    }
+                                    Ok(r) if r.status == 410 => {
+                                        // already burned
+                                    }
+                                    _ => {}
+                                }
+                            }
                             paste_content.set(Some((
                                 plaintext,
                                 header_data_type,

@@ -22,6 +22,8 @@ pub struct CreatePasteHeader {
     pub content_type: Option<String>,
     pub total_chunks: u32,
     pub allow_download: bool,
+    pub burn_after_read: bool,
+    pub burn_receipt_hash: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
@@ -58,6 +60,7 @@ pub struct GetSaltResponse {
     pub filename: Option<String>,
     pub content_type: Option<String>,
     pub allow_download: bool,
+    pub burn_after_read: bool,
 }
 
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]

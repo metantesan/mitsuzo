@@ -4,6 +4,7 @@ use crate::components::PopupContext;
 use crate::sanitize_id;
 use crate::utils::{copy_to_clipboard, do_xhr_get, do_xhr_post, do_xhr_put};
 use base64::Engine as _;
+use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
@@ -11,7 +12,7 @@ use mitsuzo_types::{
     CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, DataType, GetStatsResponse,
     InitPasteResponse, MAX_PASTE_SIZE, UPLOAD_CHUNK_SIZE,
 };
-use mitsuzo_utils::{encrypt_chunk_into, encrypt_setup};
+use mitsuzo_utils::{encrypt_chunk_into, encrypt_setup, compute_burn_receipt_hash};
 use wasm_bindgen::JsCast;
 use web_sys;
 
@@ -35,8 +36,8 @@ pub struct ProgressState {
 pub fn home_view() -> Element {
     let mut content = use_signal(String::new);
     let mut password_input = use_signal(String::new);
-    let mut try_count_input = use_signal(|| "5".to_string());
-    let mut ttl_seconds_input = use_signal(|| "43200".to_string());
+    let mut try_count_preset = use_signal(|| "5".to_string());
+    let mut try_count_custom = use_signal(|| "5".to_string());
     let mut generated_id: Signal<Option<String>> = use_signal(|| None);
     let mut bin_id_input = use_signal(String::new);
     let navigator = use_navigator();
@@ -48,6 +49,10 @@ pub fn home_view() -> Element {
     let mut stats: Signal<Option<GetStatsResponse>> = use_signal(|| None);
     let auto_generated = use_signal(|| false);
     let mut disable_download = use_signal(|| false);
+    let mut burn_after_read = use_signal(|| false);
+    let mut drag_over = use_signal(|| false);
+    let mut ttl_preset = use_signal(|| "43200".to_string());
+    let mut ttl_custom = use_signal(|| "43200".to_string());
 
     use_future(move || async move {
         let result = do_xhr_get(&format!("{}/api/paste/stats", BASE_URL), vec![], |_, _| {}).await;
@@ -83,8 +88,18 @@ pub fn home_view() -> Element {
                     progress: 10.0,
                 }));
 
-                let try_count = try_count_input.read().clone().parse::<u32>().ok();
-                let mut ttl_seconds_option = ttl_seconds_input.read().clone().parse::<u32>().ok();
+                let try_count_value = if try_count_preset.read().as_str() == "custom" {
+                    try_count_custom.read().clone()
+                } else {
+                    try_count_preset.read().clone()
+                };
+                let try_count = try_count_value.parse::<u32>().ok();
+                let ttl_value = if ttl_preset.read().as_str() == "custom" {
+                    ttl_custom.read().clone()
+                } else {
+                    ttl_preset.read().clone()
+                };
+                let mut ttl_seconds_option = ttl_value.parse::<u32>().ok();
                 if let Some(ref mut ts) = ttl_seconds_option {
                     if *ts > 43200 {
                         *ts = 43200;
@@ -157,6 +172,12 @@ pub fn home_view() -> Element {
                     content_type: file_content_type.read().clone(),
                     total_chunks,
                     allow_download: !*disable_download.read(),
+                    burn_after_read: *burn_after_read.read(),
+                    burn_receipt_hash: if *burn_after_read.read() {
+                        compute_burn_receipt_hash(&encryption_key)
+                    } else {
+                        [0u8; 32]
+                    },
                 };
 
                 let header_bytes = bitcode::encode(&header);
@@ -379,7 +400,27 @@ pub fn home_view() -> Element {
 
     rsx! {
         div {
-            class: "max-w-2xl mx-auto px-4 py-8 flex flex-col items-center justify-center min-h-[calc(100vh-3.5rem)]",
+            class: if *drag_over.read() { "max-w-2xl mx-auto px-4 py-8 flex flex-col items-center justify-center min-h-[calc(100vh-3.5rem)] rounded-2xl border-2 border-dashed border-accent/50 transition-all duration-200" } else { "max-w-2xl mx-auto px-4 py-8 flex flex-col items-center justify-center min-h-[calc(100vh-3.5rem)] transition-all duration-200" },
+            ondragover: move |evt| {
+                evt.prevent_default();
+                drag_over.set(true);
+            },
+            ondragleave: move |_| {
+                drag_over.set(false);
+            },
+            ondrop: move |evt| {
+                evt.prevent_default();
+                drag_over.set(false);
+                let files = evt.files();
+                if let Some(file) = files.into_iter().next()
+                    && let Some(web_file) = file.inner().downcast_ref::<web_sys::File>().cloned()
+                {
+                    progress.set(Some(ProgressState { status: t!("progress-file-loaded"), progress: 100.0 }));
+                    file_data.set(Some(web_file));
+                    file_name.set(Some(file.name()));
+                    file_content_type.set(file.content_type());
+                }
+            },
             h1 {
                 class: "text-4xl font-bold text-text mb-10 tracking-tight animate-glow-pulse",
                 {t!("app-title")}
@@ -462,7 +503,7 @@ pub fn home_view() -> Element {
                         }
                     }
                     label {
-                        class: "w-full p-4 bg-surface text-muted rounded-lg border border-border border-dashed cursor-pointer block text-center",
+                        class: "w-full p-4 bg-surface text-muted rounded-lg border border-border border-dashed cursor-pointer block text-center transition-all duration-200",
                         "for": "file-upload",
                         {t!("choose-file")}
                     }
@@ -489,11 +530,41 @@ pub fn home_view() -> Element {
                         class: "block text-muted text-sm font-bold mb-2",
                         {t!("try-count-label")}
                     }
-                    input {
-                        class: "w-full p-4 bg-surface text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
-                        r#type: "number",
-                        oninput: move |evt| try_count_input.set(evt.value()),
-                        value: "{try_count_input}",
+                    div {
+                        class: "flex gap-2 mb-2",
+                        button {
+                            class: if try_count_preset.read().as_str() == "1" { "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded" } else { "px-3 py-1 bg-surface text-muted text-xs font-semibold rounded border border-border" },
+                            onclick: move |_| try_count_preset.set("1".to_string()),
+                            "1"
+                        }
+                        button {
+                            class: if try_count_preset.read().as_str() == "5" { "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded" } else { "px-3 py-1 bg-surface text-muted text-xs font-semibold rounded border border-border" },
+                            onclick: move |_| try_count_preset.set("5".to_string()),
+                            "5"
+                        }
+                        button {
+                            class: if try_count_preset.read().as_str() == "25" { "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded" } else { "px-3 py-1 bg-surface text-muted text-xs font-semibold rounded border border-border" },
+                            onclick: move |_| try_count_preset.set("25".to_string()),
+                            "25"
+                        }
+                        button {
+                            class: if try_count_preset.read().as_str() == "100" { "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded" } else { "px-3 py-1 bg-surface text-muted text-xs font-semibold rounded border border-border" },
+                            onclick: move |_| try_count_preset.set("100".to_string()),
+                            "100"
+                        }
+                        button {
+                            class: if try_count_preset.read().as_str() == "custom" { "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded" } else { "px-3 py-1 bg-surface text-muted text-xs font-semibold rounded border border-border" },
+                            onclick: move |_| try_count_preset.set("custom".to_string()),
+                            {t!("ttl-custom")}
+                        }
+                    }
+                    if try_count_preset.read().as_str() == "custom" {
+                        input {
+                            class: "w-full p-4 bg-surface text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
+                            r#type: "number",
+                            oninput: move |evt| try_count_custom.set(evt.value()),
+                            value: "{try_count_custom}",
+                        }
                     }
                 }
                 div {
@@ -502,26 +573,67 @@ pub fn home_view() -> Element {
                         class: "block text-muted text-sm font-bold mb-2",
                         {t!("ttl-label")}
                     }
-                    input {
-                        class: "w-full p-4 bg-surface text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
-                        r#type: "number",
-                        oninput: move |evt| ttl_seconds_input.set(evt.value()),
-                        value: "{ttl_seconds_input}",
-                        max: 43200
+                    div {
+                        class: "flex gap-2 mb-2",
+                        button {
+                            class: if ttl_preset.read().as_str() == "300" { "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded" } else { "px-3 py-1 bg-surface text-muted text-xs font-semibold rounded border border-border" },
+                            onclick: move |_| ttl_preset.set("300".to_string()),
+                            {t!("ttl-5min")}
+                        }
+                        button {
+                            class: if ttl_preset.read().as_str() == "3600" { "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded" } else { "px-3 py-1 bg-surface text-muted text-xs font-semibold rounded border border-border" },
+                            onclick: move |_| ttl_preset.set("3600".to_string()),
+                            {t!("ttl-1hour")}
+                        }
+                        button {
+                            class: if ttl_preset.read().as_str() == "43200" { "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded" } else { "px-3 py-1 bg-surface text-muted text-xs font-semibold rounded border border-border" },
+                            onclick: move |_| ttl_preset.set("43200".to_string()),
+                            {t!("ttl-12hour")}
+                        }
+                        button {
+                            class: if ttl_preset.read().as_str() == "custom" { "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded" } else { "px-3 py-1 bg-surface text-muted text-xs font-semibold rounded border border-border" },
+                            onclick: move |_| ttl_preset.set("custom".to_string()),
+                            {t!("ttl-custom")}
+                        }
+                    }
+                    if ttl_preset.read().as_str() == "custom" {
+                        input {
+                            class: "w-full p-4 bg-surface text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
+                            r#type: "number",
+                            oninput: move |evt| ttl_custom.set(evt.value()),
+                            value: "{ttl_custom}",
+                            max: 43200
+                        }
                     }
                 }
             }
             div {
-                class: "w-full max-w-xl flex items-center gap-2 mb-4",
-                input {
-                    r#type: "checkbox",
-                    id: "no-download",
-                    oninput: move |evt| disable_download.set(evt.checked()),
+                class: "w-full max-w-xl flex items-center gap-6 mb-4",
+                div {
+                    class: "flex items-center gap-2",
+                    input {
+                        r#type: "checkbox",
+                        id: "no-download",
+                        oninput: move |evt| disable_download.set(evt.checked()),
+                    }
+                    label {
+                        "for": "no-download",
+                        class: "text-sm text-muted select-none",
+                        {t!("disable-download")}
+                    }
                 }
-                label {
-                    "for": "no-download",
-                    class: "text-sm text-muted select-none",
-                    {t!("disable-download")}
+                div {
+                    class: "flex items-center gap-2",
+                    input {
+                        r#type: "checkbox",
+                        id: "burn-after",
+                        oninput: move |evt| burn_after_read.set(evt.checked()),
+                    }
+                    label {
+                        "for": "burn-after",
+                        class: "text-sm text-muted select-none",
+                        {t!("burn-after-read")}
+                    }
                 }
             }
             button {

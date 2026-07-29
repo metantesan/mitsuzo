@@ -6,8 +6,8 @@ use mitsuzo_types::{
     UPLOAD_CHUNK_SIZE,
 };
 use mitsuzo_utils::{
-    compute_password_hash, decrypt_chunk_into, derive_keys, encrypt_chunk_into, encrypt_setup,
-    get_chunk_bounds, get_plaintext_size,
+    compute_burn_receipt, compute_burn_receipt_hash, compute_password_hash, decrypt_chunk_into,
+    derive_keys, encrypt_chunk_into, encrypt_setup, get_chunk_bounds, get_plaintext_size,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -46,6 +46,8 @@ enum Commands {
         try_count: u32,
         #[arg(short, long, default_value = "43200")]
         ttl: u32,
+        #[arg(short = 'b', long)]
+        burn_after_read: bool,
     },
     Get {
         id: String,
@@ -127,6 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             file,
             try_count,
             ttl,
+            burn_after_read,
         } => {
             let password = Zeroizing::new(rpassword::prompt_password(format!(
                 "{} ",
@@ -179,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let (salt, nonce, mut encryption_key, password_hash) = encrypt_setup(&password)?;
 
-            let header = CreatePasteHeader {
+            let mut header = CreatePasteHeader {
                 nonce,
                 salt,
                 password_hash,
@@ -190,7 +193,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 content_type: None,
                 total_chunks: total_enc_chunks,
                 allow_download: true,
+                burn_after_read: *burn_after_read,
+                burn_receipt_hash: [0u8; 32],
             };
+
+            if *burn_after_read {
+                header.burn_receipt_hash = compute_burn_receipt_hash(&encryption_key);
+            }
 
             let header_bytes = bitcode::encode(&header);
 
@@ -476,6 +485,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let encrypted = Arc::try_unwrap(buf).unwrap().into_inner().unwrap();
 
             let (mut ek, _) = derive_keys(&password, &meta.salt)?;
+
+            // Send burn receipt if paste is burn-after-read
+            if meta.burn_after_read {
+                let receipt = compute_burn_receipt(&ek);
+                let burn_resp = client
+                    .post(format!("{}/api/paste/{}/burn", base_url, id))
+                    .body(receipt.to_vec())
+                    .send()
+                    .await;
+                match burn_resp {
+                    Ok(r) if r.status().is_success() => {
+                        eprintln!("{} Paste burned after reading", "✓".green().bold());
+                    }
+                    Ok(r) if r.status() == 410 => {
+                        // already burned
+                    }
+                    _ => {}
+                }
+            }
 
             let done = Arc::new(AtomicU32::new(0));
             let total = meta.total_chunks;
