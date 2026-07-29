@@ -14,6 +14,16 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.6.1",
+            date: "2026-07",
+            items_en: vec![
+                "Burn receipt uses HKDF-SHA256 instead of HMAC + SHA256 double-hash"
+            ],
+            items_fa: vec![
+                "رسید حذف از HKDF-SHA256 به جای HMAC + SHA256 استفاده می‌کند"
+            ],
+        },
+        Change {
             version: "v0.6.0",
             date: "2026-07",
             items_en: vec![

@@ -209,12 +209,7 @@ pub fn get_chunk_bounds(
 const BURN_RECEIPT_INFO: &[u8] = b"mitsuzo-burn-receipt";
 
 pub fn compute_burn_receipt(encryption_key: &[u8; 32]) -> [u8; 32] {
-    hmac_sha256(encryption_key, BURN_RECEIPT_INFO)
-}
-
-pub fn compute_burn_receipt_hash(encryption_key: &[u8; 32]) -> [u8; 32] {
-    let receipt = compute_burn_receipt(encryption_key);
-    sha2::Sha256::digest(&receipt).into()
+    hkdf_expand_sha256(encryption_key, BURN_RECEIPT_INFO)
 }
 
 /// Compute total plaintext size from ciphertext length

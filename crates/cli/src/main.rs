@@ -6,7 +6,7 @@ use mitsuzo_types::{
     UPLOAD_CHUNK_SIZE,
 };
 use mitsuzo_utils::{
-    compute_burn_receipt, compute_burn_receipt_hash, compute_password_hash, decrypt_chunk_into,
+    compute_burn_receipt, compute_password_hash, decrypt_chunk_into,
     derive_keys, encrypt_chunk_into, encrypt_setup, get_chunk_bounds, get_plaintext_size,
 };
 use reqwest::Client;
@@ -198,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             if *burn_after_read {
-                header.burn_receipt_hash = compute_burn_receipt_hash(&encryption_key);
+                header.burn_receipt_hash = compute_burn_receipt(&encryption_key);
             }
 
             let header_bytes = bitcode::encode(&header);

@@ -12,7 +12,7 @@ use mitsuzo_types::{
     CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, DataType, GetStatsResponse,
     InitPasteResponse, MAX_PASTE_SIZE, UPLOAD_CHUNK_SIZE,
 };
-use mitsuzo_utils::{encrypt_chunk_into, encrypt_setup, compute_burn_receipt_hash};
+use mitsuzo_utils::{encrypt_chunk_into, encrypt_setup, compute_burn_receipt};
 use wasm_bindgen::JsCast;
 use web_sys;
 
@@ -174,7 +174,7 @@ pub fn home_view() -> Element {
                     allow_download: !*disable_download.read(),
                     burn_after_read: *burn_after_read.read(),
                     burn_receipt_hash: if *burn_after_read.read() {
-                        compute_burn_receipt_hash(&encryption_key)
+                        compute_burn_receipt(&encryption_key)
                     } else {
                         [0u8; 32]
                     },

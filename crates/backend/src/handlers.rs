@@ -13,7 +13,6 @@ use mitsuzo_types::{
     GetStatsResponse, InitPasteResponse, UPLOAD_CHUNK_SIZE,
 };
 use rand::RngExt;
-use sha2::{Digest, Sha256};
 use std::fs;
 use tokio::io::AsyncReadExt;
 use tracing::info;
@@ -458,8 +457,7 @@ pub async fn burn_paste(
         return Err(StatusCode::NOT_FOUND);
     };
 
-    let computed_hash = Sha256::digest(&body);
-    if !constant_time_eq(&computed_hash, &stored_hash) {
+    if !constant_time_eq(&body, &stored_hash) {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
