@@ -449,9 +449,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let mut b = buf.lock().unwrap();
                             b[s as usize..][..data.len()].copy_from_slice(&data);
                             pb.inc(data.len() as u64);
-                            pb.set_message(
-                                indicatif::HumanBytes(pb.position()).to_string(),
-                            );
+                            pb.set_message(indicatif::HumanBytes(pb.position()).to_string());
                             break;
                         }
                         if retry < 2 {

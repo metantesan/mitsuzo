@@ -3,8 +3,8 @@ use futures::channel::mpsc;
 use futures::channel::oneshot;
 use std::cell::RefCell;
 use std::rc::Rc;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen::prelude::*;
 use web_sys::{ProgressEvent, XmlHttpRequest};
 
 #[wasm_bindgen]
