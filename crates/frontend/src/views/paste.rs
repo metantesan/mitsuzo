@@ -1,7 +1,7 @@
 use crate::BASE_URL;
 use crate::components::PopupContext;
 use crate::sanitize_id;
-use crate::utils::do_xhr_get;
+use crate::utils::{copy_to_clipboard, do_xhr_get};
 use base64::{Engine as _, engine::general_purpose};
 use dioxus::prelude::*;
 use dioxus_i18n::t;
@@ -148,17 +148,37 @@ pub fn paste_view(id: String) -> Element {
                 match &*paste_content.read() {
                     Some((bytes, data_type, filename, content_type, allow_download)) => {
                         let id = paste_id_state.read().clone();
+                        let origin = web_sys::window()
+                            .and_then(|w| w.location().origin().ok())
+                            .unwrap_or_else(|| BASE_URL.to_string());
+                        let paste_url = format!("{}/paste/{}", origin, id);
                         match data_type {
-                            DataType::Text => rsx! {
-                                div {
-                                    class: "bg-surface p-6 rounded-lg shadow-lg",
-                                    h2 {
-                                        class: "text-xl font-semibold mb-4",
-                                        {t!("paste-id", id: id)}
-                                    }
-                                    pre {
-                                        class: "bg-bg p-4 rounded-md text-left whitespace-pre-wrap break-words overflow-auto text-text-secondary",
-                                        {String::from_utf8_lossy(bytes).to_string()}
+                            DataType::Text => {
+                                let text_content = String::from_utf8_lossy(bytes).to_string();
+                                let text_for_copy = text_content.clone();
+                                rsx! {
+                                    div {
+                                        class: "bg-surface p-6 rounded-lg shadow-lg",
+                                        div {
+                                            class: "flex justify-between items-center mb-4",
+                                            h2 {
+                                                class: "text-xl font-semibold",
+                                                {t!("paste-id", id: id)}
+                                            }
+                                            button {
+                                                class: "px-4 py-2 bg-accent text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200 text-sm",
+                                                onclick: move |_| {
+                                                    if let Err(e) = copy_to_clipboard(&text_for_copy) {
+                                                        popup_ctx.write().show_error(&e);
+                                                    }
+                                                },
+                                                {t!("copy-clipboard")}
+                                            }
+                                        }
+                                        pre {
+                                            class: "bg-bg p-4 rounded-md text-left whitespace-pre-wrap break-words overflow-auto text-text-secondary",
+                                            {text_content}
+                                        }
                                     }
                                 }
                             },
@@ -227,18 +247,33 @@ pub fn paste_view(id: String) -> Element {
                                                     }
                                                 }
                                             }
-                                            if *allow_download {
+                                            div {
+                                                class: "flex justify-center gap-3",
                                                 button {
-                                                    class: "px-6 py-3 bg-success text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200",
-                                                    onclick: move |_| {
-                                                        match download_file(preview_bytes.clone(), owned_filename.clone().unwrap_or(owned_id.clone()), owned_content_type.clone()) {
-                                                            Ok(_) => {}
-                                                            Err(e) => {
+                                                    class: "px-6 py-3 bg-accent text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200",
+                                                    onclick: {
+                                                        let url = paste_url.clone();
+                                                        move |_| {
+                                                            if let Err(e) = copy_to_clipboard(&url) {
                                                                 popup_ctx.write().show_error(&e);
                                                             }
                                                         }
                                                     },
-                                                    {t!("download-file")}
+                                                    {t!("copy-clipboard")}
+                                                }
+                                                if *allow_download {
+                                                    button {
+                                                        class: "px-6 py-3 bg-success text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200",
+                                                        onclick: move |_| {
+                                                            match download_file(preview_bytes.clone(), owned_filename.clone().unwrap_or(owned_id.clone()), owned_content_type.clone()) {
+                                                                Ok(_) => {}
+                                                                Err(e) => {
+                                                                    popup_ctx.write().show_error(&e);
+                                                                }
+                                                            }
+                                                        },
+                                                        {t!("download-file")}
+                                                    }
                                                 }
                                             }
                                         }
@@ -256,18 +291,33 @@ pub fn paste_view(id: String) -> Element {
                                                 class: "mb-4 text-muted",
                                                 {t!("paste-id", id: id)}
                                             }
-                                            if *allow_download {
+                                            div {
+                                                class: "flex justify-center gap-3",
                                                 button {
-                                                    class: "px-6 py-3 bg-success text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200",
-                                                    onclick: move |_| {
-                                                        match download_file(dl_bytes.clone(), owned_filename.clone().unwrap_or(owned_id.clone()), owned_content_type.clone()) {
-                                                            Ok(_) => {}
-                                                            Err(e) => {
+                                                    class: "px-6 py-3 bg-accent text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200",
+                                                    onclick: {
+                                                        let url = paste_url.clone();
+                                                        move |_| {
+                                                            if let Err(e) = copy_to_clipboard(&url) {
                                                                 popup_ctx.write().show_error(&e);
                                                             }
                                                         }
                                                     },
-                                                    {t!("download-file")}
+                                                    {t!("copy-clipboard")}
+                                                }
+                                                if *allow_download {
+                                                    button {
+                                                        class: "px-6 py-3 bg-success text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200",
+                                                        onclick: move |_| {
+                                                            match download_file(dl_bytes.clone(), owned_filename.clone().unwrap_or(owned_id.clone()), owned_content_type.clone()) {
+                                                                Ok(_) => {}
+                                                                Err(e) => {
+                                                                    popup_ctx.write().show_error(&e);
+                                                                }
+                                                            }
+                                                        },
+                                                        {t!("download-file")}
+                                                    }
                                                 }
                                             }
                                         }

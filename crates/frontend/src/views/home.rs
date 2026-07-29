@@ -2,7 +2,7 @@ use crate::BASE_URL;
 use crate::Route;
 use crate::components::PopupContext;
 use crate::sanitize_id;
-use crate::utils::{do_xhr_get, do_xhr_post, do_xhr_put};
+use crate::utils::{copy_to_clipboard, do_xhr_get, do_xhr_post, do_xhr_put};
 use base64::Engine as _;
 use dioxus::prelude::*;
 use dioxus_i18n::t;
@@ -547,7 +547,22 @@ pub fn home_view() -> Element {
                         p { class: "font-bold text-lg", {{t!("paste-created")}} }
                         div {
                             class: "mt-2",
-                            p { class: "text-sm text-text-secondary", "Full Link:" }
+                            div {
+                                class: "flex justify-between items-center",
+                                p { class: "text-sm text-text-secondary", "Full Link:" }
+                                button {
+                                    class: "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded hover:bg-accent-hover transition-all duration-200",
+                                    onclick: {
+                                        let url = paste_url.clone();
+                                        move |_| {
+                                            if let Err(e) = copy_to_clipboard(&url) {
+                                                popup_ctx.write().show_error(&e);
+                                            }
+                                        }
+                                    },
+                                    {t!("copy-clipboard")}
+                                }
+                            }
                             input {
                                 class: "w-full p-2 mt-1 bg-success text-text rounded text-sm font-mono",
                                 value: "{paste_url}",

@@ -85,6 +85,7 @@ time-left = زمان باقی‌مانده: { $time } ثانیه
 file-preview = پیش‌نمایش فایل
 file-ready-download = فایل آماده دانلود است
 download-file = دانلود فایل
+copy-clipboard = کپی
 enter-password-desc = رمز عبور را وارد کنید و روی «رمزگشایی Paste» کلیک کنید.
 
 how-it-works = نحوه کارکرد

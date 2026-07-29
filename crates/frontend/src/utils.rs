@@ -3,9 +3,36 @@ use futures::channel::mpsc;
 use futures::channel::oneshot;
 use std::cell::RefCell;
 use std::rc::Rc;
-use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen::closure::Closure;
 use web_sys::{ProgressEvent, XmlHttpRequest};
+
+#[wasm_bindgen]
+extern "C" {
+    type Clipboard;
+
+    #[wasm_bindgen(method)]
+    fn writeText(this: &Clipboard, text: &str) -> js_sys::Promise;
+}
+
+pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let window = web_sys::window().ok_or("Failed to get browser window")?;
+
+    let navigator = js_sys::Reflect::get(&window, &"navigator".into())
+        .map_err(|_| "Failed to get navigator".to_string())?;
+    let clipboard_val = js_sys::Reflect::get(&navigator, &"clipboard".into())
+        .map_err(|_| "Clipboard API not available".to_string())?;
+    let clipboard: &Clipboard = clipboard_val
+        .dyn_ref()
+        .ok_or_else(|| "Clipboard API not available".to_string())?;
+
+    let promise = clipboard.writeText(text);
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    });
+
+    Ok(())
+}
 
 pub struct XhrResponse {
     pub status: u16,
