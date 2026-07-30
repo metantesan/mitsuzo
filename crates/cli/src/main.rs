@@ -6,8 +6,8 @@ use mitsuzo_types::{
     UPLOAD_CHUNK_SIZE,
 };
 use mitsuzo_utils::{
-    compute_burn_receipt, compute_password_hash, decrypt_chunk_into,
-    derive_keys, encrypt_chunk_into, encrypt_setup, get_chunk_bounds, get_plaintext_size,
+    compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_keys,
+    encrypt_chunk_into, encrypt_setup, get_chunk_bounds, get_plaintext_size,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -112,7 +112,8 @@ fn make_pb(len: u64, main: &str, remainder: &str) -> indicatif::ProgressBar {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> eyre::Result<()> {
+    color_eyre::install()?;
     let cli = Cli::parse();
     let client = Client::builder()
         .timeout(Duration::from_secs(300))
@@ -180,7 +181,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 total_enc_chunks
             );
 
-            let (salt, nonce, mut encryption_key, password_hash) = encrypt_setup(&password)?;
+            let setup = encrypt_setup(&password)
+                .map_err(|e| eyre::eyre!("Encryption setup failed: {}", e))?;
+            let (salt, nonce, mut encryption_key, password_hash) = (
+                setup.salt,
+                setup.base_nonce,
+                setup.encryption_key,
+                setup.password_hash,
+            );
 
             let mut header = CreatePasteHeader {
                 nonce,
@@ -484,7 +492,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let encrypted = Arc::try_unwrap(buf).unwrap().into_inner().unwrap();
 
-            let (mut ek, _) = derive_keys(&password, &meta.salt)?;
+            let (mut ek, _) = derive_keys(&password, &meta.salt)
+                .map_err(|e| eyre::eyre!("Key derivation failed: {}", e))?;
 
             // Send burn receipt if paste is burn-after-read
             if meta.burn_after_read {

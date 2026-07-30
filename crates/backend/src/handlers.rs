@@ -9,32 +9,28 @@ use base64::{Engine as _, engine::general_purpose};
 use bitcode::{decode, encode};
 use futures::stream::{self, StreamExt};
 use mitsuzo_types::{
-    CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, GetPasteHeader, GetSaltResponse,
-    GetStatsResponse, InitPasteResponse, UPLOAD_CHUNK_SIZE,
+    ChunkInfoResponse, CreatePasteHeader, GetPasteHeader, GetSaltResponse, GetStatsResponse,
+    InitPasteResponse, UPLOAD_CHUNK_SIZE,
 };
+use mitsuzo_utils::get_plaintext_size;
 use rand::RngExt;
 use std::fs;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
-pub async fn serve_index() -> impl IntoResponse {
-    let index_path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("public/index.html");
-    let index_html = fs::read_to_string(index_path).unwrap();
-    Html(index_html)
+fn index_html() -> Result<String, StatusCode> {
+    let exe = std::env::current_exe().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let parent = exe.parent().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let index_path = parent.join("public/index.html");
+    fs::read_to_string(index_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-pub async fn fallback_to_index() -> impl IntoResponse {
-    let index_path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("public/index.html");
-    let index_html = fs::read_to_string(index_path).unwrap();
-    Html(index_html)
+pub async fn serve_index() -> Result<impl IntoResponse, StatusCode> {
+    index_html().map(Html)
+}
+
+pub async fn fallback_to_index() -> Result<impl IntoResponse, StatusCode> {
+    index_html().map(Html)
 }
 
 fn validate_id(id: &str) -> Result<(), StatusCode> {
@@ -55,7 +51,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     result == 0
 }
 
-fn verify_password(db: &crate::db::DataStore, id: &str, headers: &HeaderMap) -> Result<(), StatusCode> {
+fn verify_password(
+    db: &crate::db::DataStore,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<(), StatusCode> {
     let Some(stored_hash) = db.get_password_hash(id) else {
         return Err(StatusCode::NOT_FOUND);
     };
@@ -93,7 +93,11 @@ fn client_ip(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-pub async fn init_paste(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Result<Vec<u8>, StatusCode> {
+pub async fn init_paste(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Vec<u8>, StatusCode> {
     let ip = client_ip(&headers);
     if !state.limiter.check(&format!("init:{}", ip), 10, 60).await {
         return Err(StatusCode::TOO_MANY_REQUESTS);
@@ -105,7 +109,7 @@ pub async fn init_paste(State(state): State<AppState>, headers: HeaderMap, body:
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let ttl_seconds = match header.ttl_seconds {
+    let _ttl_seconds = match header.ttl_seconds {
         Some(ttl) => {
             if ttl == 0 {
                 return Err(StatusCode::BAD_REQUEST);
@@ -115,7 +119,7 @@ pub async fn init_paste(State(state): State<AppState>, headers: HeaderMap, body:
         None => return Err(StatusCode::BAD_REQUEST),
     };
 
-    let try_count = match header.try_count {
+    let _try_count = match header.try_count {
         Some(count) if count > 0 && count <= 100 => count,
         _ => return Err(StatusCode::BAD_REQUEST),
     };
@@ -136,21 +140,10 @@ pub async fn init_paste(State(state): State<AppState>, headers: HeaderMap, body:
         break;
     }
 
-    state.db.init_paste(
-        &id_str,
-        &header.nonce,
-        &header.salt,
-        &header.password_hash,
-        Some(try_count),
-        ttl_seconds,
-        header.data_type,
-        header.filename,
-        header.content_type,
-        header.total_chunks,
-        header.allow_download,
-        header.burn_after_read,
-        &header.burn_receipt_hash,
-    );
+    state
+        .db
+        .init_paste(&id_str, &header)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     info!(id = %id_str, "paste initialized");
 
@@ -169,7 +162,9 @@ pub async fn upload_chunk(
     if state.db.get_salt(&id).is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    state.db.append_chunk(&id, chunk_index, &body)
+    state
+        .db
+        .append_chunk(&id, chunk_index, &body)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(())
 }
@@ -202,36 +197,23 @@ pub async fn get_salt(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
-
-    if let (
-        Some(salt),
-        Some((
-            try_count,
-            expiration_timestamp,
-            data_type,
-            filename,
-            content_type,
-            total_chunks,
-            allow_download,
-            burn_after_read,
-        )),
-    ) = (state.db.get_salt(&id), state.db.get_meta(&id))
-    {
-        if try_count == 0 {
+    if let (Some(salt), Some(meta)) = (state.db.get_salt(&id), state.db.get_meta(&id)) {
+        if meta.try_count == 0 {
             return Err(StatusCode::NOT_FOUND);
         }
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let ttl = if expiration_timestamp > 0 && expiration_timestamp > current_time {
-            expiration_timestamp - current_time
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let ttl = if meta.expiration_timestamp > 0 && meta.expiration_timestamp > current_time {
+            meta.expiration_timestamp - current_time
         } else {
             0
         };
 
         let content_len = state.db.get_content_size(&id).unwrap_or(0);
-        let total_size = compute_total_size(content_len as usize, total_chunks);
+        let total_size =
+            get_plaintext_size(meta.total_chunks, content_len as usize).unwrap_or(0) as u64;
 
         let nonce = state.db.get_nonce(&id).ok_or(StatusCode::NOT_FOUND)?;
         let nonce_arr: [u8; 12] = nonce
@@ -240,40 +222,21 @@ pub async fn get_salt(
 
         let response = GetSaltResponse {
             salt,
-            try_count,
+            try_count: meta.try_count,
             ttl,
-            total_chunks,
+            total_chunks: meta.total_chunks,
             total_size,
             nonce: nonce_arr,
-            data_type,
-            filename,
-            content_type,
-            allow_download,
-            burn_after_read,
+            data_type: meta.data_type,
+            filename: meta.filename,
+            content_type: meta.content_type,
+            allow_download: meta.allow_download,
+            burn_after_read: meta.burn_after_read,
         };
         Ok(encode(&response))
     } else {
         Err(StatusCode::NOT_FOUND)
     }
-}
-
-fn compute_total_size(content_len: usize, total_chunks: u32) -> u64 {
-    if total_chunks <= 1 {
-        return content_len.saturating_sub(16) as u64;
-    }
-    let chunk_overhead: usize = 16;
-    let full_chunk_cipher_len = CHUNK_SIZE + chunk_overhead;
-    let full_chunks = (total_chunks - 1) as usize;
-    let full_chunks_cipher_len = full_chunks * full_chunk_cipher_len;
-    if content_len < full_chunks_cipher_len {
-        return 0;
-    }
-    let last_chunk_cipher_len = content_len - full_chunks_cipher_len;
-    if last_chunk_cipher_len <= chunk_overhead {
-        return (full_chunks * CHUNK_SIZE) as u64;
-    }
-    let last_chunk_plain_len = last_chunk_cipher_len - chunk_overhead;
-    (full_chunks * CHUNK_SIZE + last_chunk_plain_len) as u64
 }
 
 pub async fn get_paste(
@@ -285,15 +248,17 @@ pub async fn get_paste(
     verify_password(&state.db, &id, &headers)?;
 
     let nonce = state.db.get_nonce(&id).ok_or(StatusCode::NOT_FOUND)?;
-    let file_path = state.db.get_content_path(&id).ok_or(StatusCode::NOT_FOUND)?;
-    let (_try_count, _expiration, data_type, filename, content_type, total_chunks, allow_download, _burn_after_read) =
-        state.db.get_meta(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let file_path = state
+        .db
+        .get_content_path(&id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let meta = state.db.get_meta(&id).ok_or(StatusCode::NOT_FOUND)?;
 
     let file_meta = tokio::fs::metadata(&file_path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
     let content_len = file_meta.len() as usize;
-    let total_size = compute_total_size(content_len, total_chunks);
+    let total_size = get_plaintext_size(meta.total_chunks, content_len).unwrap_or(0) as u64;
     state.db.increment_success();
 
     let nonce_arr: [u8; 12] = nonce
@@ -303,12 +268,12 @@ pub async fn get_paste(
     let header = GetPasteHeader {
         id,
         nonce: nonce_arr,
-        data_type,
-        filename,
-        content_type,
+        data_type: meta.data_type,
+        filename: meta.filename,
+        content_type: meta.content_type,
         total_size,
-        total_chunks,
-        allow_download,
+        total_chunks: meta.total_chunks,
+        allow_download: meta.allow_download,
     };
 
     let header_bytes = encode(&header);
@@ -346,7 +311,10 @@ pub async fn get_paste_data(
     validate_id(&id)?;
     verify_password(&state.db, &id, &headers)?;
 
-    let file_path = state.db.get_content_path(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let file_path = state
+        .db
+        .get_content_path(&id)
+        .ok_or(StatusCode::NOT_FOUND)?;
     let file_meta = tokio::fs::metadata(&file_path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
@@ -393,7 +361,7 @@ pub async fn get_paste_data(
                 }
             });
 
-        return Ok(Response::builder()
+        return Response::builder()
             .status(StatusCode::PARTIAL_CONTENT)
             .header(header::ACCEPT_RANGES, "bytes")
             .header(
@@ -402,7 +370,7 @@ pub async fn get_paste_data(
             )
             .header(header::CONTENT_LENGTH, len.to_string())
             .body(Body::from_stream(file_stream))
-            .unwrap());
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     let file = tokio::fs::File::open(&file_path)
@@ -421,11 +389,11 @@ pub async fn get_paste_data(
         }
     });
 
-    Ok(Response::builder()
+    Response::builder()
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, file_len.to_string())
         .body(Body::from_stream(file_stream))
-        .unwrap())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 fn parse_range(header: &str) -> Option<(u64, u64)> {
@@ -470,7 +438,7 @@ pub async fn burn_paste(
     Ok(())
 }
 
-pub async fn get_stats(State(state): State<AppState>) -> Vec<u8> {
+pub async fn get_stats(State(state): State<AppState>) -> Result<Vec<u8>, StatusCode> {
     let stats = tokio::task::spawn_blocking(move || {
         (
             state.db.get_pastes_all_time(),
@@ -482,14 +450,14 @@ pub async fn get_stats(State(state): State<AppState>) -> Vec<u8> {
         )
     })
     .await
-    .unwrap();
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    encode(&GetStatsResponse {
+    Ok(encode(&GetStatsResponse {
         pastes_all_time: stats.0,
         pastes_daily: stats.1,
         requests_success_all_time: stats.2,
         requests_success_daily: stats.3,
         requests_fail_all_time: stats.4,
         requests_fail_daily: stats.5,
-    })
+    }))
 }

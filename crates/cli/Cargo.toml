@@ -21,3 +21,5 @@ serde.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
 zeroize.workspace = true
+eyre.workspace = true
+color-eyre.workspace = true

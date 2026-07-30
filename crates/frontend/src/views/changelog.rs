@@ -14,14 +14,34 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
-            version: "v0.6.1",
+            version: "v0.7.0",
             date: "2026-07",
             items_en: vec![
-                "Burn receipt uses HKDF-SHA256 instead of HMAC + SHA256 double-hash"
+                "Refactored complex tuple types into named structs across the entire codebase",
+                "Replaced unsafe unwrap() calls with proper error handling via eyre/color-eyre",
+                "Added graceful shutdown with Sled DB flush on SIGTERM and Ctrl+C",
+                "Fixed race condition in paste cleanup with a dedicated deletion mutex",
+                "Removed duplicate code — merged serve_index/fallback_to_index, replaced compute_total_size with get_plaintext_size",
+                "Mobile home page: preset buttons now stack vertically on small screens using grid layout",
+                "Styled checkboxes to match the dark \"Warm Vault\" theme",
+                "Added GitHub issue and PR templates",
             ],
             items_fa: vec![
-                "رسید حذف از HKDF-SHA256 به جای HMAC + SHA256 استفاده می‌کند"
+                "بازنویسی نوع‌های تاپل پیچیده به ساختارهای نام‌گذاری‌شده در سراسر کدبیس",
+                "جایگزینی فراخوانی‌های ناایمن unwrap() با مدیریت خطای مناسب با eyre/color-eyre",
+                "افزودن خاموش‌شدن تدریجی با Sled DB flush در SIGTERM و Ctrl+C",
+                "رفع شرط رقابتی در پاک‌سازی Paste با استفاده از قفل حذف",
+                "حذف کد تکراری — ادغام serve_index/fallback_to_index و جایگزینی compute_total_size با get_plaintext_size",
+                "صفحه اصلی موبایل: دکمه‌های پیش‌انتخاب با استفاده از grid به صورت عمودی در صفحه‌های کوچک",
+                "استایل چک‌باکس‌ها مطابق با تم تیره «Warm Vault»",
+                "افزودن قالب‌های issue و PR در گیت‌هاب",
             ],
+        },
+        Change {
+            version: "v0.6.1",
+            date: "2026-07",
+            items_en: vec!["Burn receipt uses HKDF-SHA256 instead of HMAC + SHA256 double-hash"],
+            items_fa: vec!["رسید حذف از HKDF-SHA256 به جای HMAC + SHA256 استفاده می‌کند"],
         },
         Change {
             version: "v0.6.0",

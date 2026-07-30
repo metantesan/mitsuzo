@@ -20,6 +20,7 @@ try-count-label = تعداد تلاش (۰ برای نامحدود)
 ttl-label = زمان اعتبار
 ttl-5min = ۵ دقیقه
 ttl-1hour = ۱ ساعت
+ttl-6hour = ۶ ساعت
 ttl-12hour = ۱۲ ساعت
 ttl-custom = دلخواه
 create-paste = ایجاد Paste

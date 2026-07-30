@@ -1,9 +1,11 @@
 use bitcode::{decode, encode};
-use mitsuzo_types::DataType;
+use eyre::Context;
+use mitsuzo_types::{PasteListing, PasteMeta};
 use sled::Db;
 use std::{
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -12,41 +14,40 @@ pub struct DataStore {
     db: Db,
     stats: Db,
     files_dir: PathBuf,
+    deletion_lock: Arc<Mutex<()>>,
 }
 
 impl DataStore {
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
-        let db = sled::open(Path::new("database/db")).unwrap();
-        let stats = sled::open(Path::new("database/stats")).unwrap();
+    pub fn new() -> eyre::Result<Self> {
+        let db =
+            sled::open(Path::new("database/db")).wrap_err("Failed to open Sled database/db")?;
+        let stats = sled::open(Path::new("database/stats"))
+            .wrap_err("Failed to open Sled database/stats")?;
         let files_dir = PathBuf::from("database/files");
-        std::fs::create_dir_all(&files_dir).unwrap();
-        Self {
+        std::fs::create_dir_all(&files_dir)
+            .wrap_err("Failed to create database/files directory")?;
+        Ok(Self {
             db,
             stats,
             files_dir,
-        }
+            deletion_lock: Arc::new(Mutex::new(())),
+        })
     }
 }
 
 fn day_key(prefix: &str) -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let secs = epoch_secs();
     format!("{}:{}", prefix, secs / 86400)
 }
 
 fn increment_counter(db: &Db, key: &str) {
-    let _ = db
-        .update_and_fetch(key.as_bytes(), |v| {
-            let count = v.map_or(0u64, |bytes| {
-                let arr: [u8; 8] = bytes.as_ref().try_into().unwrap_or([0u8; 8]);
-                u64::from_be_bytes(arr)
-            });
-            Some((count + 1).to_be_bytes().to_vec())
-        })
-        .unwrap();
+    let _ = db.update_and_fetch(key.as_bytes(), |v| {
+        let count = v.map_or(0u64, |bytes| {
+            let arr: [u8; 8] = bytes.as_ref().try_into().unwrap_or([0u8; 8]);
+            u64::from_be_bytes(arr)
+        });
+        Some((count + 1).to_be_bytes().to_vec())
+    });
     let _ = db.flush();
 }
 
@@ -72,57 +73,54 @@ fn nonce_path(files_dir: &Path, id: &str) -> PathBuf {
 fn epoch_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl DataStore {
-    #[allow(clippy::too_many_arguments)]
     pub fn init_paste(
         &self,
         id: &str,
-        nonce: &[u8],
-        salt: &[u8],
-        password_hash: &[u8],
-        try_count: Option<u32>,
-        ttl_seconds: Option<u32>,
-        data_type: DataType,
-        filename: Option<String>,
-        content_type: Option<String>,
-        total_chunks: u32,
-        allow_download: bool,
-        burn_after_read: bool,
-        burn_receipt_hash: &[u8],
-    ) {
-        std::fs::write(nonce_path(&self.files_dir, id), nonce).unwrap();
+        header: &mitsuzo_types::CreatePasteHeader,
+    ) -> eyre::Result<()> {
+        let nonce_path = nonce_path(&self.files_dir, id);
+        std::fs::write(&nonce_path, header.nonce)
+            .wrap_err_with(|| format!("Failed to write nonce for paste {}", id))?;
 
-        let _ = self.db.insert(format!("pass:{}", id), password_hash);
-        let _ = self.db.insert(format!("salt:{}", id), salt);
+        let _ = self
+            .db
+            .insert(format!("pass:{}", id), header.password_hash.as_slice());
+        let _ = self
+            .db
+            .insert(format!("salt:{}", id), header.salt.as_slice());
 
-        let expiration_timestamp = match ttl_seconds {
+        let expiration_timestamp = match header.ttl_seconds {
             Some(ttl) if ttl > 0 => epoch_secs() + u64::from(ttl),
             _ => 0,
         };
 
-        let meta_value = encode(&(
-            try_count.unwrap_or(0),
+        let meta_value = encode(&PasteMeta {
+            try_count: header.try_count.unwrap_or(0),
             expiration_timestamp,
-            data_type,
-            filename,
-            content_type,
-            total_chunks,
-            allow_download,
-            burn_after_read,
-        ));
+            data_type: header.data_type.clone(),
+            filename: header.filename.clone(),
+            content_type: header.content_type.clone(),
+            total_chunks: header.total_chunks,
+            allow_download: header.allow_download,
+            burn_after_read: header.burn_after_read,
+        });
         let _ = self.db.insert(format!("meta:{}", id), meta_value);
         let _ = self
             .db
             .insert(format!("crecv:{}", id), &0u32.to_le_bytes()[..]);
-        let _ = self.db.insert(format!("burn:{}", id), burn_receipt_hash);
+        let _ = self
+            .db
+            .insert(format!("burn:{}", id), header.burn_receipt_hash.as_slice());
         let _ = self.db.flush();
 
         increment_counter(&self.stats, "pastes_all_time");
         increment_counter(&self.stats, &day_key("pastes_day"));
+        Ok(())
     }
 
     #[allow(clippy::result_unit_err)]
@@ -217,20 +215,7 @@ impl DataStore {
             .map(|v| v.to_vec())
     }
 
-    #[allow(clippy::type_complexity)]
-    pub fn get_meta(
-        &self,
-        id: &str,
-    ) -> Option<(
-        u32,
-        u64,
-        DataType,
-        Option<String>,
-        Option<String>,
-        u32,
-        bool,
-        bool,
-    )> {
+    pub fn get_meta(&self, id: &str) -> Option<PasteMeta> {
         match self.db.get(format!("meta:{}", id)) {
             Ok(Some(value)) => decode(&value).ok(),
             Ok(None) => None,
@@ -244,63 +229,28 @@ impl DataStore {
             .db
             .update_and_fetch(key.as_bytes(), |value| {
                 let value = value.as_ref()?;
-                let (
-                    try_count,
-                    expiration,
-                    data_type,
-                    filename,
-                    content_type,
-                    total_chunks,
-                    allow_download,
-                    burn_after_read,
-                ) = decode::<(
-                    u32,
-                    u64,
-                    DataType,
-                    Option<String>,
-                    Option<String>,
-                    u32,
-                    bool,
-                    bool,
-                )>(value)
-                .ok()?;
-                if try_count == 0 {
+                let Ok(mut meta) = decode::<PasteMeta>(value) else {
+                    return None;
+                };
+                if meta.try_count == 0 {
                     return None;
                 }
-                let new_try_count = try_count - 1;
-                let encoded = encode(&(
-                    new_try_count,
-                    expiration,
-                    data_type,
-                    filename,
-                    content_type,
-                    total_chunks,
-                    allow_download,
-                    burn_after_read,
-                ));
-                Some(encoded)
+                meta.try_count -= 1;
+                Some(encode(&meta))
             })
             .ok()
             .flatten();
-        if let Some(meta) = result {
-            if let Ok((0, _, _, _, _, _, _, _)) = decode::<(
-                u32,
-                u64,
-                DataType,
-                Option<String>,
-                Option<String>,
-                u32,
-                bool,
-                bool,
-            )>(&meta)
-            {
-                self.delete_paste(id);
-            }
-            let _ = self.db.flush();
+        if let Some(meta) = result
+            && let Ok(decoded) = decode::<PasteMeta>(&meta)
+            && decoded.try_count == 0
+        {
+            self.delete_paste(id);
         }
+        let _ = self.db.flush();
     }
 
     pub fn delete_paste(&self, id: &str) {
+        let _lock = self.deletion_lock.lock();
         let _ = self.db.remove(format!("pass:{}", id));
         let _ = self.db.remove(format!("salt:{}", id));
         let _ = self.db.remove(format!("meta:{}", id));
@@ -334,66 +284,55 @@ impl DataStore {
 
     pub fn cleanup_expired(&self) -> usize {
         let current_time = epoch_secs();
-        let mut deleted_count = 0;
+        let mut to_delete = Vec::new();
 
         for item in self.db.scan_prefix(b"meta:") {
             let Ok((key, value)) = item else { continue };
-            let Ok((_, expiration_timestamp, _, _, _, _, _, _)) = decode::<(
-                u32,
-                u64,
-                DataType,
-                Option<String>,
-                Option<String>,
-                u32,
-                bool,
-                bool,
-            )>(&value) else {
+            let Ok(meta) = decode::<PasteMeta>(&value) else {
                 continue;
             };
-            if expiration_timestamp > 0
-                && current_time > expiration_timestamp
+            if meta.expiration_timestamp > 0
+                && current_time > meta.expiration_timestamp
                 && let Ok(id_str) = std::str::from_utf8(&key[5..])
             {
-                self.delete_paste(id_str);
-                deleted_count += 1;
+                to_delete.push(id_str.to_string());
             }
         }
 
-        deleted_count
+        let _lock = self.deletion_lock.lock();
+        for id in &to_delete {
+            self.delete_paste(id);
+        }
+        to_delete.len()
     }
 
-    pub fn list_all(&self) -> Vec<(String, u64, DataType, Option<String>)> {
+    pub fn list_all(&self) -> Vec<PasteListing> {
         let mut results = Vec::new();
         for item in self.db.scan_prefix(b"meta:") {
             let Ok((key, value)) = item else { continue };
             let Ok(id_str) = std::str::from_utf8(&key[5..]) else {
                 continue;
             };
-            let Ok((_, _, data_type, filename, _, _, _, _)) = decode::<(
-                u32,
-                u64,
-                DataType,
-                Option<String>,
-                Option<String>,
-                u32,
-                bool,
-                bool,
-            )>(&value) else {
+            let Ok(meta) = decode::<PasteMeta>(&value) else {
                 continue;
             };
             let size = std::fs::metadata(content_path(&self.files_dir, id_str))
                 .map(|m| m.len())
                 .unwrap_or(0);
-            results.push((id_str.to_string(), size, data_type, filename));
+            results.push(PasteListing {
+                id: id_str.to_string(),
+                size,
+                data_type: meta.data_type,
+                filename: meta.filename,
+            });
         }
         results
     }
 
     fn is_expired(&self, id: &str) -> bool {
-        if let Some((_, expiration_timestamp, _, _, _, _, _, _)) = self.get_meta(id) {
+        if let Some(meta) = self.get_meta(id) {
             let current_time = epoch_secs();
-            if expiration_timestamp > 0 && current_time > expiration_timestamp {
-                self.delete_paste(id);
+            if meta.expiration_timestamp > 0 && current_time > meta.expiration_timestamp {
                 return true;
             }
         }
@@ -416,19 +355,10 @@ impl DataStore {
     pub fn id_available(&self, id: &str) -> bool {
         match self.db.get(format!("meta:{}", id)) {
             Ok(Some(value)) => {
-                let Ok((_, expiration_timestamp, _, _, _, _, _, _)) = decode::<(
-                    u32,
-                    u64,
-                    DataType,
-                    Option<String>,
-                    Option<String>,
-                    u32,
-                    bool,
-                    bool,
-                )>(&value) else {
+                let Ok(meta) = decode::<PasteMeta>(&value) else {
                     return true;
                 };
-                expiration_timestamp > 0 && epoch_secs() > expiration_timestamp
+                meta.expiration_timestamp > 0 && epoch_secs() > meta.expiration_timestamp
             }
             _ => true,
         }
@@ -473,5 +403,11 @@ impl DataStore {
 
     pub fn get_fail_daily(&self) -> u64 {
         read_counter(&self.stats, &day_key("fail_day"))
+    }
+
+    pub fn flush(&self) -> eyre::Result<()> {
+        self.db.flush().wrap_err("Failed to flush Sled db")?;
+        self.stats.flush().wrap_err("Failed to flush Sled stats")?;
+        Ok(())
     }
 }

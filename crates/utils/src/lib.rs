@@ -43,6 +43,13 @@ fn hkdf_expand_sha256(prk: &[u8; 32], info: &[u8]) -> [u8; 32] {
     hmac_sha256(prk, &data)
 }
 
+pub struct EncryptionSetup {
+    pub salt: [u8; 16],
+    pub base_nonce: [u8; 12],
+    pub encryption_key: [u8; 32],
+    pub password_hash: [u8; 32],
+}
+
 pub fn get_argon2_params() -> Result<Params, String> {
     Params::new(19456, 2, 1, Some(32)).map_err(|e| format!("Failed to create Argon2 params: {}", e))
 }
@@ -141,13 +148,17 @@ fn generate_nonce() -> Result<[u8; 12], String> {
 
 const FULL_CHUNK_CIPHER_LEN: usize = CHUNK_SIZE + 16;
 
-#[allow(clippy::type_complexity)]
-pub fn encrypt_setup(password: &str) -> Result<([u8; 16], [u8; 12], [u8; 32], [u8; 32]), String> {
+pub fn encrypt_setup(password: &str) -> Result<EncryptionSetup, String> {
     let salt = generate_salt()?;
     let (encryption_key, validation_key) = derive_keys(password, &salt)?;
     let base_nonce = generate_nonce()?;
     let password_hash = compute_password_hash(&validation_key, &salt);
-    Ok((salt, base_nonce, encryption_key, password_hash))
+    Ok(EncryptionSetup {
+        salt,
+        base_nonce,
+        encryption_key,
+        password_hash,
+    })
 }
 
 pub fn encrypt_into(
@@ -180,15 +191,30 @@ pub fn encrypt_into(
     Ok(total_chunks)
 }
 
-#[allow(clippy::type_complexity)]
-pub fn encrypt_content(
-    plaintext: &[u8],
-    password: &str,
-) -> Result<(Vec<u8>, [u8; 12], [u8; 16], [u8; 32], u32), String> {
-    let (salt, base_nonce, encryption_key, password_hash) = encrypt_setup(password)?;
+pub struct EncryptedContent {
+    pub ciphertext: Vec<u8>,
+    pub base_nonce: [u8; 12],
+    pub salt: [u8; 16],
+    pub password_hash: [u8; 32],
+    pub total_chunks: u32,
+}
+
+pub fn encrypt_content(plaintext: &[u8], password: &str) -> Result<EncryptedContent, String> {
+    let setup = encrypt_setup(password)?;
     let mut ciphertext = Vec::new();
-    let total_chunks = encrypt_into(plaintext, &encryption_key, &base_nonce, &mut ciphertext)?;
-    Ok((ciphertext, base_nonce, salt, password_hash, total_chunks))
+    let total_chunks = encrypt_into(
+        plaintext,
+        &setup.encryption_key,
+        &setup.base_nonce,
+        &mut ciphertext,
+    )?;
+    Ok(EncryptedContent {
+        ciphertext,
+        base_nonce: setup.base_nonce,
+        salt: setup.salt,
+        password_hash: setup.password_hash,
+        total_chunks,
+    })
 }
 
 /// Compute byte range for a chunk in the ciphertext

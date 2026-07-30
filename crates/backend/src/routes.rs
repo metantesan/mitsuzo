@@ -1,12 +1,13 @@
-use crate::handlers;
 use crate::AppState;
+use crate::handlers;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
-    http::Method,
+    http::{HeaderName, Method},
     routing::{get, post, put},
 };
 use mitsuzo_types::UPLOAD_CHUNK_SIZE;
+use std::path::PathBuf;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     services::ServeDir,
@@ -20,7 +21,7 @@ pub fn api_router(state: AppState) -> Router {
             axum::http::header::CONTENT_TYPE,
             axum::http::header::ORIGIN,
             axum::http::header::ACCEPT,
-            "X-Password-Hash".parse().unwrap(),
+            HeaderName::from_static("x-password-hash"),
         ])
         .allow_credentials(true);
 
@@ -44,10 +45,9 @@ pub fn api_router(state: AppState) -> Router {
 
 pub fn app_router(state: AppState) -> Router {
     let assets_path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("public/assets");
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join("public/assets")))
+        .unwrap_or_else(|| PathBuf::from("public/assets"));
 
     Router::new()
         .route("/", get(handlers::serve_index))

@@ -8,11 +8,19 @@ use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{DataType, GetSaltResponse};
 use mitsuzo_utils::{
-    compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_keys,
-    get_chunk_bounds, get_plaintext_size,
+    compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_keys, get_chunk_bounds,
+    get_plaintext_size,
 };
 use wasm_bindgen::JsCast;
 use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
+
+pub struct PasteContent {
+    pub bytes: Vec<u8>,
+    pub data_type: DataType,
+    pub filename: Option<String>,
+    pub content_type: Option<String>,
+    pub allow_download: bool,
+}
 
 #[derive(Clone, Debug)]
 pub struct ProgressState {
@@ -24,8 +32,7 @@ pub struct ProgressState {
 pub fn paste_view(id: String) -> Element {
     let id = sanitize_id(&id);
     let mut password_input = use_signal(String::new);
-    let paste_content =
-        use_signal(|| Option::<(Vec<u8>, DataType, Option<String>, Option<String>, bool)>::None);
+    let paste_content: Signal<Option<PasteContent>> = use_signal(|| None);
     let paste_id_state = use_signal(|| id.clone());
     let try_count: Signal<Option<u32>> = use_signal(|| None);
     let ttl: Signal<Option<u64>> = use_signal(|| None);
@@ -158,7 +165,7 @@ pub fn paste_view(id: String) -> Element {
 
             {
                 match &*paste_content.read() {
-                    Some((bytes, data_type, filename, content_type, allow_download)) => {
+                    Some(PasteContent { bytes, data_type, filename, content_type, allow_download }) => {
                         let id = paste_id_state.read().clone();
                         let origin = web_sys::window()
                             .and_then(|w| w.location().origin().ok())
@@ -358,7 +365,7 @@ async fn do_decrypt(
     mut try_count: Signal<Option<u32>>,
     mut ttl: Signal<Option<u64>>,
     mut progress: Signal<Option<ProgressState>>,
-    mut paste_content: Signal<Option<(Vec<u8>, DataType, Option<String>, Option<String>, bool)>>,
+    mut paste_content: Signal<Option<PasteContent>>,
     mut burn_after_read: Signal<bool>,
     mut salt: Signal<Option<Vec<u8>>>,
 ) {
@@ -549,7 +556,8 @@ async fn do_decrypt(
                                     &format!("{}/api/paste/{}/burn", BASE_URL, current_id),
                                     receipt.to_vec(),
                                     |_, _| {},
-                                ).await;
+                                )
+                                .await;
                                 match burn_result {
                                     Ok(r) if r.status >= 200 && r.status < 300 => {
                                         popup_ctx.write().show_error(t!("burn-complete"));
@@ -560,13 +568,13 @@ async fn do_decrypt(
                                     _ => {}
                                 }
                             }
-                            paste_content.set(Some((
-                                plaintext,
-                                header_data_type,
-                                header_filename,
-                                header_content_type,
-                                header_allow_download,
-                            )));
+                            paste_content.set(Some(PasteContent {
+                                bytes: plaintext,
+                                data_type: header_data_type,
+                                filename: header_filename,
+                                content_type: header_content_type,
+                                allow_download: header_allow_download,
+                            }));
                             progress.set(None);
                         }
                         Err(e) => {

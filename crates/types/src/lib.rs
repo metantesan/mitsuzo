@@ -63,6 +63,25 @@ pub struct GetSaltResponse {
     pub burn_after_read: bool,
 }
 
+#[derive(bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
+pub struct PasteMeta {
+    pub try_count: u32,
+    pub expiration_timestamp: u64,
+    pub data_type: DataType,
+    pub filename: Option<String>,
+    pub content_type: Option<String>,
+    pub total_chunks: u32,
+    pub allow_download: bool,
+    pub burn_after_read: bool,
+}
+
+pub struct PasteListing {
+    pub id: String,
+    pub size: u64,
+    pub data_type: DataType,
+    pub filename: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
 pub struct GetStatsResponse {
     pub pastes_all_time: u64,

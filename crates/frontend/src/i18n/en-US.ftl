@@ -20,6 +20,7 @@ try-count-label = Try Count (0 for infinite)
 ttl-label = Time to Live
 ttl-5min = 5 min
 ttl-1hour = 1 hour
+ttl-6hour = 6 hours
 ttl-12hour = 12 hours
 ttl-custom = Custom
 create-paste = Create Paste
