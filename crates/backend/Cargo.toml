@@ -29,3 +29,5 @@ base64.workspace = true
 eyre.workspace = true
 color-eyre.workspace = true
 mitsuzo-utils = { workspace = true }
+sha2.workspace = true
+signal-hook.workspace = true

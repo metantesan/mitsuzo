@@ -14,6 +14,18 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.7.1",
+            date: "2026-08",
+            items_en: vec![
+                "ETag support with If-None-Match/304 responses for index.html and robots.txt",
+                "Reliable graceful shutdown: signals caught on a dedicated thread, bounded DB flush, and a watchdog that force-exits within Docker's grace period",
+            ],
+            items_fa: vec![
+                "پشتیبانی ETag با پاسخ‌های If-None-Match/304 برای index.html و robots.txt",
+                "خاموش‌شدن تدریجی مطمئن: دریافت سیگنال‌ها در یک ترد جدا، محدودسازی زمان flush دیتابیس و واک‌داگ برای خروج اجباری در محدوده‌ی مهلت Docker",
+            ],
+        },
+        Change {
             version: "v0.7.0",
             date: "2026-07",
             items_en: vec![

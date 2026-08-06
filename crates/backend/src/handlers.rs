@@ -2,8 +2,8 @@ use crate::AppState;
 use axum::{
     body::{Body, Bytes},
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header},
-    response::{Html, IntoResponse, Response},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::Response,
 };
 use base64::{Engine as _, engine::general_purpose};
 use bitcode::{decode, encode};
@@ -14,23 +14,66 @@ use mitsuzo_types::{
 };
 use mitsuzo_utils::get_plaintext_size;
 use rand::RngExt;
+use sha2::{Digest, Sha256};
 use std::fs;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
 fn index_html() -> Result<String, StatusCode> {
+    public_file("index.html")
+}
+
+fn etag(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let digest = hasher.finalize();
+    format!(
+        "\"{}\"",
+        digest
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+    )
+}
+
+fn static_response(headers: &HeaderMap, content: String, content_type: &str) -> Response {
+    let tag = etag(&content);
+    let etag_value =
+        HeaderValue::from_str(&tag).unwrap_or_else(|_| HeaderValue::from_static("\"\""));
+    if headers.get(header::IF_NONE_MATCH).map(|v| v.as_bytes()) == Some(tag.as_bytes()) {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, etag_value)
+            .body(Body::empty())
+            .expect("empty body");
+    }
+    Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ETAG, etag_value)
+        .body(Body::from(content))
+        .expect("valid response")
+}
+
+pub async fn serve_index(headers: HeaderMap) -> Result<Response, StatusCode> {
+    Ok(static_response(&headers, index_html()?, "text/html"))
+}
+
+pub async fn fallback_to_index(headers: HeaderMap) -> Result<Response, StatusCode> {
+    Ok(static_response(&headers, index_html()?, "text/html"))
+}
+
+const DEFAULT_ROBOTS_TXT: &str = "User-agent: *\nDisallow: /api\nDisallow: /paste\nDisallow: /p\n";
+
+fn public_file(name: &str) -> Result<String, StatusCode> {
     let exe = std::env::current_exe().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let parent = exe.parent().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let index_path = parent.join("public/index.html");
-    fs::read_to_string(index_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let path = parent.join("public").join(name);
+    fs::read_to_string(path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-pub async fn serve_index() -> Result<impl IntoResponse, StatusCode> {
-    index_html().map(Html)
-}
-
-pub async fn fallback_to_index() -> Result<impl IntoResponse, StatusCode> {
-    index_html().map(Html)
+pub async fn robots_txt(headers: HeaderMap) -> Result<Response, StatusCode> {
+    let content = public_file("robots.txt").unwrap_or_else(|_| DEFAULT_ROBOTS_TXT.to_string());
+    Ok(static_response(&headers, content, "text/plain"))
 }
 
 fn validate_id(id: &str) -> Result<(), StatusCode> {
