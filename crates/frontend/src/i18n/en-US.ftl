@@ -96,6 +96,7 @@ file-preview = File Preview
 file-ready-download = File Ready for Download
 download-file = Download File
 copy-clipboard = Copy
+copy-success = Copied to clipboard!
 enter-password-desc = Enter password and click 'Decrypt Paste' to view content.
 
 how-it-works = How It Works

@@ -14,6 +14,16 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.7.2",
+            date: "2026-08",
+            items_en: vec![
+                "Success popup notification when copying to clipboard — green toast shown on every copy action",
+            ],
+            items_fa: vec![
+                "اعلان موفقیت هنگام کپی در کلیپ‌بورد — نمایش پیام سبز در هر عملیات کپی",
+            ],
+        },
+        Change {
             version: "v0.7.1",
             date: "2026-08",
             items_en: vec![

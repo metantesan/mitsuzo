@@ -667,6 +667,8 @@ pub fn home_view() -> Element {
                                         move |_| {
                                             if let Err(e) = copy_to_clipboard(&url) {
                                                 popup_ctx.write().show_error(&e);
+                                            } else {
+                                                popup_ctx.write().show_success(t!("copy-success"));
                                             }
                                         }
                                     },

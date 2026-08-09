@@ -189,6 +189,8 @@ pub fn paste_view(id: String) -> Element {
                                                 onclick: move |_| {
                                                     if let Err(e) = copy_to_clipboard(&text_for_copy) {
                                                         popup_ctx.write().show_error(&e);
+                                                    } else {
+                                                        popup_ctx.write().show_success(t!("copy-success"));
                                                     }
                                                 },
                                                 {t!("copy-clipboard")}
@@ -275,6 +277,8 @@ pub fn paste_view(id: String) -> Element {
                                                         move |_| {
                                                             if let Err(e) = copy_to_clipboard(&url) {
                                                                 popup_ctx.write().show_error(&e);
+                                                            } else {
+                                                                popup_ctx.write().show_success(t!("copy-success"));
                                                             }
                                                         }
                                                     },
@@ -319,6 +323,8 @@ pub fn paste_view(id: String) -> Element {
                                                         move |_| {
                                                             if let Err(e) = copy_to_clipboard(&url) {
                                                                 popup_ctx.write().show_error(&e);
+                                                            } else {
+                                                                popup_ctx.write().show_success(t!("copy-success"));
                                                             }
                                                         }
                                                     },
