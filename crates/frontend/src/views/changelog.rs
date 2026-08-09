@@ -14,14 +14,22 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.7.3",
+            date: "2026-08",
+            items_en: vec![
+                "Removed signal handling and graceful shutdown — the shutdown watchdog thread could exit the process silently with no log and no container restart, leaving the app dead without a trace. Server now simply runs until stopped.",
+            ],
+            items_fa: vec![
+                "حذف مدیریت سیگنال و خاموش‌شدن تدریجی — ترد واک‌داگ می‌توانست فرایند را بدون هیچ لاگ و بدون ری‌استارت کانتینر بی‌صدا متوقف کند و برنامه را بدون هیچ اثری از کار بیندازد. سرور اکنون به سادگی اجرا می‌شود تا زمانی که متوقف شود.",
+            ],
+        },
+        Change {
             version: "v0.7.2",
             date: "2026-08",
             items_en: vec![
                 "Success popup notification when copying to clipboard — green toast shown on every copy action",
             ],
-            items_fa: vec![
-                "اعلان موفقیت هنگام کپی در کلیپ‌بورد — نمایش پیام سبز در هر عملیات کپی",
-            ],
+            items_fa: vec!["اعلان موفقیت هنگام کپی در کلیپ‌بورد — نمایش پیام سبز در هر عملیات کپی"],
         },
         Change {
             version: "v0.7.1",
