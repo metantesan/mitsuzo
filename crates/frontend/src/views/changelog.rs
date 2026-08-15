@@ -14,6 +14,16 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.7.4",
+            date: "2026-08",
+            items_en: vec![
+                "Fixed a deadlock in expired-paste cleanup that could freeze the server and stop it accepting connections",
+            ],
+            items_fa: vec![
+                "رفع بن‌بست در پاک‌سازی پیست‌های منقضی‌شده که می‌توانست سرور را قفل کرده و پذیرش اتصال را متوقف کند",
+            ],
+        },
+        Change {
             version: "v0.7.3",
             date: "2026-08",
             items_en: vec![

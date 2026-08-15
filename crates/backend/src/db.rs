@@ -251,6 +251,10 @@ impl DataStore {
 
     pub fn delete_paste(&self, id: &str) {
         let _lock = self.deletion_lock.lock();
+        self.delete_paste_inner(id);
+    }
+
+    fn delete_paste_inner(&self, id: &str) {
         let _ = self.db.remove(format!("pass:{}", id));
         let _ = self.db.remove(format!("salt:{}", id));
         let _ = self.db.remove(format!("meta:{}", id));
@@ -301,7 +305,7 @@ impl DataStore {
 
         let _lock = self.deletion_lock.lock();
         for id in &to_delete {
-            self.delete_paste(id);
+            self.delete_paste_inner(id);
         }
         to_delete.len()
     }
