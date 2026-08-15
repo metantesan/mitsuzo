@@ -14,6 +14,16 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.7.5",
+            date: "2026-08",
+            items_en: vec![
+                "Upgraded Dioxus to 0.7.10 to match the dx CLI",
+            ],
+            items_fa: vec![
+                "ارتقای Dioxus به نسخه 0.7.10 برای هماهنگی با dx CLI",
+            ],
+        },
+        Change {
             version: "v0.7.4",
             date: "2026-08",
             items_en: vec![
