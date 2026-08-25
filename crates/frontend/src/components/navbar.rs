@@ -1,6 +1,7 @@
 use crate::Route;
 use dioxus::prelude::*;
 use dioxus_i18n::{prelude::*, t};
+use mitsuzo_types::GetStatsResponse;
 use unic_langid::langid;
 
 const GITHUB_RELEASES: &str = "https://github.com/metantesan/mitsuzo/releases";
@@ -19,6 +20,8 @@ pub fn Navbar() -> Element {
     let mut menu_open = use_signal(|| false);
     let current_lang = i18n.language();
     let current_route = use_route::<Route>();
+    let stats = use_context::<Signal<Option<GetStatsResponse>>>();
+    let demo_mode = stats.read().as_ref().map(|s| s.demo_mode).unwrap_or(false);
 
     let home_cls = format!(
         "px-3 py-1.5 text-sm font-medium relative transition-colors after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:h-0.5 after:bg-accent after:transition-all duration-200 {}",
@@ -47,10 +50,19 @@ pub fn Navbar() -> Element {
             class: "sticky top-0 z-30 bg-surface border-b border-border",
             div {
                 class: "max-w-5xl mx-auto px-4 h-14 flex items-center justify-between",
-                Link {
-                    to: Route::Home {},
-                    class: "text-lg font-bold text-accent tracking-tight hover:text-accent-hover transition-colors",
-                    {t!("app-title")}
+                div {
+                    class: "flex items-center gap-2",
+                    Link {
+                        to: Route::Home {},
+                        class: "text-lg font-bold text-accent tracking-tight hover:text-accent-hover transition-colors",
+                        {t!("app-title")}
+                    }
+                    if demo_mode {
+                        span {
+                            class: "px-2 py-1 text-xs font-bold uppercase tracking-wide bg-accent text-bg rounded-full",
+                            {t!("demo-badge")}
+                        }
+                    }
                 }
                 div {
                     class: "hidden md:flex items-center gap-1",
@@ -118,9 +130,18 @@ pub fn Navbar() -> Element {
                     class: "{menu_panel_cls}",
                     div {
                         class: "flex items-center justify-between mb-2",
-                        span {
-                            class: "text-sm font-semibold text-accent tracking-widest uppercase",
-                            {t!("app-title")}
+                        div {
+                            class: "flex items-center gap-2",
+                            span {
+                                class: "text-sm font-semibold text-accent tracking-widest uppercase",
+                                {t!("app-title")}
+                            }
+                            if demo_mode {
+                                span {
+                                    class: "px-2 py-1 text-xs font-bold uppercase tracking-wide bg-accent text-bg rounded-full",
+                                    {t!("demo-badge")}
+                                }
+                            }
                         }
                         button {
                             class: "text-text-secondary hover:text-text transition-colors text-lg",

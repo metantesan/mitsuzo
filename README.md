@@ -21,6 +21,24 @@ docker run -p 3030:3030 ghcr.io/metantesan/mitsuzo:latest
 
 Open http://localhost:3030.
 
+### Live demo mode
+
+The server can be run as a restricted live demo with a short TTL and a small upload limit.
+It is configured through environment variables:
+
+| Variable | Default (normal) | Demo default | Description |
+| --- | --- | --- | --- |
+| `MITSUZO_DEMO_MODE` | unset | `1` | Enable demo mode. Accepts `1`, `true`, `yes`, `on`. |
+| `MITSUZO_MAX_TTL_SECONDS` | `43200` (12 h) | `60` (1 min) | Maximum paste TTL in seconds. |
+| `MITSUZO_MAX_FILE_SIZE_BYTES` | `1073741824` (1 GB) | `5242880` (5 MB) | Maximum paste/file size in bytes. |
+
+When demo mode is on, pastes expire after at most 1 minute, cannot exceed 5 MB, and the
+frontend shows a "Live demo" badge together with a notice about the limits:
+
+```bash
+docker run -p 3030:3030 -e MITSUZO_DEMO_MODE=1 ghcr.io/metantesan/mitsuzo:latest
+```
+
 ### Build from source
 
 ```bash

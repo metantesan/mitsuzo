@@ -90,4 +90,7 @@ pub struct GetStatsResponse {
     pub requests_success_daily: u64,
     pub requests_fail_all_time: u64,
     pub requests_fail_daily: u64,
+    pub demo_mode: bool,
+    pub max_ttl_seconds: u32,
+    pub max_file_size: u64,
 }

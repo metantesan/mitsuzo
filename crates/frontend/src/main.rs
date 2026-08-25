@@ -1,6 +1,7 @@
 mod components;
 mod utils;
 mod views;
+use crate::utils::do_xhr_get;
 use crate::views::paste_view as P;
 use crate::views::{
     app_layout, changelog_view as Changelog, home_view as Home, how_it_works_view as HowItWorks,
@@ -9,6 +10,7 @@ use crate::views::{
 use components::PopupContext;
 use dioxus::prelude::*;
 use dioxus_i18n::prelude::*;
+use mitsuzo_types::GetStatsResponse;
 use unic_langid::langid;
 
 pub const BASE_URL: &str = match option_env!("BASE_URL") {
@@ -83,6 +85,21 @@ fn app() -> Element {
 
     let popup_ctx = use_signal(PopupContext::new);
     use_context_provider(|| popup_ctx);
+
+    let mut stats: Signal<Option<GetStatsResponse>> = use_signal(|| None);
+    use_context_provider(|| stats);
+
+    use_future(move || async move {
+        let result = do_xhr_get(&format!("{}/api/paste/stats", BASE_URL), vec![], |_, _| {}).await;
+        if let Ok(response) = result
+            && response.status >= 200
+            && response.status < 300
+            && let Some(body) = response.body
+            && let Ok(decoded) = bitcode::decode::<GetStatsResponse>(&body)
+        {
+            stats.set(Some(decoded));
+        }
+    });
 
     rsx! {
         document::Stylesheet { href: asset!("assets/tailwind.css") },

@@ -44,5 +44,9 @@ EXPOSE 3030
 # Set the PORT environment variable for the backend
 ENV PORT=3030
 
+# Optional: run as a restricted live demo (1 minute TTL, 5 MB max paste size)
+# UNCOMMENT to enable:
+# ENV MITSUZO_DEMO_MODE=1
+
 # Run the backend server
 CMD ["./backend"]

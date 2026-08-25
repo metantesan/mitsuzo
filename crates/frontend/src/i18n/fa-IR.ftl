@@ -1,4 +1,6 @@
 app-title = Mitsuzo
+demo-badge = دمو زنده
+demo-banner-text = این یک دموی زنده است. Pasteها پس از حداکثر { $ttl } منقضی می‌شوند و حداکثر { $size } هستند.
 
 nav-home = خانه
 nav-how-it-works = نحوه کارکرد
@@ -19,9 +21,11 @@ password-auto-gen-hint = برای رمز عبور خودکار خالی بگذا
 try-count-label = تعداد تلاش (۰ برای نامحدود)
 ttl-label = زمان اعتبار
 ttl-5min = ۵ دقیقه
+ttl-30min = ۳۰ دقیقه
 ttl-1hour = ۱ ساعت
 ttl-6hour = ۶ ساعت
 ttl-12hour = ۱۲ ساعت
+ttl-1min = ۱ دقیقه
 ttl-custom = دلخواه
 create-paste = ایجاد Paste
 
@@ -68,6 +72,7 @@ progress-decrypting-percent = در حال رمزگشایی... { $percent }%
 error-password-empty = رمز عبور نمی‌تواند خالی باشد.
 error-content-empty = محتوا نمی‌تواند خالی باشد.
 error-ttl-invalid = TTL باید یک عدد معتبر باشد.
+error-file-too-large = فایل بزرگ‌تر از حداکثر اندازه مجاز بارگذاری ({ $size }) است.
 error-encryption-failed = رمزگذاری محتوا ناموفق بود: { $error }
 error-parse-response-failed = پردازش پاسخ ناموفق بود: { $error }
 error-empty-response = بدنه پاسخ خالی است

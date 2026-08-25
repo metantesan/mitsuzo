@@ -148,6 +148,16 @@ fn generate_nonce() -> Result<[u8; 12], String> {
 
 const FULL_CHUNK_CIPHER_LEN: usize = CHUNK_SIZE + 16;
 
+/// Compute the exact ciphertext length produced by encrypting `plaintext_len` bytes.
+pub fn get_ciphertext_size(plaintext_len: usize) -> usize {
+    let chunks = plaintext_len.div_ceil(CHUNK_SIZE).max(1);
+    if chunks == 1 {
+        plaintext_len + 16
+    } else {
+        (chunks - 1) * FULL_CHUNK_CIPHER_LEN + (plaintext_len - (chunks - 1) * CHUNK_SIZE) + 16
+    }
+}
+
 pub fn encrypt_setup(password: &str) -> Result<EncryptionSetup, String> {
     let salt = generate_salt()?;
     let (encryption_key, validation_key) = derive_keys(password, &salt)?;

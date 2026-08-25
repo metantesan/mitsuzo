@@ -1,4 +1,6 @@
 app-title = Mitsuzo
+demo-badge = Live demo
+demo-banner-text = This is a live demo. Pastes expire after a maximum of { $ttl } and are limited to { $size }.
 
 nav-home = Home
 nav-how-it-works = How It Works
@@ -19,9 +21,11 @@ password-auto-gen-hint = Leave empty for auto-generated password
 try-count-label = Try Count (0 for infinite)
 ttl-label = Time to Live
 ttl-5min = 5 min
+ttl-30min = 30 min
 ttl-1hour = 1 hour
 ttl-6hour = 6 hours
 ttl-12hour = 12 hours
+ttl-1min = 1 min
 ttl-custom = Custom
 create-paste = Create Paste
 
@@ -68,6 +72,7 @@ progress-decrypting-percent = Decrypting... { $percent }%
 error-password-empty = Password cannot be empty.
 error-content-empty = Content cannot be empty.
 error-ttl-invalid = TTL must be a valid number.
+error-file-too-large = File exceeds the maximum upload size of { $size }.
 error-encryption-failed = Failed to encrypt content: { $error }
 error-parse-response-failed = Failed to parse response: { $error }
 error-empty-response = Empty response body

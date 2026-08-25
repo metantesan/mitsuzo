@@ -14,14 +14,26 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
-            version: "v0.7.5",
+            version: "v0.8.0",
             date: "2026-08",
             items_en: vec![
-                "Upgraded Dioxus to 0.7.10 to match the dx CLI",
+                "Live demo runtime: run with `MITSUZO_DEMO_MODE=1` to cap pastes at a 1-minute TTL and a 5 MB max size",
+                "Limits are configurable via `MITSUZO_MAX_TTL_SECONDS` and `MITSUZO_MAX_FILE_SIZE_BYTES`",
+                "Show a 'Live demo' badge and a limit notice in the frontend",
+                "Server now truly enforces the maximum TTL and paste size during upload",
             ],
             items_fa: vec![
-                "ارتقای Dioxus به نسخه 0.7.10 برای هماهنگی با dx CLI",
+                "رانتایم دموی زنده: با `MITSUZO_DEMO_MODE=1` عمر پیست‌ها به ۱ دقیقه و حداکثر اندازه به ۵ مگابایت محدود می‌شود",
+                "محدودیت‌ها از طریق `MITSUZO_MAX_TTL_SECONDS` و `MITSUZO_MAX_FILE_SIZE_BYTES` قابل تنظیم‌اند",
+                "نمایش نشان «دمو زنده» و اطلاع‌رسانی محدودیت‌ها در رابط کاربری",
+                "اجرای واقعی محدودیت حداکثر TTL و اندازه پیست توسط سرور هنگام بارگذاری",
             ],
+        },
+        Change {
+            version: "v0.7.5",
+            date: "2026-08",
+            items_en: vec!["Upgraded Dioxus to 0.7.10 to match the dx CLI"],
+            items_fa: vec!["ارتقای Dioxus به نسخه 0.7.10 برای هماهنگی با dx CLI"],
         },
         Change {
             version: "v0.7.4",

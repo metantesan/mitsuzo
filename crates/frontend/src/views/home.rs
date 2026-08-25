@@ -26,6 +26,33 @@ fn format_count(n: u64) -> String {
     }
 }
 
+fn format_size(bytes: u64) -> String {
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} bytes", bytes)
+    }
+}
+
+fn format_duration(seconds: u32) -> String {
+    if seconds >= 60 && seconds.is_multiple_of(60) {
+        let mins = seconds / 60;
+        if mins == 1 {
+            "1 minute".to_string()
+        } else {
+            format!("{} minutes", mins)
+        }
+    } else {
+        format!("{} seconds", seconds)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ProgressState {
     pub status: String,
@@ -46,7 +73,7 @@ pub fn home_view() -> Element {
     let mut file_content_type: Signal<Option<String>> = use_signal(|| None);
     let mut progress: Signal<Option<ProgressState>> = use_signal(|| None);
     let mut popup_ctx = use_context::<Signal<PopupContext>>();
-    let mut stats: Signal<Option<GetStatsResponse>> = use_signal(|| None);
+    let stats = use_context::<Signal<Option<GetStatsResponse>>>();
     let auto_generated = use_signal(|| false);
     let mut disable_download = use_signal(|| false);
     let mut burn_after_read = use_signal(|| false);
@@ -54,17 +81,78 @@ pub fn home_view() -> Element {
     let mut ttl_preset = use_signal(|| "43200".to_string());
     let mut ttl_custom = use_signal(|| "43200".to_string());
 
-    use_future(move || async move {
-        let result = do_xhr_get(&format!("{}/api/paste/stats", BASE_URL), vec![], |_, _| {}).await;
-        if let Ok(response) = result
-            && response.status >= 200
-            && response.status < 300
-            && let Some(body) = response.body
-            && let Ok(decoded) = bitcode::decode::<GetStatsResponse>(&body)
-        {
-            stats.set(Some(decoded));
+    let mut ttl_initialized = use_signal(|| false);
+    use_effect({
+        let mut ttl_preset = ttl_preset;
+        let mut ttl_custom = ttl_custom;
+        move || {
+            if *ttl_initialized.read() {
+                return;
+            }
+            let stats_guard = stats.read();
+            let Some(s) = stats_guard.as_ref() else {
+                return;
+            };
+            ttl_initialized.set(true);
+            if s.max_ttl_seconds >= 43200 {
+                return;
+            }
+            let default = s.max_ttl_seconds.min(43200).to_string();
+            if ttl_preset.read().as_str() == "43200" {
+                ttl_preset.set(default.clone());
+            }
+            if ttl_custom.read().as_str() == "43200" {
+                ttl_custom.set(default);
+            }
         }
     });
+
+    let ttl_presets: Vec<(u32, String)> = {
+        let max_ttl = stats
+            .read()
+            .as_ref()
+            .map(|s| s.max_ttl_seconds)
+            .unwrap_or(43200);
+        let mut presets: Vec<(u32, String)> = Vec::new();
+        if max_ttl >= 60 {
+            presets.push((60, t!("ttl-1min")));
+        }
+        if max_ttl >= 300 {
+            presets.push((300, t!("ttl-5min")));
+        }
+        if max_ttl >= 1800 {
+            presets.push((1800, t!("ttl-30min")));
+        }
+        if max_ttl >= 3600 {
+            presets.push((3600, t!("ttl-1hour")));
+        }
+        if max_ttl >= 21600 {
+            presets.push((21600, t!("ttl-6hour")));
+        }
+        if max_ttl >= 43200 {
+            presets.push((43200, t!("ttl-12hour")));
+        }
+        if presets.is_empty() {
+            presets.push((max_ttl.max(1), t!("ttl-1min")));
+        }
+        presets
+    };
+
+    let demo_mode = stats.read().as_ref().map(|s| s.demo_mode).unwrap_or(false);
+    let demo_ttl_text = format_duration(
+        stats
+            .read()
+            .as_ref()
+            .map(|s| s.max_ttl_seconds)
+            .unwrap_or(43200),
+    );
+    let demo_size_text = format_size(
+        stats
+            .read()
+            .as_ref()
+            .map(|s| s.max_file_size)
+            .unwrap_or(MAX_PASTE_SIZE as u64),
+    );
 
     let create_paste = {
         let mut auto_generated = auto_generated;
@@ -99,10 +187,15 @@ pub fn home_view() -> Element {
                 } else {
                     ttl_preset.read().clone()
                 };
+                let max_ttl = stats
+                    .read()
+                    .as_ref()
+                    .map(|s| s.max_ttl_seconds)
+                    .unwrap_or(43200);
                 let mut ttl_seconds_option = ttl_value.parse::<u32>().ok();
                 if let Some(ref mut ts) = ttl_seconds_option {
-                    if *ts > 43200 {
-                        *ts = 43200;
+                    if *ts > max_ttl {
+                        *ts = max_ttl;
                     }
                 } else {
                     popup_ctx.write().show_error(t!("error-ttl-invalid"));
@@ -110,14 +203,20 @@ pub fn home_view() -> Element {
                     return;
                 }
 
+                let max_size = stats
+                    .read()
+                    .as_ref()
+                    .map(|s| s.max_file_size)
+                    .unwrap_or(MAX_PASTE_SIZE as u64);
                 let file_size_for_chunks: u64;
                 let data_type: DataType;
                 let mut text_fallback: Option<Vec<u8>> = None;
                 if let Some(f) = file_data.read().as_ref() {
-                    if f.size() as usize > MAX_PASTE_SIZE {
-                        popup_ctx
-                            .write()
-                            .show_error("File exceeds maximum paste size");
+                    if f.size() as u64 > max_size {
+                        popup_ctx.write().show_error(t!(
+                            "error-file-too-large",
+                            size: format_size(max_size)
+                        ));
                         progress.set(None);
                         return;
                     }
@@ -131,6 +230,14 @@ pub fn home_view() -> Element {
                     let text_content = content.read().clone();
                     if text_content.is_empty() {
                         popup_ctx.write().show_error(t!("error-content-empty"));
+                        progress.set(None);
+                        return;
+                    }
+                    if text_content.len() as u64 > max_size {
+                        popup_ctx.write().show_error(t!(
+                            "error-file-too-large",
+                            size: format_size(max_size)
+                        ));
                         progress.set(None);
                         return;
                     }
@@ -429,6 +536,16 @@ pub fn home_view() -> Element {
                 {t!("app-title")}
             }
 
+            if demo_mode {
+                div {
+                    class: "w-full max-w-xl mb-6 p-4 bg-surface border border-accent rounded-lg text-center",
+                    p {
+                        class: "text-sm font-semibold text-accent",
+                        {t!("demo-banner-text", ttl: demo_ttl_text, size: demo_size_text)}
+                    }
+                }
+            }
+
             if let Some(prog) = progress.read().as_ref() {
                 div {
                     class: "w-full max-w-xl mb-4 p-4 bg-surface rounded-lg",
@@ -573,21 +690,26 @@ pub fn home_view() -> Element {
                     }
                     div {
                         class: "grid grid-cols-3 gap-1.5 mb-2",
-                        button {
-                            class: if ttl_preset.read().as_str() == "300" { "px-3 py-1.5 bg-accent text-bg text-sm font-semibold rounded text-center" } else { "px-3 py-1.5 bg-surface text-muted text-sm font-semibold rounded border border-border text-center" },
-                            onclick: move |_| ttl_preset.set("300".to_string()),
-                            {t!("ttl-5min")}
-                        }
-                        button {
-                            class: if ttl_preset.read().as_str() == "3600" { "px-3 py-1.5 bg-accent text-bg text-sm font-semibold rounded text-center" } else { "px-3 py-1.5 bg-surface text-muted text-sm font-semibold rounded border border-border text-center" },
-                            onclick: move |_| ttl_preset.set("3600".to_string()),
-                            {t!("ttl-1hour")}
-                        }
-                        button {
-                            class: if ttl_preset.read().as_str() == "21600" { "px-3 py-1.5 bg-accent text-bg text-sm font-semibold rounded text-center" } else { "px-3 py-1.5 bg-surface text-muted text-sm font-semibold rounded border border-border text-center" },
-                            onclick: move |_| ttl_preset.set("21600".to_string()),
-                            {t!("ttl-6hour")}
-                        }
+                        {ttl_presets.iter().map(|(value, label)| {
+                            let value_str = value.to_string();
+                            let base_cls = if ttl_preset.read().as_str() == value_str {
+                                "px-3 py-1.5 bg-accent text-bg text-sm font-semibold rounded text-center"
+                            } else {
+                                "px-3 py-1.5 bg-surface text-muted text-sm font-semibold rounded border border-border text-center"
+                            };
+                            let cls = if ttl_presets.len() == 1 {
+                                format!("{} col-span-3", base_cls)
+                            } else {
+                                base_cls.to_string()
+                            };
+                            rsx! {
+                                button {
+                                    class: "{cls}",
+                                    onclick: move |_| ttl_preset.set(value_str.clone()),
+                                    "{label}"
+                                }
+                            }
+                        })}
                         button {
                             class: if ttl_preset.read().as_str() == "custom" { "col-span-3 px-3 py-1.5 bg-accent text-bg text-sm font-semibold rounded text-center mt-1" } else { "col-span-3 px-3 py-1.5 bg-surface text-muted text-sm font-semibold rounded border border-border text-center mt-1" },
                             onclick: move |_| ttl_preset.set("custom".to_string()),
@@ -600,7 +722,7 @@ pub fn home_view() -> Element {
                             r#type: "number",
                             oninput: move |evt| ttl_custom.set(evt.value()),
                             value: "{ttl_custom}",
-                            max: 43200
+                            max: stats.read().as_ref().map(|s| s.max_ttl_seconds).unwrap_or(43200)
                         }
                     }
                 }

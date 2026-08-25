@@ -1,4 +1,5 @@
 use backend::AppState;
+use backend::RuntimeConfig;
 use backend::db::DataStore;
 use backend::rate_limit::RateLimiter;
 use backend::routes::app_router;
@@ -15,7 +16,14 @@ async fn main() -> eyre::Result<()> {
 
     let db = DataStore::new()?;
     let limiter = RateLimiter::new();
-    let state = AppState::new(db.clone(), limiter.clone());
+    let config = RuntimeConfig::from_env();
+    if config.demo_mode {
+        info!(
+            "running in demo mode: max ttl {}s, max file size {} bytes",
+            config.max_ttl_seconds, config.max_file_size
+        );
+    }
+    let state = AppState::new(db.clone(), limiter.clone(), config);
 
     let cleanup_handle = tokio::spawn(cleanup_task(db.clone()));
     let rate_limit_handle = tokio::spawn(rate_limit_cleanup_task(limiter));

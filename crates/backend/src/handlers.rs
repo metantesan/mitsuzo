@@ -9,10 +9,10 @@ use base64::{Engine as _, engine::general_purpose};
 use bitcode::{decode, encode};
 use futures::stream::{self, StreamExt};
 use mitsuzo_types::{
-    ChunkInfoResponse, CreatePasteHeader, GetPasteHeader, GetSaltResponse, GetStatsResponse,
-    InitPasteResponse, UPLOAD_CHUNK_SIZE,
+    CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, GetPasteHeader, GetSaltResponse,
+    GetStatsResponse, InitPasteResponse, UPLOAD_CHUNK_SIZE,
 };
-use mitsuzo_utils::get_plaintext_size;
+use mitsuzo_utils::{get_ciphertext_size, get_plaintext_size};
 use rand::RngExt;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -146,21 +146,22 @@ pub async fn init_paste(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
-    let header: CreatePasteHeader = decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut header: CreatePasteHeader = decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     if header.total_chunks == 0 {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let _ttl_seconds = match header.ttl_seconds {
-        Some(ttl) => {
-            if ttl == 0 {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            Some(ttl.min(43200))
-        }
-        None => return Err(StatusCode::BAD_REQUEST),
+    header.ttl_seconds = match header.ttl_seconds {
+        Some(ttl) if ttl > 0 => Some(ttl.min(state.config.max_ttl_seconds.max(1))),
+        _ => return Err(StatusCode::BAD_REQUEST),
     };
+
+    // Reject pastes whose estimated size exceeds the configured maximum before writing anything.
+    let estimated_size = u64::from(header.total_chunks) * CHUNK_SIZE as u64;
+    if estimated_size > state.config.max_file_size {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
 
     let _try_count = match header.try_count {
         Some(count) if count > 0 && count <= 100 => count,
@@ -200,6 +201,12 @@ pub async fn upload_chunk(
 ) -> Result<(), StatusCode> {
     validate_id(&id)?;
     if body.len() > UPLOAD_CHUNK_SIZE {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    // Enforce the configured maximum paste size across the whole upload.
+    let max_cipher_len = get_ciphertext_size(state.config.max_file_size as usize) as u64;
+    let write_end = u64::from(chunk_index) * UPLOAD_CHUNK_SIZE as u64 + body.len() as u64;
+    if write_end > max_cipher_len {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     if state.db.get_salt(&id).is_none() {
@@ -502,5 +509,8 @@ pub async fn get_stats(State(state): State<AppState>) -> Result<Vec<u8>, StatusC
         requests_success_daily: stats.3,
         requests_fail_all_time: stats.4,
         requests_fail_daily: stats.5,
+        demo_mode: state.config.demo_mode,
+        max_ttl_seconds: state.config.max_ttl_seconds,
+        max_file_size: state.config.max_file_size,
     }))
 }
