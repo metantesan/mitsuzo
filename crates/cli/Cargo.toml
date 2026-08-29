@@ -6,8 +6,13 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "mitsuzo"
+path = "src/main.rs"
+
 [dependencies]
 base64.workspace = true
+bip39.workspace = true
 bitcode.workspace = true
 clap.workspace = true
 colored.workspace = true
@@ -23,3 +28,4 @@ tokio.workspace = true
 zeroize.workspace = true
 eyre.workspace = true
 color-eyre.workspace = true
+getrandom.workspace = true

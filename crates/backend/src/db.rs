@@ -1,6 +1,8 @@
 use bitcode::{decode, encode};
 use eyre::Context;
-use mitsuzo_types::{PasteListing, PasteMeta};
+use mitsuzo_types::{
+    AccountRecord, LegacyPasteMeta, PasteInboxListing, PasteListing, PasteMeta, RecipientEnvelope,
+};
 use sled::Db;
 use std::{
     io::{Seek, SeekFrom, Write},
@@ -8,6 +10,59 @@ use std::{
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+/// Bump whenever the persisted `PasteMeta`/account encodings change shape.
+/// bitcode is not self-describing, so existing rows must be migrated.
+const SCHEMA_VERSION: u32 = 2;
+
+/// One-time migration of sled `meta:` rows to the current `PasteMeta` shape.
+/// Reads each row with the frozen `LegacyPasteMeta` and re-encodes it as the
+/// new struct with `recipient_pub`/`recipient_kid = None`. Idempotent on a
+/// fresh database (no rows). Runs once, then records `schema:version`.
+fn migrate_schema(db: &Db) {
+    let stored_version = db
+        .get("schema:version")
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_ref().try_into().ok())
+        .map(u32::from_le_bytes)
+        .unwrap_or(0);
+
+    if stored_version == SCHEMA_VERSION {
+        return;
+    }
+
+    let mut migrated = 0usize;
+    for item in db.scan_prefix(b"meta:") {
+        let Ok((key, value)) = item else { continue };
+        let Ok(legacy) = decode::<LegacyPasteMeta>(&value) else {
+            continue;
+        };
+        let meta = PasteMeta {
+            try_count: legacy.try_count,
+            expiration_timestamp: legacy.expiration_timestamp,
+            data_type: legacy.data_type,
+            filename: legacy.filename,
+            content_type: legacy.content_type,
+            total_chunks: legacy.total_chunks,
+            allow_download: legacy.allow_download,
+            burn_after_read: legacy.burn_after_read,
+            recipient_pub: None,
+            recipient_kid: None,
+        };
+        let _ = db.insert(key, encode(&meta));
+        migrated += 1;
+    }
+
+    let _ = db.insert("schema:version", &SCHEMA_VERSION.to_le_bytes()[..]);
+    let _ = db.flush();
+    if migrated > 0 {
+        eprintln!(
+            "[mitsuzo] migrated {} paste metadata rows to schema v{}",
+            migrated, SCHEMA_VERSION
+        );
+    }
+}
 
 #[derive(Clone)]
 pub struct DataStore {
@@ -21,6 +76,7 @@ impl DataStore {
     pub fn new() -> eyre::Result<Self> {
         let db =
             sled::open(Path::new("database/db")).wrap_err("Failed to open Sled database/db")?;
+        migrate_schema(&db);
         let stats = sled::open(Path::new("database/stats"))
             .wrap_err("Failed to open Sled database/stats")?;
         let files_dir = PathBuf::from("database/files");
@@ -77,26 +133,63 @@ fn epoch_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 impl DataStore {
     pub fn init_paste(
         &self,
         id: &str,
         header: &mitsuzo_types::CreatePasteHeader,
     ) -> eyre::Result<()> {
+        // The PRNG hands out IDs that are otherwise available, which includes
+        // pastes that expired but have not been cleaned up yet. Reusing such
+        // an ID would otherwise leave the old chunk markers, burn row, and
+        // content file behind, corrupting the new paste.
+        if self.db.get(format!("meta:{}", id)).ok().flatten().is_some() {
+            self.delete_paste_inner(id);
+        }
+
         let nonce_path = nonce_path(&self.files_dir, id);
         std::fs::write(&nonce_path, header.nonce)
             .wrap_err_with(|| format!("Failed to write nonce for paste {}", id))?;
 
-        let _ = self
-            .db
-            .insert(format!("pass:{}", id), header.password_hash.as_slice());
-        let _ = self
-            .db
-            .insert(format!("salt:{}", id), header.salt.as_slice());
-        let mut key_blob = Vec::with_capacity(60);
-        key_blob.extend_from_slice(&header.key.wrap_nonce);
-        key_blob.extend_from_slice(&header.key.wrapped_key);
-        let _ = self.db.insert(format!("key:{}", id), key_blob.as_slice());
+        let recipient_mode = header.recipient.is_some();
+        if !recipient_mode {
+            let _ = self.db.insert(
+                format!("pass:{}", id),
+                header.password_hash.unwrap_or_default().as_slice(),
+            );
+            let _ = self.db.insert(
+                format!("salt:{}", id),
+                header.salt.unwrap_or_default().as_slice(),
+            );
+            if let Some(key) = &header.key {
+                let mut key_blob = Vec::with_capacity(60);
+                key_blob.extend_from_slice(&key.wrap_nonce);
+                key_blob.extend_from_slice(&key.wrapped_key);
+                let _ = self.db.insert(format!("key:{}", id), key_blob.as_slice());
+            }
+        }
+
+        if let Some(recipient) = &header.recipient {
+            let _ = self
+                .db
+                .insert(format!("recp:{}", id), encode(recipient).as_slice());
+        }
+
+        if let Some(kid) = header.recipient.as_ref().map(|r| r.recipient_kid) {
+            self.record_recipient_paste(
+                &kid,
+                &PasteInboxListing {
+                    id: id.to_string(),
+                    data_type: header.data_type.clone(),
+                    filename: header.filename.clone(),
+                    created_at: epoch_secs(),
+                },
+            );
+        }
 
         let expiration_timestamp = match header.ttl_seconds {
             Some(ttl) if ttl > 0 => epoch_secs() + u64::from(ttl),
@@ -112,6 +205,8 @@ impl DataStore {
             total_chunks: header.total_chunks,
             allow_download: header.allow_download,
             burn_after_read: header.burn_after_read,
+            recipient_pub: header.recipient_pub,
+            recipient_kid: header.recipient.as_ref().map(|r| r.recipient_kid),
         });
         let _ = self.db.insert(format!("meta:{}", id), meta_value);
         let _ = self
@@ -303,12 +398,18 @@ impl DataStore {
     }
 
     fn delete_paste_inner(&self, id: &str) {
+        if let Some(meta) = self.get_meta(id)
+            && let Some(kid) = meta.recipient_kid
+        {
+            self.unrecord_recipient_paste(&kid, id);
+        }
         let _ = self.db.remove(format!("pass:{}", id));
         let _ = self.db.remove(format!("salt:{}", id));
         let _ = self.db.remove(format!("key:{}", id));
         let _ = self.db.remove(format!("meta:{}", id));
         let _ = self.db.remove(format!("crecv:{}", id));
         let _ = self.db.remove(format!("burn:{}", id));
+        let _ = self.db.remove(format!("recp:{}", id));
         self.delete_chunk_keys(id);
         let _ = std::fs::remove_file(content_path(&self.files_dir, id));
         let _ = std::fs::remove_file(nonce_path(&self.files_dir, id));
@@ -417,6 +518,50 @@ impl DataStore {
         }
     }
 
+    /// Recipient envelope for a recipient-mode paste.
+    pub fn get_recipient_envelope(&self, id: &str) -> Option<RecipientEnvelope> {
+        if self.is_expired(id) {
+            return None;
+        }
+        self.db
+            .get(format!("recp:{}", id))
+            .ok()?
+            .and_then(|v| decode(&v).ok())
+    }
+
+    /// Index a recipient-mode paste under its recipient account for the inbox.
+    pub fn record_recipient_paste(&self, kid: &[u8; 32], listing: &PasteInboxListing) {
+        let _ = self.db.insert(
+            format!("recpix:{}:{}", hex(kid), listing.id),
+            encode(listing),
+        );
+    }
+
+    pub fn unrecord_recipient_paste(&self, kid: &[u8; 32], id: &str) {
+        let _ = self.db.remove(format!("recpix:{}:{}", hex(kid), id));
+    }
+
+    /// Non-expired recipient-mode pastes addressed to an account.
+    pub fn list_recipient_pastes(&self, kid: &[u8; 32]) -> Vec<PasteInboxListing> {
+        self.db
+            .scan_prefix(format!("recpix:{}:", hex(kid)).as_bytes())
+            .filter_map(|item| item.ok())
+            .filter_map(|(_, value)| decode::<PasteInboxListing>(&value).ok())
+            .filter(|l| {
+                let expired = self
+                    .get_meta(&l.id)
+                    .map(|m| m.expiration_timestamp != 0 && m.expiration_timestamp <= epoch_secs())
+                    .unwrap_or(true);
+                if expired {
+                    let _ = self.db.remove(format!("recpix:{}:{}", hex(kid), l.id));
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect()
+    }
+
     pub fn get_nonce(&self, id: &str) -> Option<Vec<u8>> {
         if self.is_expired(id) {
             return None;
@@ -458,9 +603,106 @@ impl DataStore {
         read_counter(&self.stats, &day_key("fail_day"))
     }
 
+    /// Insert or update an account record, keyed by full 32-byte kid.
+    pub fn put_account(&self, record: &AccountRecord) {
+        let _ = self.db.insert(
+            format!("acct:{}", hex(&record.kid)),
+            encode(record).as_slice(),
+        );
+        let _ = self.db.flush();
+    }
+
+    /// Delete an account record by full 32-byte kid.
+    pub fn delete_account(&self, kid: &[u8; 32]) {
+        let _ = self.db.remove(format!("acct:{}", hex(kid)));
+        let _ = self.db.flush();
+    }
+
+    /// Look up an account by full 32-byte kid.
+    pub fn get_account_by_kid(&self, kid: &[u8; 32]) -> Option<AccountRecord> {
+        self.db
+            .get(format!("acct:{}", hex(kid)))
+            .ok()?
+            .and_then(|v| decode(&v).ok())
+    }
+
+    /// Look up an account by its 20-byte display prefix (first 20 bytes of
+    /// the full SHA-256). With 160 bits of prefix, collisions are negligible;
+    /// a scan is fine because account counts are small.
+    pub fn get_account_by_prefix(&self, prefix: &[u8; 20]) -> Option<AccountRecord> {
+        let wanted = hex(prefix);
+        self.db
+            .scan_prefix(b"acct:")
+            .filter_map(|item| item.ok())
+            .find_map(|(key, value)| {
+                let full = key.get(5..)?;
+                if full.len() == 64 && full.get(..40)? == wanted.as_bytes() {
+                    decode(&value).ok()
+                } else {
+                    None
+                }
+            })
+    }
+
     pub fn flush(&self) -> eyre::Result<()> {
         self.db.flush().wrap_err("Failed to flush Sled db")?;
         self.stats.flush().wrap_err("Failed to flush Sled stats")?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+fn test_store(dir: &Path) -> eyre::Result<DataStore> {
+    let db = sled::open(dir.join("db")).wrap_err("Failed to open test db")?;
+    migrate_schema(&db);
+    let stats = sled::open(dir.join("stats")).wrap_err("Failed to open test stats")?;
+    let files_dir = dir.join("files");
+    std::fs::create_dir_all(&files_dir).wrap_err("Failed to create test files dir")?;
+    Ok(DataStore {
+        db,
+        stats,
+        files_dir,
+        deletion_lock: Arc::new(Mutex::new(())),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mitsuzo_types::AccountRecord;
+
+    #[test]
+    fn account_lookup_by_full_kid_and_prefix() {
+        let dir = std::env::temp_dir().join(format!("mitsuzo-db-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = test_store(&dir).expect("open store");
+
+        for i in 0u8..3 {
+            let mut kid = [0u8; 32];
+            kid[0] = i;
+            store.put_account(&AccountRecord {
+                kid,
+                pubkey: [0x42; 32],
+                name: format!("user{}", i),
+                created_at: 0,
+            });
+        }
+
+        let mut kid = [0u8; 32];
+        kid[0] = 2;
+        let by_full = store.get_account_by_kid(&kid).expect("full-kid lookup");
+        assert_eq!(by_full.name, "user2");
+
+        let mut prefix = [0u8; 20];
+        prefix[0] = 1;
+        let by_prefix = store.get_account_by_prefix(&prefix).expect("prefix lookup");
+        assert_eq!(by_prefix.kid[0], 1);
+        assert_eq!(by_prefix.name, "user1");
+
+        let mut missing = [0u8; 20];
+        missing[0] = 9;
+        assert!(store.get_account_by_prefix(&missing).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -12,3 +12,5 @@ sha2.workspace = true
 orion.workspace = true
 getrandom.workspace = true
 zeroize.workspace = true
+x25519-dalek.workspace = true
+mitsuzo-types = { workspace = true }

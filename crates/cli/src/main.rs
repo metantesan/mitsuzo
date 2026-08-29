@@ -1,14 +1,19 @@
 use base64::Engine;
+use bip39::Mnemonic;
 use clap::{Parser, Subcommand};
 use colored::*;
 use mitsuzo_types::{
-    CHUNK_SIZE, ChangePasswordRequest, ChunkInfoResponse, CreatePasteHeader, DataType,
-    GetSaltResponse, InitPasteResponse, KeyEnvelope, UPLOAD_CHUNK_SIZE, split_paste_frame,
+    AccountKeyBlob, AccountProfileResponse, CHUNK_SIZE, ChangePasswordRequest, ChunkInfoResponse,
+    CreatePasteHeader, DataType, GetSaltResponse, InitPasteResponse, KeyEnvelope, PasteAuthMode,
+    PasteRecipientInfo, RecipientAuthChallenge, RecipientEnvelope, RegisterAccountRequest,
+    UPLOAD_CHUNK_SIZE, split_paste_frame,
 };
 use mitsuzo_utils::{
-    compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_keys,
-    encrypt_chunk_into, encrypt_setup, generate_content_key, get_chunk_bounds, get_plaintext_size,
-    unwrap_content_key,
+    compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_account_scalar,
+    derive_keys, encrypt_chunk_into, encrypt_setup, generate_content_key, generate_x25519_keypair,
+    get_chunk_bounds, get_ciphertext_size, kid_from_pubkey, lock_account_key, open_challenge,
+    open_content_key_for_recipient, pubkey_from_scalar, seal_content_key_for_recipient,
+    unlock_account_key, unwrap_content_key,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -49,6 +54,9 @@ enum Commands {
         ttl: u32,
         #[arg(short = 'b', long)]
         burn_after_read: bool,
+        /// Encrypt to a user account kid (0x… prefix or full hash) instead of a password.
+        #[arg(short = 'T', long)]
+        to: Option<String>,
     },
     Get {
         id: String,
@@ -57,6 +65,29 @@ enum Commands {
     },
     Passwd {
         id: String,
+    },
+    Account {
+        #[command(subcommand)]
+        action: AccountCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountCommand {
+    /// Create a new account: generates a 24-word seed phrase, shows it once
+    /// for backup, locks the derived key in ~/.config/mitsuzo/account.enc
+    /// and registers the public key with the server.
+    Register {
+        #[arg(short, long)]
+        name: String,
+    },
+    /// Unlock the local account and print its profile.
+    Login {},
+    /// Recover a local account from an existing seed phrase.
+    Import {
+        #[arg(short, long)]
+        name: String,
+        phrase: Option<String>,
     },
 }
 
@@ -83,20 +114,68 @@ fn load_config() -> Option<Config> {
     None
 }
 
-fn full_chunk_cipher_len() -> usize {
-    CHUNK_SIZE + 16
+fn account_path() -> PathBuf {
+    dirs::config_dir()
+        .map(|d| d.join("mitsuzo/account.enc"))
+        .unwrap_or_else(|| PathBuf::from("account.enc"))
 }
 
-fn encrypted_size(total_size: u64, total_chunks: u32) -> usize {
-    if total_chunks <= 1 {
-        (total_size as usize) + 16
-    } else if (total_size as usize) < (total_chunks as usize - 1) * CHUNK_SIZE {
-        0
-    } else {
-        let full = (total_chunks as usize - 1) * full_chunk_cipher_len();
-        let last = (total_size as usize) - (total_chunks as usize - 1) * CHUNK_SIZE + 16;
-        full + last
+fn read_account_blob() -> eyre::Result<AccountKeyBlob> {
+    let bytes = std::fs::read(account_path())?;
+    Ok(bitcode::decode(&bytes)?)
+}
+
+fn write_account_blob(blob: &AccountKeyBlob) -> eyre::Result<()> {
+    if let Some(parent) = account_path().parent() {
+        std::fs::create_dir_all(parent)?;
     }
+    std::fs::write(account_path(), bitcode::encode(blob))?;
+    Ok(())
+}
+
+/// Unlock the local account blob with the account password, returning
+/// `(scalar, pubkey, kid)`.
+fn unlock_account(password: &str) -> eyre::Result<([u8; 32], [u8; 32], [u8; 32])> {
+    let blob = read_account_blob()?;
+    let scalar = unlock_account_key(&blob, password).map_err(|e| eyre::eyre!("{}", e))?;
+    let pubkey = pubkey_from_scalar(&scalar);
+    let kid = kid_from_pubkey(&pubkey);
+    Ok((scalar, pubkey, kid))
+}
+
+fn generate_mnemonic() -> eyre::Result<String> {
+    let mut entropy = [0u8; 32];
+    getrandom::fill(&mut entropy)?;
+    let mnemonic = Mnemonic::from_entropy(&entropy)?;
+    Ok(mnemonic.to_string())
+}
+
+type KeyMaterial = (String, [u8; 32], [u8; 32], [u8; 32]);
+
+fn mnemonic_to_scalar(phrase: &str) -> eyre::Result<KeyMaterial> {
+    let mnemonic = Mnemonic::parse(phrase.trim())?;
+    let seed = mnemonic.to_seed("");
+    let scalar = derive_account_scalar(&seed);
+    let pubkey = pubkey_from_scalar(&scalar);
+    let kid = kid_from_pubkey(&pubkey);
+    Ok((mnemonic.to_string(), scalar, pubkey, kid))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn prompt_new_password() -> eyre::Result<Zeroizing<String>> {
+    let password = Zeroizing::new(rpassword::prompt_password(format!(
+        "{} ",
+        "Account password:".cyan().bold()
+    ))?);
+    let confirm =
+        rpassword::prompt_password(format!("{} ", "Confirm account password:".cyan().bold()))?;
+    if password.as_str() != confirm {
+        eyre::bail!("{} Passwords do not match.", "Error:".red().bold());
+    }
+    Ok(password)
 }
 
 fn bar_template(main: &str, remainder: &str) -> indicatif::ProgressStyle {
@@ -113,6 +192,374 @@ fn make_pb(len: u64, main: &str, remainder: &str) -> indicatif::ProgressBar {
     pb.set_style(bar_template(main, remainder));
     pb.enable_steady_tick(Duration::from_millis(80));
     pb
+}
+
+fn print_profile(label: &str, profile: &AccountProfileResponse) {
+    println!("{}", label.cyan().bold());
+    println!("  Name:   {}", profile.name);
+    println!("  Kid:    0x{}", hex(&profile.kid_prefix));
+    println!("  Pubkey: 0x{}", hex(&profile.pubkey));
+}
+
+fn prompt_mnemonic() -> eyre::Result<Option<String>> {
+    eprint!("{} ", "Seed phrase (24 words):".cyan());
+    io::stdout().flush()?;
+    let mut phrase = String::new();
+    io::stdin().read_line(&mut phrase)?;
+    let phrase = phrase.trim().to_string();
+    if phrase.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(phrase))
+    }
+}
+
+/// Register a new account from a generated or imported seed phrase. Derives
+/// the X25519 key, locks it in `~/.config/mitsuzo/account.enc` (same blob
+/// format as the browser), and POSTs the public profile to the server.
+async fn register_account(
+    client: &Client,
+    base_url: &str,
+    name: &str,
+    phrase: Option<String>,
+) -> eyre::Result<()> {
+    let (normalized, scalar, pubkey, kid) = match phrase {
+        Some(phrase) => mnemonic_to_scalar(&phrase)?,
+        None => {
+            let mnemonic = generate_mnemonic()?;
+            eprintln!(
+                "{}",
+                "Your one-time backup seed phrase — write it down, it is the only way to recover this account:"
+                    .yellow()
+                    .bold()
+            );
+            eprintln!("{}", mnemonic.yellow().bold());
+            eprint!("{} ", "Press Enter after you have backed it up.".cyan());
+            io::stdout().flush()?;
+            io::stdin().read_line(&mut String::new())?;
+            mnemonic_to_scalar(&mnemonic)?
+        }
+    };
+    let _ = normalized;
+    let password = prompt_new_password()?;
+    let blob = lock_account_key(&scalar, &password)
+        .map_err(|e| eyre::eyre!("Failed to lock account key: {}", e))?;
+    write_account_blob(&blob)?;
+
+    let request = RegisterAccountRequest {
+        kid,
+        pubkey,
+        name: name.to_string(),
+    };
+    let resp = client
+        .post(format!("{}/api/account", base_url))
+        .body(bitcode::encode(&request))
+        .send()
+        .await?;
+    if resp.status().is_success() {
+        let profile: AccountProfileResponse = bitcode::decode(&resp.bytes().await?)?;
+        print_profile("Registered account:", &profile);
+    } else if resp.status() == reqwest::StatusCode::CONFLICT {
+        eprintln!(
+            "{} An account with this key already exists — use `mitsuzo account login` instead.",
+            "Error:".red().bold()
+        );
+    } else {
+        eprintln!(
+            "{} Failed to register account: {}",
+            "Error:".red().bold(),
+            resp.status()
+        );
+    }
+    Ok(())
+}
+
+/// Unlock the local account blob and fetch/print the public profile.
+async fn login_account(client: &Client, base_url: &str) -> eyre::Result<()> {
+    let password = Zeroizing::new(rpassword::prompt_password(format!(
+        "{} ",
+        "Account password:".cyan().bold()
+    ))?);
+    let (_scalar, _pubkey, kid) =
+        unlock_account(&password).map_err(|e| eyre::eyre!("{} {}", "Error:".red().bold(), e))?;
+    let resp = client
+        .get(format!("{}/api/account/{}", base_url, hex(&kid)))
+        .send()
+        .await?;
+    if resp.status().is_success() {
+        let profile: AccountProfileResponse = bitcode::decode(&resp.bytes().await?)?;
+        print_profile("Logged in as:", &profile);
+    } else {
+        eprintln!(
+            "{} Failed to fetch account profile: {}",
+            "Error:".red().bold(),
+            resp.status()
+        );
+    }
+    Ok(())
+}
+
+/// Fetch a recipient-mode paste by proving ownership of the local account.
+/// The server issues a single-use challenge and returns it on the challenge
+/// endpoint; we solve it and present `X-Account-Proof` on `/data`. The
+/// challenge is single-use, so the body is fetched in one request rather than
+/// parallel ranges.
+async fn account_paste_get(
+    client: &Client,
+    base_url: &str,
+    id: &str,
+    output: &Option<String>,
+    recipient: Option<&PasteRecipientInfo>,
+) -> eyre::Result<()> {
+    let password = Zeroizing::new(rpassword::prompt_password(format!(
+        "{} ",
+        "Account password:".cyan().bold()
+    ))?);
+    let (scalar, _pubkey, kid) = unlock_account(&password)?;
+
+    // The salt probe already told us who this paste belongs to — check it
+    // before issuing any challenge, so a wrong account produces a clear
+    // message instead of an opaque AEAD failure.
+    if let Some(info) = recipient
+        && info.kid != kid
+    {
+        let name = info.name.as_deref().unwrap_or("an unknown account");
+        eprintln!(
+            "{} This paste is encrypted to {} (0x{}). Your account is 0x{} — you are not the recipient.",
+            "Error:".red().bold(),
+            name,
+            hex(&info.kid_prefix),
+            hex(&kid[..20]),
+        );
+        return Ok(());
+    }
+
+    let data_url = format!("{}/api/paste/{}/data", base_url, id);
+
+    // Round 1: fetch a single-use challenge sealed to the paste's stored
+    // recipient public key, then present the solved proof on /data directly.
+    let challenge_resp = client
+        .get(format!("{}/api/paste/{}/challenge", base_url, id))
+        .send()
+        .await?;
+    let status = challenge_resp.status();
+    let body = challenge_resp.bytes().await?;
+    if !status.is_success() {
+        eprintln!(
+            "{} Failed to fetch challenge: {}",
+            "Error:".red().bold(),
+            status
+        );
+        return Ok(());
+    }
+    let challenge: RecipientAuthChallenge = match bitcode::decode(&body) {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("{} Invalid challenge body.", "Error:".red().bold());
+            return Ok(());
+        }
+    };
+
+    let response_nonce = match open_challenge(
+        &scalar,
+        &challenge.challenge.ephemeral_pub,
+        &challenge.challenge.nonce,
+        &challenge.challenge.sealed,
+    ) {
+        Ok(nonce) => nonce,
+        Err(_) => {
+            eprintln!(
+                "{} Failed to solve the account challenge — wrong account password?",
+                "Error:".red().bold()
+            );
+            return Ok(());
+        }
+    };
+    let proof = format!(
+        "{}:{}",
+        hex(&kid[..20]),
+        base64::engine::general_purpose::STANDARD.encode(response_nonce)
+    );
+
+    // Round 2: full-body request with the proof.
+    let data_resp = client
+        .get(&data_url)
+        .header("X-Account-Proof", proof)
+        .send()
+        .await?;
+    if !data_resp.status().is_success() {
+        eprintln!(
+            "{} Failed to fetch paste: {}",
+            "Error:".red().bold(),
+            data_resp.status()
+        );
+        return Ok(());
+    }
+    let body = data_resp.bytes().await?;
+    let (frame_header, ciphertext) =
+        split_paste_frame(&body).map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
+    let Some(recipient) = frame_header.recipient.clone() else {
+        eprintln!("{} Missing recipient envelope.", "Error:".red().bold());
+        return Ok(());
+    };
+    let ek = match open_content_key_for_recipient(
+        &scalar,
+        &recipient.ephemeral_pub,
+        &recipient.nonce,
+        &recipient.sealed_cek,
+    ) {
+        Ok(key) => key,
+        Err(e) => {
+            eprintln!(
+                "{} Failed to open content key: {}",
+                "Error:".red().bold(),
+                e
+            );
+            return Ok(());
+        }
+    };
+
+    eprintln!(
+        "{} {:.2} plain · {} chunks · {:.2} encrypted",
+        "Size:".bright_black(),
+        indicatif::HumanBytes(frame_header.total_size),
+        frame_header.total_chunks,
+        indicatif::HumanBytes(get_ciphertext_size(frame_header.total_size as usize) as u64),
+    );
+
+    finish_decrypt(
+        client,
+        base_url,
+        id,
+        &frame_header,
+        ek,
+        ciphertext.to_vec(),
+        output,
+    )
+    .await
+}
+
+/// Shared tail of `get`: send the burn receipt (if any), decrypt all chunks,
+/// and write the plaintext to stdout, a file, or a path.
+async fn finish_decrypt(
+    client: &Client,
+    base_url: &str,
+    id: &str,
+    meta: &mitsuzo_types::GetPasteHeader,
+    mut ek: [u8; 32],
+    encrypted: Vec<u8>,
+    output: &Option<String>,
+) -> eyre::Result<()> {
+    if meta.burn_after_read {
+        let receipt = compute_burn_receipt(&ek);
+        let burn_resp = client
+            .post(format!("{}/api/paste/{}/burn", base_url, id))
+            .body(receipt.to_vec())
+            .send()
+            .await?;
+        match burn_resp.status() {
+            s if s.is_success() => {
+                eprintln!("{} Paste burned after reading", "✓".green().bold());
+            }
+            s if s == reqwest::StatusCode::GONE => {}
+            _ => {}
+        }
+    }
+
+    let done = Arc::new(AtomicU32::new(0));
+    let total = meta.total_chunks;
+    let pb = make_pb(total as u64, "magenta/yellow", "");
+
+    // Collect each thread's decrypted region keyed by region index; threads
+    // finish in arbitrary order, so appending directly would jumble output.
+    type Region = (usize, Vec<u8>);
+    let results: Arc<std::sync::Mutex<Vec<Region>>> = Arc::new(std::sync::Mutex::new(
+        Vec::with_capacity((total as usize) + 1),
+    ));
+
+    std::thread::scope(|s| {
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let cpt = (total as usize).div_ceil(n);
+
+        for t in 0..n {
+            let sc = t * cpt;
+            let ec = std::cmp::min(sc + cpt, total as usize);
+            if sc >= ec {
+                continue;
+            }
+            let k = ek;
+            let nonce = meta.nonce;
+            let enc = &encrypted;
+            let results = &results;
+            let done = &done;
+            let pb = &pb;
+
+            s.spawn(move || {
+                let mut local = Vec::new();
+                for i in sc..ec {
+                    let (a, b) = get_chunk_bounds(total, i as u32, enc.len());
+                    let _ = decrypt_chunk_into(&enc[a..b], &k, &nonce, i as u32, &mut local);
+                    let prev = done.fetch_add(1, Ordering::Relaxed) as u64;
+                    if prev.is_multiple_of(4) || prev + 1 == total as u64 {
+                        pb.set_position(prev + 1);
+                        pb.set_message(indicatif::HumanBytes(local.len() as u64).to_string());
+                    }
+                }
+                // Store by region index: threads finish in arbitrary order, so
+                // appending directly would jumble the plaintext.
+                let mut r = results.lock().unwrap();
+                r.push((t, local));
+            });
+        }
+    });
+
+    ek.zeroize();
+    pb.finish_and_clear();
+
+    let mut results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+    results.sort_by_key(|(t, _)| *t);
+    let decrypted: Vec<u8> = results.into_iter().flat_map(|(_, buf)| buf).collect();
+
+    if let Some(output_path) = output {
+        if output_path == "-" {
+            io::stdout().write_all(&decrypted)?;
+        } else {
+            std::fs::write(output_path, &decrypted)?;
+            println!(
+                "{} Saved to {} ({:.2})",
+                "✓".green().bold(),
+                output_path.yellow(),
+                indicatif::HumanBytes(decrypted.len() as u64)
+            );
+        }
+    } else {
+        match &meta.data_type {
+            DataType::File => {
+                if let Some(fname) = &meta.filename {
+                    let safe = PathBuf::from(&fname)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("paste_{}", id));
+                    std::fs::write(&safe, &decrypted)?;
+                    println!(
+                        "{} Saved to {} ({:.2})",
+                        "✓".green().bold(),
+                        safe.yellow(),
+                        indicatif::HumanBytes(decrypted.len() as u64)
+                    );
+                } else {
+                    io::stdout().write_all(&decrypted)?;
+                }
+            }
+            DataType::Text => {
+                io::stdout().write_all(&decrypted)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -135,19 +582,51 @@ async fn main() -> eyre::Result<()> {
             try_count,
             ttl,
             burn_after_read,
+            to,
         } => {
-            let password = Zeroizing::new(rpassword::prompt_password(format!(
-                "{} ",
-                "Enter password:".cyan().bold()
-            ))?);
-            let password_confirm = Zeroizing::new(rpassword::prompt_password(format!(
-                "{} ",
-                "Confirm password:".cyan().bold()
-            ))?);
+            // Recipient mode: resolve the target account's public key first.
+            let recipient_profile = if let Some(to) = &to {
+                let resp = client
+                    .get(format!("{}/api/account/{}", base_url, to))
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    eyre::bail!(
+                        "{} Failed to look up account {}: HTTP {}",
+                        "Error:".red().bold(),
+                        to,
+                        resp.status()
+                    );
+                }
+                let profile: AccountProfileResponse = bitcode::decode(&resp.bytes().await?)?;
+                eprintln!(
+                    "{} Encrypting to account {} (0x{})",
+                    "Recipient:".cyan().bold(),
+                    profile.name,
+                    hex(&profile.kid_prefix)
+                );
+                Some(profile)
+            } else {
+                None
+            };
 
-            if password != password_confirm {
-                eprintln!("{} Passwords do not match.", "Error:".red().bold());
-                return Ok(());
+            let password = if recipient_profile.is_none() {
+                Some(Zeroizing::new(rpassword::prompt_password(format!(
+                    "{} ",
+                    "Enter password:".cyan().bold()
+                ))?))
+            } else {
+                None
+            };
+            if let Some(password) = &password {
+                let password_confirm = Zeroizing::new(rpassword::prompt_password(format!(
+                    "{} ",
+                    "Confirm password:".cyan().bold()
+                ))?);
+                if password.as_str() != password_confirm.as_str() {
+                    eprintln!("{} Passwords do not match.", "Error:".red().bold());
+                    return Ok(());
+                }
             }
 
             let (content, data_type, filename) = if file.as_deref() == Some("-") || file.is_none() {
@@ -188,20 +667,61 @@ async fn main() -> eyre::Result<()> {
             let content_key = Zeroizing::new(
                 generate_content_key().map_err(|e| eyre::eyre!("Key generation failed: {}", e))?,
             );
-            let setup = encrypt_setup(&password, &content_key)
-                .map_err(|e| eyre::eyre!("Encryption setup failed: {}", e))?;
-            let (salt, nonce, password_hash) = (setup.salt, setup.base_nonce, setup.password_hash);
-            let key_envelope = KeyEnvelope {
-                wrap_nonce: setup.wrap_nonce,
-                wrapped_key: setup.wrapped_key,
-            };
+
+            let recipient = recipient_profile.as_ref();
+            let (salt, nonce, password_hash, key_envelope, envelope, recipient_pub) =
+                if let Some(profile) = recipient {
+                    // Recipient mode: no password setup; seal the CEK to the
+                    // recipient account's public key via X25519 ECDH.
+                    let mut base_nonce = [0u8; 12];
+                    getrandom::fill(&mut base_nonce)?;
+                    let (eph_priv, eph_pub) = generate_x25519_keypair()
+                        .map_err(|e| eyre::eyre!("Keypair generation failed: {}", e))?;
+                    let (env_nonce, sealed_cek) =
+                        seal_content_key_for_recipient(&eph_priv, &profile.pubkey, &content_key)
+                            .map_err(|e| eyre::eyre!("Failed to seal content key: {}", e))?;
+                    let envelope = RecipientEnvelope {
+                        recipient_kid: profile.kid,
+                        ephemeral_pub: eph_pub,
+                        nonce: env_nonce,
+                        sealed_cek,
+                    };
+                    (
+                        None,
+                        base_nonce,
+                        None,
+                        None,
+                        Some(envelope),
+                        Some(profile.pubkey),
+                    )
+                } else {
+                    let setup =
+                        encrypt_setup(password.as_ref().map_or("", |p| p.as_str()), &content_key)
+                            .map_err(|e| eyre::eyre!("Encryption setup failed: {}", e))?;
+                    let key_envelope = KeyEnvelope {
+                        wrap_nonce: setup.wrap_nonce,
+                        wrapped_key: setup.wrapped_key,
+                    };
+                    (
+                        Some(setup.salt),
+                        setup.base_nonce,
+                        Some(setup.password_hash),
+                        Some(key_envelope),
+                        None,
+                        None,
+                    )
+                };
 
             let mut header = CreatePasteHeader {
                 nonce,
                 salt,
                 password_hash,
                 key: key_envelope,
-                try_count: Some(*try_count),
+                try_count: if envelope.is_some() {
+                    None
+                } else {
+                    Some(*try_count)
+                },
                 ttl_seconds: Some(*ttl),
                 data_type,
                 filename,
@@ -210,6 +730,8 @@ async fn main() -> eyre::Result<()> {
                 allow_download: true,
                 burn_after_read: *burn_after_read,
                 burn_receipt_hash: [0u8; 32],
+                recipient: envelope,
+                recipient_pub,
             };
 
             if *burn_after_read {
@@ -388,11 +910,6 @@ async fn main() -> eyre::Result<()> {
             }
         }
         Commands::Get { id, output } => {
-            let password = Zeroizing::new(rpassword::prompt_password(format!(
-                "{} ",
-                "Enter password:".cyan().bold()
-            ))?);
-
             let salt_resp = client
                 .get(format!("{}/api/paste/{}/salt", base_url, id))
                 .send()
@@ -408,7 +925,33 @@ async fn main() -> eyre::Result<()> {
             }
 
             let salt_body = salt_resp.bytes().await?;
-            let salt_bytes = bitcode::decode::<GetSaltResponse>(&salt_body)?.salt;
+            let salt_info = bitcode::decode::<GetSaltResponse>(&salt_body)?;
+
+            // `mode: Recipient` ⇒ the paste is sealed to a user account
+            // instead of a password: prove ownership via the account
+            // challenge flow.
+            if salt_info.mode == PasteAuthMode::Recipient {
+                return account_paste_get(
+                    &client,
+                    &base_url,
+                    id,
+                    output,
+                    salt_info.recipient.as_ref(),
+                )
+                .await;
+            }
+            let Some(salt_bytes) = salt_info.salt else {
+                eprintln!(
+                    "{} Paste metadata is missing the password salt.",
+                    "Error:".red().bold()
+                );
+                return Ok(());
+            };
+
+            let password = Zeroizing::new(rpassword::prompt_password(format!(
+                "{} ",
+                "Enter password:".cyan().bold()
+            ))?);
 
             let (derived_key, mut vk) = derive_keys(&password, &salt_bytes)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -444,7 +987,7 @@ async fn main() -> eyre::Result<()> {
             let (meta, _) = split_paste_frame(&meta_body)
                 .map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
 
-            let enc_bytes = encrypted_size(meta.total_size, meta.total_chunks);
+            let enc_bytes = get_ciphertext_size(meta.total_size as usize);
 
             eprintln!(
                 "{} {:.2} plain · {} chunks · {:.2} encrypted",
@@ -454,10 +997,6 @@ async fn main() -> eyre::Result<()> {
                 indicatif::HumanBytes(enc_bytes as u64),
             );
 
-            let pb = make_pb(enc_bytes as u64, "green/yellow", "");
-            let num_parts = PARALLELISM.clamp(1, 16);
-            let part_size = (enc_bytes as u64).div_ceil(num_parts as u64);
-
             if enc_bytes == 0 {
                 eprintln!(
                     "{} Paste appears incomplete (no data).",
@@ -465,6 +1004,10 @@ async fn main() -> eyre::Result<()> {
                 );
                 return Ok(());
             }
+
+            let pb = make_pb(enc_bytes as u64, "green/yellow", "");
+            let num_parts = PARALLELISM.clamp(1, 16);
+            let part_size = (enc_bytes as u64).div_ceil(num_parts as u64);
 
             let buf = Arc::new(std::sync::Mutex::new(vec![0u8; enc_bytes]));
             let dl_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -530,7 +1073,7 @@ async fn main() -> eyre::Result<()> {
             // The password-wrapped content key rides in the blob metadata frame
             // fetched above, served only after the server verified the password.
             // Legacy pastes have no envelope: the derived KEK IS the content key.
-            let mut ek = match &meta.key {
+            let ek = match &meta.key {
                 Some(envelope) => {
                     unwrap_content_key(&envelope.wrapped_key, &envelope.wrap_nonce, &derived_key)
                         .map_err(|e| eyre::eyre!("Key unwrap failed: {}", e))?
@@ -538,115 +1081,23 @@ async fn main() -> eyre::Result<()> {
                 None => derived_key,
             };
 
-            // Send burn receipt if paste is burn-after-read
-            if meta.burn_after_read {
-                let receipt = compute_burn_receipt(&ek);
-                let burn_resp = client
-                    .post(format!("{}/api/paste/{}/burn", base_url, id))
-                    .body(receipt.to_vec())
-                    .send()
-                    .await;
-                match burn_resp {
-                    Ok(r) if r.status().is_success() => {
-                        eprintln!("{} Paste burned after reading", "✓".green().bold());
-                    }
-                    Ok(r) if r.status() == 410 => {
-                        // already burned
-                    }
-                    _ => {}
-                }
-            }
-
-            let done = Arc::new(AtomicU32::new(0));
-            let total = meta.total_chunks;
-            let pb = make_pb(total as u64, "magenta/yellow", "");
-
-            let plain_size = get_plaintext_size(total, encrypted.len())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let out = Arc::new(std::sync::Mutex::new(Vec::with_capacity(plain_size)));
-
-            std::thread::scope(|s| {
-                let n = std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(4);
-                let cpt = (total as usize).div_ceil(n);
-
-                for t in 0..n {
-                    let sc = t * cpt;
-                    let ec = std::cmp::min(sc + cpt, total as usize);
-                    if sc >= ec {
-                        continue;
-                    }
-                    let k = ek;
-                    let nonce = meta.nonce;
-                    let enc = &encrypted;
-                    let out = &out;
-                    let done = &done;
-                    let pb = &pb;
-
-                    s.spawn(move || {
-                        let mut local = Vec::new();
-                        for i in sc..ec {
-                            let (a, b) = get_chunk_bounds(total, i as u32, enc.len());
-                            let _ =
-                                decrypt_chunk_into(&enc[a..b], &k, &nonce, i as u32, &mut local);
-                            let prev = done.fetch_add(1, Ordering::Relaxed) as u64;
-                            if prev.is_multiple_of(4) || prev + 1 == total as u64 {
-                                pb.set_position(prev + 1);
-                                pb.set_message(
-                                    indicatif::HumanBytes(local.len() as u64).to_string(),
-                                );
-                            }
-                        }
-                        let mut o = out.lock().unwrap();
-                        o.extend_from_slice(&local);
-                    });
-                }
-            });
-
-            ek.zeroize();
-            pb.finish_and_clear();
-
-            let decrypted = Arc::try_unwrap(out).unwrap().into_inner().unwrap();
-
-            if let Some(output_path) = output {
-                if output_path == "-" {
-                    io::stdout().write_all(&decrypted)?;
-                } else {
-                    std::fs::write(output_path, &decrypted)?;
-                    println!(
-                        "{} Saved to {} ({:.2})",
-                        "✓".green().bold(),
-                        output_path.yellow(),
-                        indicatif::HumanBytes(decrypted.len() as u64)
-                    );
-                }
-            } else {
-                match meta.data_type {
-                    DataType::File => {
-                        if let Some(fname) = meta.filename {
-                            let safe = PathBuf::from(&fname)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .map(String::from)
-                                .unwrap_or_else(|| format!("paste_{}", id));
-                            std::fs::write(&safe, &decrypted)?;
-                            println!(
-                                "{} Saved to {} ({:.2})",
-                                "✓".green().bold(),
-                                safe.yellow(),
-                                indicatif::HumanBytes(decrypted.len() as u64)
-                            );
-                        } else {
-                            io::stdout().write_all(&decrypted)?;
-                        }
-                    }
-                    DataType::Text => {
-                        io::stdout().write_all(&decrypted)?;
-                    }
-                }
-            }
+            finish_decrypt(&client, &base_url, id, &meta, ek, encrypted, output).await?;
         }
+        Commands::Account { action } => match action {
+            AccountCommand::Register { name } => {
+                register_account(&client, &base_url, name, None).await?;
+            }
+            AccountCommand::Import { name, phrase } => {
+                let phrase = match phrase {
+                    Some(p) => Some(p.clone()),
+                    None => prompt_mnemonic()?,
+                };
+                register_account(&client, &base_url, name, phrase).await?;
+            }
+            AccountCommand::Login {} => {
+                login_account(&client, &base_url).await?;
+            }
+        },
         Commands::Passwd { id } => {
             let current_password = Zeroizing::new(rpassword::prompt_password(format!(
                 "{} ",
@@ -684,12 +1135,26 @@ async fn main() -> eyre::Result<()> {
                 return Ok(());
             }
             let meta: GetSaltResponse = bitcode::decode(&salt_resp.bytes().await?)?;
+            if meta.mode == PasteAuthMode::Recipient {
+                eprintln!(
+                    "{} Paste is sealed to a user account — password change is not available.",
+                    "Error:".red().bold()
+                );
+                return Ok(());
+            }
+            let Some(salt_bytes) = meta.salt else {
+                eprintln!(
+                    "{} Paste metadata is missing the password salt.",
+                    "Error:".red().bold()
+                );
+                return Ok(());
+            };
 
             eprintln!("{} Deriving keys (Argon2id)...", "·".bright_black());
 
-            let (derived_key, mut vk) = derive_keys(&current_password, &meta.salt)
+            let (derived_key, mut vk) = derive_keys(&current_password, &salt_bytes)
                 .map_err(|e| eyre::eyre!("Key derivation failed: {}", e))?;
-            let mut ph = compute_password_hash(&vk, &meta.salt);
+            let mut ph = compute_password_hash(&vk, &salt_bytes);
             let auth = base64::engine::general_purpose::STANDARD.encode(ph);
             ph.zeroize();
             vk.zeroize();

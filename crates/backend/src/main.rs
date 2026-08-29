@@ -27,6 +27,7 @@ async fn main() -> eyre::Result<()> {
 
     let cleanup_handle = tokio::spawn(cleanup_task(db.clone()));
     let rate_limit_handle = tokio::spawn(rate_limit_cleanup_task(limiter));
+    let challenge_handle = tokio::spawn(challenge_cleanup_task(state.challenges.clone()));
 
     let app = app_router(state);
 
@@ -46,6 +47,7 @@ async fn main() -> eyre::Result<()> {
     info!("server stopped, flushing database");
     cleanup_handle.abort();
     rate_limit_handle.abort();
+    challenge_handle.abort();
     let _ = db.flush();
     info!("shutting down");
     Ok(())
@@ -68,5 +70,13 @@ async fn rate_limit_cleanup_task(limiter: RateLimiter) {
     loop {
         interval.tick().await;
         limiter.cleanup().await;
+    }
+}
+
+async fn challenge_cleanup_task(challenges: backend::challenge::ChallengeStore) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        challenges.cleanup().await;
     }
 }

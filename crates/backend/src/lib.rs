@@ -1,8 +1,10 @@
+pub mod challenge;
 pub mod db;
 pub mod handlers;
 pub mod rate_limit;
 pub mod routes;
 
+use crate::challenge::ChallengeStore;
 use crate::db::DataStore;
 use crate::rate_limit::RateLimiter;
 use mitsuzo_types::MAX_PASTE_SIZE;
@@ -49,6 +51,7 @@ impl RuntimeConfig {
 pub struct AppState {
     pub db: DataStore,
     pub limiter: RateLimiter,
+    pub challenges: ChallengeStore,
     pub config: RuntimeConfig,
 }
 
@@ -57,6 +60,7 @@ impl AppState {
         Self {
             db,
             limiter,
+            challenges: ChallengeStore::new(),
             config,
         }
     }

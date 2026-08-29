@@ -3,7 +3,19 @@ sequenceDiagram
     participant B as Browser/CLI
     participant S as Server
 
-    Note over U,S:CREATE PASTE
+    Note over U,S:REGISTER ACCOUNT
+    U->>B:Name + account password
+    B->>B:Generate BIP39 seed phrase (24 words)
+    B->>B:Derive X25519 scalar from seed (HKDF, clamped)
+    B->>B:pubkey = scalar x G, kid = SHA-256(pubkey)
+    B->>B:Lock scalar with password KEK (Argon2id + ChaCha20-Poly1305)
+    Note right of B:Blob stored on device (localStorage / account.enc)
+    B->>S:POST /api/account [kid, pubkey, name]
+    S->>S:Verify kid = SHA-256(pubkey); 409 if taken
+    S->>B:Account profile (kid, name)
+    Note right of B:Server never sees the seed phrase or private key
+
+    Note over U,S:CREATE PASTE (password mode)
     U->>B:Text/File + Password (or empty for auto-generated)
     B->>B:Generate salt(16B) + nonce(12B) + random content key CEK(32B)
     B->>B:master = Argon2id(password, salt, 32B)
@@ -18,12 +30,22 @@ sequenceDiagram
     B->>S:PUT /api/paste/{id}/chunk/{i} [16MB upload chunks, resumable]
     B->>S:POST /api/paste/{id}/complete
     Note right of S:Stores: files/{id} + files/{id}.nonce
-Sled DB: pass, salt, key, meta, burn
+    Sled DB: pass, salt, key, meta, burn
 
-    Note over U,S:VIEW PASTE
+    Note over U,S:CREATE PASTE (recipient mode)
+    U->>B:Text/File + recipient account
+    B->>B:Generate CEK + fresh ephemeral X25519 keypair
+    B->>B:Seal CEK: ChaCha20-Poly1305(HKDF(ECDH(eph_priv, recipient_pub)))
+    B->>S:POST /api/paste [recipient envelope, no salt/hash]
+    S->>S:Validate recipient_pub matches account (if registered)
+    S->>B:Return paste ID
+    B->>S:PUT chunks + complete (same protocol as password mode)
+    Note right of B:Sender keeps ephemeral key to reopen the paste
+
+    Note over U,S:VIEW PASTE (password mode)
     U->>B:Paste ID + Password (from URL #hash)
     B->>S:GET /api/paste/{id}/salt
-    S->>B:Return salt only (KDF bootstrap — everything else requires auth)
+    S->>B:mode=Password + Argon2 salt (KDF bootstrap — everything else requires auth)
     B->>B:master = Argon2id(password, salt) → kek + val_key = HKDF(master)
     B->>B:hash = HMAC-SHA256(val_key, salt)
     B->>S:GET /api/paste/{id}/data + X-Password-Hash [Range supported]
@@ -37,6 +59,31 @@ Sled DB: pass, salt, key, meta, burn
         S->>S:if try_count==0, delete paste
         S->>B:401 + remaining try_count/ttl body
     end
+
+    Note over U,S:VIEW PASTE (recipient mode)
+    U->>B:Paste ID + account
+    B->>S:GET /api/paste/{id}/salt
+    S->>B:mode=Recipient + paste recipient info (kid, name)
+    B->>S:GET /api/paste/{id}/challenge
+    S->>B:Challenge sealed to recipient pubkey (single-use, 60s TTL)
+    B->>B:Solve with ECDH(account scalar, server ephemeral_pub) → response nonce
+    B->>S:GET /api/paste/{id}/data + X-Account-Proof:{kid}:{nonce}
+    alt Proof verifies (single-use, constant-time)
+        S->>B:Metadata frame (recipient envelope) + ciphertext
+        B->>B:Open CEK: ECDH(account scalar, sender ephemeral_pub)
+        B->>B:Decrypt chunks with CEK
+        B->>U:Display plaintext / Download file
+    else Proof invalid / stale
+        S->>B:401 + fresh challenge
+    end
+    Note right of B:Sender reopens with their retained ephemeral key (ECDH symmetry)
+
+    Note over U,S:ACCOUNT INBOX
+    U->>B:Open account page
+    B->>S:GET /api/account/{kid}/challenge → solve with account scalar
+    B->>S:GET /api/account/{kid}/inbox + X-Account-Proof
+    S->>B:Recipient-mode pastes addressed to this kid
+    B->>U:List (id, filename, type) → open any paste
 
     Note over U,S:CHANGE PASSWORD
     U->>B:New password

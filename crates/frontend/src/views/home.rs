@@ -1,5 +1,8 @@
 use crate::BASE_URL;
 use crate::Route;
+use crate::account::{
+    RecipientEphemeral, RecipientTarget, use_recipient_ephemerals, use_recipient_target,
+};
 use crate::components::PopupContext;
 use crate::sanitize_id;
 use crate::utils::{copy_to_clipboard, do_xhr_get, do_xhr_post, do_xhr_put};
@@ -9,11 +12,13 @@ use dioxus::prelude::*;
 use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{
-    CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, DataType, GetStatsResponse,
-    InitPasteResponse, KeyEnvelope, MAX_PASTE_SIZE, UPLOAD_CHUNK_SIZE,
+    AccountProfileResponse, CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, DataType,
+    GetStatsResponse, InitPasteResponse, KeyEnvelope, MAX_PASTE_SIZE, RecipientEnvelope,
+    UPLOAD_CHUNK_SIZE,
 };
 use mitsuzo_utils::{
     compute_burn_receipt, encrypt_chunk_into, encrypt_setup, generate_content_key,
+    generate_x25519_keypair, get_ciphertext_size, seal_content_key_for_recipient,
 };
 use wasm_bindgen::JsCast;
 use web_sys;
@@ -61,6 +66,12 @@ pub struct ProgressState {
     pub progress: f32,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum EncryptMode {
+    Password,
+    Account,
+}
+
 #[component]
 pub fn home_view() -> Element {
     let mut content = use_signal(String::new);
@@ -82,6 +93,60 @@ pub fn home_view() -> Element {
     let mut drag_over = use_signal(|| false);
     let mut ttl_preset = use_signal(|| "43200".to_string());
     let mut ttl_custom = use_signal(|| "43200".to_string());
+    let recipient = use_recipient_target();
+    let recipient_ephemerals = use_recipient_ephemerals();
+    let mut recipient_search = use_signal(String::new);
+    let mut encrypt_mode = use_signal(move || {
+        if recipient.read().is_some() {
+            EncryptMode::Account
+        } else {
+            EncryptMode::Password
+        }
+    });
+
+    let cancel_recipient = {
+        let mut recipient = recipient;
+        move |_| {
+            recipient.set(None);
+        }
+    };
+
+    let search_recipient = {
+        let mut recipient_search = recipient_search;
+        let mut recipient = recipient;
+        let mut popup_ctx = popup_ctx;
+        move |_| {
+            let query = recipient_search.read().trim().to_string();
+            if query.is_empty() {
+                popup_ctx.write().show_error(t!("user-not-found"));
+                return;
+            }
+            spawn(async move {
+                let url = format!("{}/api/account/{}", BASE_URL, query);
+                match do_xhr_get(&url, vec![], |_, _| {}).await {
+                    Ok(r) if r.status >= 200 && r.status < 300 => {
+                        if let Some(body) = r.body
+                            && let Ok(p) = bitcode::decode::<AccountProfileResponse>(&body)
+                        {
+                            recipient.set(Some(RecipientTarget {
+                                kid: p.kid,
+                                kid_prefix: p.kid_prefix,
+                                pubkey: p.pubkey,
+                                name: p.name.clone(),
+                            }));
+                            recipient_search.set(String::new());
+                            popup_ctx
+                                .write()
+                                .show_success(t!("recipient-found", name: p.name));
+                        } else {
+                            popup_ctx.write().show_error(t!("user-not-found"));
+                        }
+                    }
+                    _ => popup_ctx.write().show_error(t!("user-not-found")),
+                }
+            });
+        }
+    };
 
     let mut ttl_initialized = use_signal(|| false);
     use_effect({
@@ -159,11 +224,17 @@ pub fn home_view() -> Element {
     let create_paste = {
         let mut auto_generated = auto_generated;
         let disable_download = disable_download;
+        let mut recipient_ephemerals = recipient_ephemerals;
         move |_| {
             spawn(async move {
+                let mode = *encrypt_mode.read();
+                let recipient_info = recipient.read().clone();
                 let password = password_input.read().clone();
-                auto_generated.set(password.is_empty());
-                let password = if password.is_empty() {
+                let password_mode = mode == EncryptMode::Password;
+                // Account mode has no password at all; password mode
+                // auto-generates one when the field is left empty.
+                auto_generated.set(password_mode && password.is_empty());
+                let password = if password_mode && password.is_empty() {
                     let mut buf = [0u8; 16];
                     let _ = getrandom::fill(&mut buf);
                     let auto_pw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
@@ -172,6 +243,11 @@ pub fn home_view() -> Element {
                 } else {
                     password
                 };
+
+                if !password_mode && recipient_info.is_none() {
+                    popup_ctx.write().show_error(t!("recipient-required"));
+                    return;
+                }
 
                 progress.set(Some(ProgressState {
                     status: t!("progress-validating"),
@@ -262,20 +338,6 @@ pub fn home_view() -> Element {
                         return;
                     }
                 };
-                let setup = match encrypt_setup(&password, &content_key) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        popup_ctx
-                            .write()
-                            .show_error(t!("error-encryption-failed", error: e.to_string()));
-                        progress.set(None);
-                        return;
-                    }
-                };
-                let salt_bytes = setup.salt;
-                let nonce_bytes = setup.base_nonce;
-                let encryption_key = content_key;
-                let password_hash = setup.password_hash;
 
                 let total_chunks = if file_size_for_chunks == 0 {
                     1
@@ -283,28 +345,113 @@ pub fn home_view() -> Element {
                     (file_size_for_chunks as usize).div_ceil(CHUNK_SIZE) as u32
                 };
 
-                let header = CreatePasteHeader {
-                    nonce: nonce_bytes,
-                    salt: salt_bytes,
-                    password_hash,
-                    key: KeyEnvelope {
-                        wrap_nonce: setup.wrap_nonce,
-                        wrapped_key: setup.wrapped_key,
-                    },
-                    try_count,
-                    ttl_seconds: ttl_seconds_option,
-                    data_type,
-                    filename: file_name.read().clone(),
-                    content_type: file_content_type.read().clone(),
-                    total_chunks,
-                    allow_download: !*disable_download.read(),
-                    burn_after_read: *burn_after_read.read(),
-                    burn_receipt_hash: if *burn_after_read.read() {
-                        compute_burn_receipt(&encryption_key)
+                let (header, session_ephemeral): (CreatePasteHeader, Option<([u8; 32], [u8; 32])>) =
+                    if !password_mode {
+                        // Recipient mode: seal the CEK to the recipient's
+                        // public key. Both the recipient (via account scalar)
+                        // and the sender (via the ephemeral key held in memory)
+                        // can reopen this envelope.
+                        let Some(target) = recipient_info.as_ref() else {
+                            return;
+                        };
+                        let mut base_nonce = [0u8; 12];
+                        let _ = getrandom::fill(&mut base_nonce);
+                        let (eph_priv, eph_pub) = match generate_x25519_keypair() {
+                            Ok(pair) => pair,
+                            Err(e) => {
+                                popup_ctx.write().show_error(t!(
+                                    "error-encryption-failed",
+                                    error: e.to_string()
+                                ));
+                                progress.set(None);
+                                return;
+                            }
+                        };
+                        let (env_nonce, sealed_cek) = match seal_content_key_for_recipient(
+                            &eph_priv,
+                            &target.pubkey,
+                            &content_key,
+                        ) {
+                            Ok(pair) => pair,
+                            Err(e) => {
+                                popup_ctx.write().show_error(t!(
+                                    "error-encryption-failed",
+                                    error: e.to_string()
+                                ));
+                                progress.set(None);
+                                return;
+                            }
+                        };
+                        let header = CreatePasteHeader {
+                            nonce: base_nonce,
+                            salt: None,
+                            password_hash: None,
+                            key: None,
+                            try_count: None,
+                            ttl_seconds: ttl_seconds_option,
+                            data_type,
+                            filename: file_name.read().clone(),
+                            content_type: file_content_type.read().clone(),
+                            total_chunks,
+                            allow_download: !*disable_download.read(),
+                            burn_after_read: *burn_after_read.read(),
+                            burn_receipt_hash: if *burn_after_read.read() {
+                                compute_burn_receipt(&content_key)
+                            } else {
+                                [0u8; 32]
+                            },
+                            recipient: Some(RecipientEnvelope {
+                                recipient_kid: target.kid,
+                                ephemeral_pub: eph_pub,
+                                nonce: env_nonce,
+                                sealed_cek,
+                            }),
+                            recipient_pub: Some(target.pubkey),
+                        };
+                        (header, Some((target.kid, eph_priv)))
                     } else {
-                        [0u8; 32]
-                    },
-                };
+                        let setup = match encrypt_setup(&password, &content_key) {
+                            Ok(data) => data,
+                            Err(e) => {
+                                popup_ctx.write().show_error(t!(
+                                    "error-encryption-failed",
+                                    error: e.to_string()
+                                ));
+                                progress.set(None);
+                                return;
+                            }
+                        };
+                        let salt_bytes = setup.salt;
+                        let nonce_bytes = setup.base_nonce;
+                        let password_hash = setup.password_hash;
+                        let header = CreatePasteHeader {
+                            nonce: nonce_bytes,
+                            salt: Some(salt_bytes),
+                            password_hash: Some(password_hash),
+                            key: Some(KeyEnvelope {
+                                wrap_nonce: setup.wrap_nonce,
+                                wrapped_key: setup.wrapped_key,
+                            }),
+                            try_count,
+                            ttl_seconds: ttl_seconds_option,
+                            data_type,
+                            filename: file_name.read().clone(),
+                            content_type: file_content_type.read().clone(),
+                            total_chunks,
+                            allow_download: !*disable_download.read(),
+                            burn_after_read: *burn_after_read.read(),
+                            burn_receipt_hash: if *burn_after_read.read() {
+                                compute_burn_receipt(&content_key)
+                            } else {
+                                [0u8; 32]
+                            },
+                            recipient: None,
+                            recipient_pub: None,
+                        };
+                        (header, None)
+                    };
+                let encryption_key = content_key;
+                let nonce_bytes = header.nonce;
 
                 let header_bytes = bitcode::encode(&header);
 
@@ -318,13 +465,7 @@ pub fn home_view() -> Element {
 
                 match (text_fallback, js_file) {
                     (Some(text_bytes), _) => {
-                        let chunk_size = if text_bytes.len() <= CHUNK_SIZE {
-                            text_bytes.len() + 16
-                        } else {
-                            (total_chunks as usize - 1) * (CHUNK_SIZE + 16)
-                                + (text_bytes.len() - (total_chunks as usize - 1) * CHUNK_SIZE)
-                                + 16
-                        };
+                        let chunk_size = get_ciphertext_size(text_bytes.len());
                         enc_body.reserve(chunk_size);
                         if let Err(e) = encrypt_chunk_into(
                             &text_bytes,
@@ -341,15 +482,7 @@ pub fn home_view() -> Element {
                         }
                     }
                     (_, Some(file)) => {
-                        let total_cipher_size = if total_chunks == 1 {
-                            file_size_for_chunks as usize + 16
-                        } else {
-                            let full = (total_chunks as usize - 1) * (CHUNK_SIZE + 16);
-                            let last = (file_size_for_chunks as usize
-                                - (total_chunks as usize - 1) * CHUNK_SIZE)
-                                + 16;
-                            full + last
-                        };
+                        let total_cipher_size = get_ciphertext_size(file_size_for_chunks as usize);
                         enc_body.reserve(total_cipher_size);
                         for i in 0..total_chunks {
                             if i % 8 == 0 {
@@ -425,6 +558,16 @@ pub fn home_view() -> Element {
                 };
 
                 let total_upload_chunks = enc_body.len().div_ceil(UPLOAD_CHUNK_SIZE);
+
+                // Remember the sender's ephemeral key so this session can
+                // reopen the paste (ECDH symmetry with the recipient).
+                if let Some((kid, eph_priv)) = session_ephemeral {
+                    recipient_ephemerals.write().push(RecipientEphemeral {
+                        paste_id: paste_id.clone(),
+                        recipient_kid: kid,
+                        ephemeral_priv: eph_priv,
+                    });
+                }
 
                 let chunk_info = do_xhr_get(
                     &format!("{}/api/paste/{}/chunks", BASE_URL, paste_id),
@@ -524,6 +667,8 @@ pub fn home_view() -> Element {
             .unwrap_or_default()
     };
 
+    let account_mode = *encrypt_mode.read() == EncryptMode::Account;
+
     rsx! {
         div {
             class: if *drag_over.read() { "max-w-2xl mx-auto px-4 py-8 flex flex-col items-center justify-center min-h-[calc(100vh-3.5rem)] rounded-2xl border-2 border-dashed border-accent/50 transition-all duration-200" } else { "max-w-2xl mx-auto px-4 py-8 flex flex-col items-center justify-center min-h-[calc(100vh-3.5rem)] transition-all duration-200" },
@@ -575,6 +720,23 @@ pub fn home_view() -> Element {
                             class: "bg-accent h-3 rounded-full transition-all duration-150",
                             style: "width: {prog.progress}%"
                         }
+                    }
+                }
+            }
+
+            if account_mode
+                && let Some(target) = recipient.read().as_ref()
+            {
+                div {
+                    class: "w-full max-w-xl mb-4 p-4 bg-accent/15 border border-accent rounded-lg flex justify-between items-center",
+                    span {
+                        class: "text-sm font-semibold text-accent",
+                        {t!("recipient-banner", name: target.name.clone(), kid: target.kid_prefix_hex())}
+                    }
+                    button {
+                        class: "text-sm text-muted hover:text-danger transition-colors",
+                        onclick: cancel_recipient,
+                        {t!("recipient-cancel")}
                     }
                 }
             }
@@ -646,22 +808,76 @@ pub fn home_view() -> Element {
                 }
             }
 
-            input {
-                class: "w-full max-w-xl p-4 bg-surface text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
-                r#type: "password",
-                placeholder: "{t!(\"password-placeholder\")}",
-                autocomplete: "new-password",
-                oninput: move |evt| password_input.set(evt.value()),
-                value: "{password_input}",
+            div {
+                class: "w-full max-w-xl mb-4",
+                div {
+                    class: "grid grid-cols-2 gap-1.5 bg-surface p-1.5 rounded-lg border border-border",
+                    button {
+                        class: if *encrypt_mode.read() == EncryptMode::Password {
+                            "px-4 py-2 rounded-md bg-accent text-bg font-semibold text-sm transition-all duration-200"
+                        } else {
+                            "px-4 py-2 rounded-md text-muted font-semibold text-sm hover:text-text transition-all duration-200"
+                        },
+                        onclick: move |_| encrypt_mode.set(EncryptMode::Password),
+                        {t!("encrypt-mode-password")}
+                    }
+                    button {
+                        class: if *encrypt_mode.read() == EncryptMode::Account {
+                            "px-4 py-2 rounded-md bg-accent text-bg font-semibold text-sm transition-all duration-200"
+                        } else {
+                            "px-4 py-2 rounded-md text-muted font-semibold text-sm hover:text-text transition-all duration-200"
+                        },
+                        onclick: move |_| encrypt_mode.set(EncryptMode::Account),
+                        {t!("encrypt-mode-account")}
+                    }
+                }
             }
-            p {
-                class: "w-full max-w-xl text-xs text-muted mb-4 text-right",
-                {t!("password-auto-gen-hint")}
+
+            if account_mode
+                && recipient.read().is_none()
+            {
+                div {
+                    class: "w-full max-w-xl mb-4",
+                    label {
+                        class: "block text-muted text-sm font-bold mb-2",
+                        {t!("recipient-search-label")}
+                    }
+                    div {
+                        class: "flex gap-2",
+                        input {
+                            class: "flex-1 p-4 bg-surface text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
+                            placeholder: "{t!(\"recipient-search-placeholder\")}",
+                            oninput: move |evt| recipient_search.set(evt.value()),
+                            value: "{recipient_search}",
+                        }
+                        button {
+                            class: "px-4 py-2 bg-elevated text-text font-semibold rounded-lg hover:bg-accent hover:text-bg transition-all duration-200",
+                            onclick: search_recipient,
+                            {t!("recipient-search-button")}
+                        }
+                    }
+                }
+            }
+
+            if !account_mode {
+                input {
+                    class: "w-full max-w-xl p-4 bg-surface text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
+                    r#type: "password",
+                    placeholder: "{t!(\"password-placeholder\")}",
+                    autocomplete: "new-password",
+                    oninput: move |evt| password_input.set(evt.value()),
+                    value: "{password_input}",
+                }
+                p {
+                    class: "w-full max-w-xl text-xs text-muted mb-4 text-right",
+                    {t!("password-auto-gen-hint")}
+                }
             }
             div {
                 class: "w-full max-w-xl flex flex-col sm:flex-row gap-4 mb-4",
-                div {
-                    class: "flex-1",
+                if !account_mode {
+                    div {
+                        class: "flex-1",
                     label {
                         class: "block text-muted text-sm font-bold mb-2",
                         {t!("try-count-label")}
@@ -697,6 +913,7 @@ pub fn home_view() -> Element {
                             value: "{try_count_custom}",
                         }
                     }
+                }
                 }
                 div {
                     class: "flex-1",

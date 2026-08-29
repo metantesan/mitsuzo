@@ -1,6 +1,11 @@
+mod account;
 mod components;
 mod utils;
 mod views;
+use crate::account::{
+    AccountSession, RecipientEphemeral, RecipientTarget, account_view as AccountPage,
+    user_view as UserPage,
+};
 use crate::utils::do_xhr_get;
 use crate::views::paste_view as P;
 use crate::views::{app_layout, docs_view as Docs, home_view as Home, paste_view as Paste};
@@ -27,6 +32,10 @@ enum Route {
     Paste { id: String },
    #[route("/p/:id")]
    P{id:String},
+    #[route("/user/:id")]
+    UserPage { id: String },
+    #[route("/account")]
+    AccountPage {},
 }
 
 pub fn sanitize_id(id: &str) -> String {
@@ -81,6 +90,15 @@ fn app() -> Element {
     let popup_ctx = use_signal(PopupContext::new);
     use_context_provider(|| popup_ctx);
 
+    let account_session: Signal<Option<AccountSession>> = use_signal(|| None);
+    use_context_provider(|| account_session);
+
+    let recipient_target: Signal<Option<RecipientTarget>> = use_signal(|| None);
+    use_context_provider(|| recipient_target);
+
+    let recipient_ephemerals: Signal<Vec<RecipientEphemeral>> = use_signal(Vec::new);
+    use_context_provider(|| recipient_ephemerals);
+
     let mut stats: Signal<Option<GetStatsResponse>> = use_signal(|| None);
     use_context_provider(|| stats);
 
@@ -97,7 +115,7 @@ fn app() -> Element {
     });
 
     rsx! {
-        document::Stylesheet { href: asset!("assets/tailwind.css") },
+        document::Stylesheet { href: asset!("assets/tailwind.css") }
         Router::<Route> {}
     }
 }

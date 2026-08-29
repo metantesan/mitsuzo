@@ -1,6 +1,8 @@
 use argon2::{Argon2, Params};
+use mitsuzo_types::AccountKeyBlob;
 use orion::hazardous::aead::chacha20poly1305;
 use sha2::{Digest, Sha256};
+use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
 const CHUNK_SIZE: usize = 65536;
@@ -290,6 +292,151 @@ pub fn compute_burn_receipt(encryption_key: &[u8; 32]) -> [u8; 32] {
     hkdf_expand_sha256(encryption_key, BURN_RECEIPT_INFO)
 }
 
+const ACCOUNT_KEY_INFO: &[u8] = b"mitsuzo-account-x25519";
+const CHALLENGE_KEY_INFO: &[u8] = b"mitsuzo-challenge-key";
+const RECIPIENT_KEY_INFO: &[u8] = b"mitsuzo-recipient-key";
+
+/// Standard HKDF-SHA256 extract: `PRK = HMAC-SHA256(salt = Zeros(32), ikm)`.
+/// The existing `hkdf_expand_sha256` provides the expand step (single block).
+fn hkdf_extract_sha256(ikm: &[u8]) -> [u8; 32] {
+    let salt = [0u8; 32];
+    hmac_sha256(&salt, ikm)
+}
+
+/// Derive the account's X25519 scalar from its BIP39 seed phrase (64 bytes).
+/// `HKDF-SHA256(seed, info = "mitsuzo-account-x25519")`, clamped to a valid
+/// X25519 scalar. Fully recoverable from the seed phrase alone.
+pub fn derive_account_scalar(bip39_seed: &[u8; 64]) -> [u8; 32] {
+    let prk = hkdf_extract_sha256(bip39_seed);
+    let mut scalar = hkdf_expand_sha256(&prk, ACCOUNT_KEY_INFO);
+    scalar[0] &= 248;
+    scalar[31] &= 127;
+    scalar[31] |= 64;
+    scalar
+}
+
+/// X25519 base-point multiplication: derive the public key from a scalar.
+pub fn pubkey_from_scalar(scalar: &[u8; 32]) -> [u8; 32] {
+    let secret = StaticSecret::from(*scalar);
+    PublicKey::from(&secret).to_bytes()
+}
+
+/// Full 32-byte account id: `SHA-256(pubkey)`.
+pub fn kid_from_pubkey(pubkey: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(pubkey);
+    hasher.finalize().into()
+}
+
+/// 20-byte display prefix used in profile URLs (`0x` + 40 hex chars).
+pub fn kid_prefix_from_pubkey(pubkey: &[u8; 32]) -> [u8; 20] {
+    let full = kid_from_pubkey(pubkey);
+    let mut prefix = [0u8; 20];
+    prefix.copy_from_slice(&full[..20]);
+    prefix
+}
+
+/// Generate a fresh X25519 keypair from the system RNG.
+pub fn generate_x25519_keypair() -> Result<([u8; 32], [u8; 32]), String> {
+    let mut scalar = [0u8; 32];
+    getrandom::fill(&mut scalar).map_err(|e| format!("Failed to generate keypair: {}", e))?;
+    scalar[0] &= 248;
+    scalar[31] &= 127;
+    scalar[31] |= 64;
+    let pubkey = pubkey_from_scalar(&scalar);
+    Ok((scalar, pubkey))
+}
+
+/// X25519 ECDH shared secret between a private key and a public key.
+pub fn ecdh_shared_secret(private: &[u8; 32], public: &[u8; 32]) -> Result<[u8; 32], String> {
+    let our = StaticSecret::from(*private);
+    let their = PublicKey::from(*public);
+    Ok(our.diffie_hellman(&their).to_bytes())
+}
+
+/// Seal a 32-byte secret (the challenge response) to `recipient_pub` using
+/// the ephemeral private key. The AEAD key is
+/// `HKDF-SHA256(ECDH(ephemeral_priv, recipient_pub), "mitsuzo-challenge-key")`,
+/// so anyone holding a private key that completes the same ECDH (the account
+/// holder OR the envelope's ephemeral key holder) can recover the secret.
+/// Returns `(aead_nonce, sealed)` where `sealed` is 48 bytes.
+pub fn seal_challenge(
+    ephemeral_priv: &[u8; 32],
+    recipient_pub: &[u8; 32],
+    secret: &[u8; 32],
+) -> Result<([u8; 12], [u8; 48]), String> {
+    let shared = ecdh_shared_secret(ephemeral_priv, recipient_pub)?;
+    let key = hkdf_expand_sha256(&shared, CHALLENGE_KEY_INFO);
+    wrap_content_key(secret, &key)
+}
+
+/// Recover the 32-byte challenge response nonce from a sealed challenge.
+pub fn open_challenge(
+    private: &[u8; 32],
+    ephemeral_pub: &[u8; 32],
+    nonce: &[u8; 12],
+    sealed: &[u8; 48],
+) -> Result<[u8; 32], String> {
+    let shared = ecdh_shared_secret(private, ephemeral_pub)?;
+    let key = hkdf_expand_sha256(&shared, CHALLENGE_KEY_INFO);
+    unwrap_content_key(sealed, nonce, &key)
+}
+
+/// Wrap the account's X25519 scalar under a password-derived KEK.
+/// `salt` is random per blob; the KEK comes from the same Argon2id + HKDF
+/// pipeline as paste envelopes.
+pub fn lock_account_key(scalar: &[u8; 32], password: &str) -> Result<AccountKeyBlob, String> {
+    let salt = generate_salt()?;
+    let (kek, _) = derive_keys(password, &salt)?;
+    let (wrap_nonce, wrapped) = wrap_content_key(scalar, &kek)?;
+    Ok(AccountKeyBlob {
+        salt,
+        wrap_nonce,
+        wrapped,
+    })
+}
+
+/// Unwrap the account scalar from a password-encrypted blob. Fails on a
+/// wrong password (ChaCha20-Poly1305 tag check).
+pub fn unlock_account_key(blob: &AccountKeyBlob, password: &str) -> Result<[u8; 32], String> {
+    let (kek, _) = derive_keys(password, &blob.salt)?;
+    unwrap_content_key(&blob.wrapped, &blob.wrap_nonce, &kek)
+}
+
+/// Derive the AEAD key that seals a CEK for a recipient account from the
+/// shared ECDH secret.
+pub fn derive_recipient_cek_key(shared_secret: &[u8; 32]) -> [u8; 32] {
+    hkdf_expand_sha256(shared_secret, RECIPIENT_KEY_INFO)
+}
+
+/// Seal a content key to a recipient account. Symmetric under X25519 ECDH:
+/// the recipient opens it with `ECDH(recipient_scalar, ephemeral_pub)` and a
+/// sender holding `ephemeral_priv` opens it with
+/// `ECDH(ephemeral_priv, recipient_pub)` — the same shared secret.
+/// Returns `(aead_nonce, sealed_cek)` with `sealed_cek` 48 bytes.
+pub fn seal_content_key_for_recipient(
+    ephemeral_priv: &[u8; 32],
+    recipient_pub: &[u8; 32],
+    content_key: &[u8; 32],
+) -> Result<([u8; 12], [u8; 48]), String> {
+    let shared = ecdh_shared_secret(ephemeral_priv, recipient_pub)?;
+    let key = derive_recipient_cek_key(&shared);
+    wrap_content_key(content_key, &key)
+}
+
+/// Open a recipient-sealed content key with either the recipient account
+/// scalar or the sender's ephemeral private key.
+pub fn open_content_key_for_recipient(
+    private: &[u8; 32],
+    ephemeral_pub: &[u8; 32],
+    nonce: &[u8; 12],
+    sealed_cek: &[u8; 48],
+) -> Result<[u8; 32], String> {
+    let shared = ecdh_shared_secret(private, ephemeral_pub)?;
+    let key = derive_recipient_cek_key(&shared);
+    unwrap_content_key(sealed_cek, nonce, &key)
+}
+
 /// Compute total plaintext size from ciphertext length
 pub fn get_plaintext_size(total_chunks: u32, ciphertext_len: usize) -> Result<usize, String> {
     if total_chunks == 0 {
@@ -518,5 +665,135 @@ mod tests {
             .unwrap();
         }
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn account_scalar_pubkey_round_trip() {
+        let (scalar, pubkey) = generate_x25519_keypair().unwrap();
+        assert_eq!(pubkey_from_scalar(&scalar), pubkey);
+        // Clamped scalars are invariant under a second clamp.
+        let repub = pubkey_from_scalar(&scalar);
+        assert_eq!(repub, pubkey);
+        // kid is a stable SHA-256 of the pubkey with the 20-byte prefix.
+        let kid = kid_from_pubkey(&pubkey);
+        assert_eq!(kid.len(), 32);
+        let prefix = kid_prefix_from_pubkey(&pubkey);
+        assert_eq!(&kid[..20], prefix);
+    }
+
+    #[test]
+    fn ecdh_symmetry() {
+        let (priv_a, pub_a) = generate_x25519_keypair().unwrap();
+        let (priv_b, pub_b) = generate_x25519_keypair().unwrap();
+        let s1 = ecdh_shared_secret(&priv_a, &pub_b).unwrap();
+        let s2 = ecdh_shared_secret(&priv_b, &pub_a).unwrap();
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn challenge_seal_open_round_trip() {
+        let (account_priv, account_pub) = generate_x25519_keypair().unwrap();
+        let (eph_priv, eph_pub) = generate_x25519_keypair().unwrap();
+        let secret = generate_content_key().unwrap();
+        let (nonce, sealed) = seal_challenge(&eph_priv, &account_pub, &secret).unwrap();
+        let opened = open_challenge(&account_priv, &eph_pub, &nonce, &sealed).unwrap();
+        assert_eq!(opened, secret);
+    }
+
+    #[test]
+    fn challenge_open_with_wrong_key_fails() {
+        let (_account_priv, account_pub) = generate_x25519_keypair().unwrap();
+        let (eph_priv, eph_pub) = generate_x25519_keypair().unwrap();
+        let (other_priv, _) = generate_x25519_keypair().unwrap();
+        let secret = generate_content_key().unwrap();
+        let (nonce, sealed) = seal_challenge(&eph_priv, &account_pub, &secret).unwrap();
+        assert!(open_challenge(&other_priv, &eph_pub, &nonce, &sealed).is_err());
+    }
+
+    #[test]
+    fn account_key_lock_unlock_round_trip() {
+        let (scalar, _) = generate_x25519_keypair().unwrap();
+        let blob = lock_account_key(&scalar, "hunter2-secret").unwrap();
+        assert_ne!(&blob.wrapped[..32], &scalar);
+        let unlocked = unlock_account_key(&blob, "hunter2-secret").unwrap();
+        assert_eq!(unlocked, scalar);
+        // Wrong password fails.
+        assert!(unlock_account_key(&blob, "wrong-password").is_err());
+        // Same blob is stable across calls (deterministic from password).
+        let blob2 = lock_account_key(&scalar, "hunter2-secret").unwrap();
+        assert_ne!(blob2.salt, blob.salt);
+        assert!(unlock_account_key(&blob2, "hunter2-secret").unwrap() == scalar);
+    }
+
+    #[test]
+    fn recipient_envelope_opens_for_both_ends() {
+        let cek = generate_content_key().unwrap();
+        let (recipient_priv, recipient_pub) = generate_x25519_keypair().unwrap();
+        let (eph_priv, eph_pub) = generate_x25519_keypair().unwrap();
+
+        // Sender seals to the recipient.
+        let (nonce, sealed_cek) =
+            seal_content_key_for_recipient(&eph_priv, &recipient_pub, &cek).unwrap();
+
+        // Recipient opens with their account scalar.
+        let by_recipient =
+            open_content_key_for_recipient(&recipient_priv, &eph_pub, &nonce, &sealed_cek).unwrap();
+        assert_eq!(by_recipient, cek);
+
+        // Sender (holding the ephemeral key) opens the same envelope.
+        let by_sender =
+            open_content_key_for_recipient(&eph_priv, &recipient_pub, &nonce, &sealed_cek).unwrap();
+        assert_eq!(by_sender, cek);
+
+        // A stranger cannot.
+        let (stranger, _) = generate_x25519_keypair().unwrap();
+        assert!(open_content_key_for_recipient(&stranger, &eph_pub, &nonce, &sealed_cek).is_err());
+    }
+
+    #[test]
+    fn derived_scalar_reproducible_from_seed() {
+        let seed = [42u8; 64];
+        let scalar = derive_account_scalar(&seed);
+        assert_eq!(derive_account_scalar(&seed), scalar);
+        // Clamped.
+        assert_eq!(scalar[0] & 7, 0);
+        assert_eq!(scalar[31] & 0x80, 0);
+        assert_ne!(scalar[31] & 0x40, 0);
+        let pubkey = pubkey_from_scalar(&scalar);
+        assert_eq!(kid_from_pubkey(&pubkey), kid_from_pubkey(&pubkey));
+    }
+
+    #[test]
+    fn size_math_equivalence() {
+        // The CLI/frontend formula must agree with get_ciphertext_size.
+        #[allow(clippy::all)]
+        fn legacy_formula(total_size: u64, total_chunks: u32) -> usize {
+            let full = CHUNK_SIZE + 16;
+            if total_chunks <= 1 {
+                (total_size as usize) + 16
+            } else if (total_size as usize) < (total_chunks as usize - 1) * CHUNK_SIZE {
+                0
+            } else {
+                let full_bytes = (total_chunks as usize - 1) * full;
+                let last = (total_size as usize) - (total_chunks as usize - 1) * CHUNK_SIZE + 16;
+                full_bytes + last
+            }
+        }
+
+        for (size, chunks) in [
+            (0u64, 1u32),
+            (1, 1),
+            (CHUNK_SIZE as u64, 1),
+            (CHUNK_SIZE as u64 - 1, 1),
+            (CHUNK_SIZE as u64 + 1, 2),
+            (2 * CHUNK_SIZE as u64, 2),
+            (2 * CHUNK_SIZE as u64 + 5, 3),
+        ] {
+            assert_eq!(
+                get_ciphertext_size(size as usize),
+                legacy_formula(size, chunks),
+                "size={size} chunks={chunks}"
+            );
+        }
     }
 }

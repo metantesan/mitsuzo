@@ -22,6 +22,7 @@ pub fn api_router(state: AppState) -> Router {
             axum::http::header::ORIGIN,
             axum::http::header::ACCEPT,
             HeaderName::from_static("x-password-hash"),
+            HeaderName::from_static("x-account-proof"),
         ])
         .allow_credentials(true);
 
@@ -36,9 +37,18 @@ pub fn api_router(state: AppState) -> Router {
         .route("/paste/{id}/complete", post(handlers::complete_paste))
         .route("/paste/{id}/salt", get(handlers::get_salt))
         .route("/paste/{id}/data", get(handlers::get_paste_data))
+        .route("/paste/{id}/challenge", get(handlers::get_paste_challenge))
         .route("/paste/{id}/password", post(handlers::change_password))
         .route("/paste/{id}/burn", post(handlers::burn_paste))
         .route("/paste/stats", get(handlers::get_stats))
+        .route("/account", post(handlers::register_account))
+        .route("/account/{kid}", get(handlers::get_account))
+        .route(
+            "/account/{kid}/challenge",
+            get(handlers::get_account_challenge),
+        )
+        .route("/account/{kid}/name", post(handlers::change_account_name))
+        .route("/account/{kid}/inbox", get(handlers::get_account_inbox))
         .with_state(state)
         .layer(cors)
         .layer(DefaultBodyLimit::max(UPLOAD_CHUNK_SIZE))

@@ -11,8 +11,11 @@ Encrypted pastebin with end-to-end encryption.
 - **Chunked encryption** — supports pastes up to 1 GB, 64 KB chunks with unique nonces
 - **Self-destructing pastes** — TTL + try-count limits, auto-deleted on expiry
 - **Burn after reading** — cryptographic receipt proves full decryption before deletion
+- **User accounts** — a BIP39 seed phrase deterministically derives an X25519 identity; the private key is password-encrypted and kept only on your device
+- **Paste-to-user** — encrypt pastes to an account's public key via X25519 ECDH; the sender can reopen them with their ephemeral key
+- **Account inbox & profiles** — per-account paste lists and public profile pages, protected by single-use X25519 challenges
 - **File upload with preview** — images previewed inline, files downloadable
-- **CLI client** — `create`, `get`, and `passwd` commands
+- **CLI client** — `create`, `get`, `passwd`, and `account` commands
 - **i18n** — English and Persian
 - **Dark theme**
 
@@ -55,20 +58,24 @@ cargo build --release -p backend -p cli
 ```bash
 echo "secret message" | cli create
 cli create --file document.pdf
+cli create --to 0x29fb…        # encrypt to a user account
 cli get 123456
 cli get 123456 --output decrypted.pdf
 cli passwd 123456
+cli account register --name alice   # generate a seed phrase + register
+cli account import --name alice     # restore an account from a seed phrase
+cli account login
 ```
 
 ## Architecture
 
 ```
 crates/
-├── backend/     Axum HTTP server, sled metadata DB, filesystem storage
+├── backend/     Axum HTTP server, sled metadata DB, filesystem storage, in-memory challenge store
 ├── frontend/    Dioxus WASM app
-├── cli/         Rust CLI client
+├── cli/         Rust CLI client (create, get, passwd, account)
 ├── types/       Shared types + bitcode serialization
-└── utils/       Argon2id, HKDF-SHA256, ChaCha20Poly1305, HMAC-SHA256
+└── utils/       Argon2id, HKDF-SHA256, ChaCha20Poly1305, HMAC-SHA256, X25519/ECDH
 ```
 
 ## Security
@@ -79,6 +86,9 @@ crates/
 - Paste metadata is password-gated: only the Argon2id salt is public (it is required to derive the validation key); nonce, file info, wrapped key, and try count are delivered in the authenticated `/data` frame after the password check
 - Failed attempts answer 401 with the remaining try count, and try-count enforcement is purely server-side
 - Legacy pastes (pre-envelope) still decrypt via the old direct derived-key path
+- **Zero-knowledge accounts** — an account is an X25519 identity derived from a BIP39 seed phrase; the server stores only the public key and a display name, and the private key never leaves your device
+- **Recipient mode** — content keys are sealed to a recipient's public key with `HKDF-SHA256(X25519 ECDH)`; by symmetry both the recipient (via their account key) and the sender (via the one-shot ephemeral key) can open the envelope
+- **Challenge-based auth** — login, inbox, name changes, and recipient-mode paste fetches are authorized with single-use X25519 challenges (60-second TTL) solved via ECDH, so no password or derived secret is ever transmitted or stored server-side
 - ChaCha20Poly1305 authenticated encryption, 64 KB chunks with unique nonces
 - HMAC-SHA256 for password validation (encryption key never leaves your device)
 - Constant-time comparison against timing attacks

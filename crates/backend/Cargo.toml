@@ -30,3 +30,4 @@ eyre.workspace = true
 color-eyre.workspace = true
 mitsuzo-utils = { workspace = true }
 sha2.workspace = true
+getrandom.workspace = true

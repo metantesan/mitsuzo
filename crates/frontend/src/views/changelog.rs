@@ -14,6 +14,24 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.10.0",
+            date: "2026-08",
+            items_en: vec![
+                "User accounts: a BIP39 seed phrase deterministically derives an X25519 key pair — the private key is password-wrapped and kept only on your device (browser localStorage or ~/.config/mitsuzo/account.enc), while the server stores only the public key and display name",
+                "Paste-to-user (recipient mode): pastes are encrypted to an account's public key, sealing the content key with X25519 ECDH; by symmetry both the recipient and the sender (via the retained ephemeral key) can decrypt",
+                "Challenge-based authentication: single-use X25519 challenges (60s TTL) replace password-derived hashes for login, inbox access, name changes, and fetching recipient-mode pastes (X-Account-Proof)",
+                "Account profile pages and a per-account inbox listing recipient-mode pastes addressed to you",
+                "GET /api/paste/{id}/salt now advertises the auth mode explicitly (Password | Recipient) instead of requiring clients to infer it",
+            ],
+            items_fa: vec![
+                "حساب‌های کاربری: عبارت بازیابی BIP39 به‌صورت قطعی یک جفت‌کلید X25519 مشتق می‌کند — کلید خصوصی با رمز حساب کپسوله شده و فقط روی دستگاه شما نگهداری می‌شود (localStorage مرورگر یا ~/.config/mitsuzo/account.enc)، در حالی که سرور فقط کلید عمومی و نام نمایشی را ذخیره می‌کند",
+                "ارسال به کاربر (حالت گیرنده): Pasteها با کلید عمومی حساب رمزنگاری می‌شوند و کلید محتوا با X25519 ECDH مهر می‌شود؛ به دلیل تقارن، هم گیرنده و هم فرستنده (با کلید موقت) می‌توانند رمزگشایی کنند",
+                "احراز هویت مبتنی بر چالش: چالش‌های یک‌بارمصرف X25519 (TTL ۶۰ ثانیه) جایگزین هش‌های مشتق‌شده از رمز عبور برای ورود، صندوق ورودی، تغییر نام و دریافت Pasteهای حالت گیرنده (X-Account-Proof) شده‌اند",
+                "صفحات پروفایل حساب و صندوق ورودی مخصوص هر حساب که Pasteهای حالت گیرنده ارسال‌شده به شما را فهرست می‌کند",
+                "GET /api/paste/{id}/salt اکنون حالت احراز هویت را صریحاً اعلام می‌کند (Password | Recipient) به جای اینکه کلاینت‌ها مجبور به حدس زدن آن باشند",
+            ],
+        },
+        Change {
             version: "v0.9.2",
             date: "2026-08",
             items_en: vec![

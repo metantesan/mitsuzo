@@ -9,10 +9,16 @@ use base64::{Engine as _, engine::general_purpose};
 use bitcode::{decode, encode};
 use futures::stream::{self, StreamExt};
 use mitsuzo_types::{
-    CHUNK_SIZE, ChangePasswordRequest, ChunkInfoResponse, CreatePasteHeader, FailedAttempt,
-    GetPasteHeader, GetSaltResponse, GetStatsResponse, InitPasteResponse, UPLOAD_CHUNK_SIZE,
+    AccountProfileResponse, AccountRecord, CHUNK_SIZE, ChallengeResponse, ChangeNameRequest,
+    ChangePasswordRequest, ChunkInfoResponse, CreatePasteHeader, FailedAttempt, GetPasteHeader,
+    GetSaltResponse, GetStatsResponse, InboxResponse, InitPasteResponse, PasteAuthMode,
+    PasteRecipientInfo, RecipientAuthChallenge, RecipientEnvelope, RegisterAccountRequest,
+    UPLOAD_CHUNK_SIZE,
 };
-use mitsuzo_utils::{get_ciphertext_size, get_plaintext_size};
+use mitsuzo_utils::{
+    generate_x25519_keypair, get_ciphertext_size, get_plaintext_size, kid_from_pubkey,
+    seal_challenge,
+};
 use rand::RngExt;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -198,6 +204,34 @@ pub async fn init_paste(
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    // Auth mode is inferred: recipient mode (recipient set, password fields
+    // all None) xor password mode (all three password fields Some). Reject
+    // mixed or empty credential sets.
+    let recipient_mode = header.recipient.is_some();
+    let password_mode = match (&header.salt, &header.password_hash, &header.key) {
+        (Some(_), Some(_), Some(_)) => true,
+        (None, None, None) => false,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    if recipient_mode == password_mode {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if recipient_mode {
+        let Some(recipient_pub) = header.recipient_pub else {
+            return Err(StatusCode::BAD_REQUEST);
+        };
+        let Some(recipient) = &header.recipient else {
+            return Err(StatusCode::BAD_REQUEST);
+        };
+        // If the recipient account exists, its public key must match the one
+        // the client sealed to — otherwise the envelope cannot be opened.
+        if let Some(account) = state.db.get_account_by_kid(&recipient.recipient_kid)
+            && account.pubkey != recipient_pub
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
     header.ttl_seconds = match header.ttl_seconds {
         Some(ttl) if ttl > 0 => Some(ttl.min(state.config.max_ttl_seconds.max(1))),
         _ => return Err(StatusCode::BAD_REQUEST),
@@ -209,10 +243,12 @@ pub async fn init_paste(
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
-    let _try_count = match header.try_count {
-        Some(count) if count > 0 && count <= 100 => count,
-        _ => return Err(StatusCode::BAD_REQUEST),
-    };
+    if password_mode {
+        let _try_count = match header.try_count {
+            Some(count) if count > 0 && count <= 100 => count,
+            _ => return Err(StatusCode::BAD_REQUEST),
+        };
+    }
 
     let mut rng = rand::rng();
     let mut id_str;
@@ -255,7 +291,13 @@ pub async fn upload_chunk(
     if write_end > max_cipher_len {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
-    if state.db.get_salt(&id).is_none() {
+    if let Some(meta) = state.db.get_meta(&id) {
+        // Reject uploads to pastes that have already expired; cleanup may
+        // not have deleted the row yet.
+        if meta.expiration_timestamp > 0 && meta.expiration_timestamp <= epoch_secs() {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    } else {
         return Err(StatusCode::NOT_FOUND);
     }
     state
@@ -270,7 +312,7 @@ pub async fn get_chunk_info(
     Path(id): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
     validate_id(&id)?;
-    if state.db.get_salt(&id).is_none() {
+    if state.db.get_meta(&id).is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
     let received = state.db.get_received_chunks(&id);
@@ -282,7 +324,7 @@ pub async fn complete_paste(
     Path(id): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
     validate_id(&id)?;
-    if state.db.get_salt(&id).is_none() {
+    if state.db.get_meta(&id).is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
     info!(id = %id, "paste completed");
@@ -293,15 +335,58 @@ pub async fn get_salt(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
-    // Only the Argon2id salt is ever served without authentication — the
-    // client needs it to derive the validation key and produce the password
-    // hash. All remaining metadata requires X-Password-Hash and is delivered
-    // in the authenticated /data metadata frame.
-    if let Some(salt) = state.db.get_salt(&id) {
-        Ok(encode(&GetSaltResponse { salt }))
-    } else {
-        Err(StatusCode::NOT_FOUND)
+    validate_id(&id)?;
+    // Tells the client which authentication the paste uses: `salt: Some`
+    // → password mode; `salt: None` → recipient/audience mode. Only the
+    // salt field ever needs to be served without authentication — all other
+    // metadata arrives in the authenticated /data metadata frame.
+    let has_meta = state
+        .db
+        .get_meta(&id)
+        .is_some_and(|m| m.expiration_timestamp == 0 || m.expiration_timestamp > epoch_secs());
+    if !has_meta {
+        return Err(StatusCode::NOT_FOUND);
     }
+    let meta = state.db.get_meta(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let raw_salt = state.db.get_salt(&id).unwrap_or_default();
+    let recipient = if raw_salt.is_empty() {
+        // Recipient/audience mode: say who can open it, pre-auth, so a client
+        // can show "encrypted to <name> (0x…)" on page load.
+        let recipient_kid = meta.recipient_kid.unwrap_or_default();
+        let mut kid_prefix = [0u8; 20];
+        kid_prefix.copy_from_slice(&recipient_kid[..20]);
+        let name = meta
+            .recipient_kid
+            .and_then(|kid| state.db.get_account_by_kid(&kid))
+            .map(|account| account.name);
+        Some(PasteRecipientInfo {
+            kid: recipient_kid,
+            kid_prefix,
+            name,
+        })
+    } else {
+        None
+    };
+    Ok(encode(&GetSaltResponse {
+        mode: if raw_salt.is_empty() {
+            PasteAuthMode::Recipient
+        } else {
+            PasteAuthMode::Password
+        },
+        salt: if raw_salt.is_empty() {
+            None
+        } else {
+            Some(raw_salt)
+        },
+        recipient,
+    }))
+}
+
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 pub(crate) async fn get_paste(
@@ -345,6 +430,7 @@ pub(crate) async fn get_paste(
         try_count,
         ttl,
         burn_after_read: meta.burn_after_read,
+        recipient: None,
     };
 
     let header_bytes = encode(&header);
@@ -374,32 +460,206 @@ pub(crate) async fn get_paste(
     )))
 }
 
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Decode a hex account id, accepting an optional `0x` prefix and either the
+/// full 32-byte hash or the 20-byte display prefix.
+fn parse_kid_hex(s: &str) -> Result<Vec<u8>, ()> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    if s.is_empty() || !s.len().is_multiple_of(2) || (s.len() != 40 && s.len() != 64) {
+        return Err(());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+        .collect::<Result<Vec<u8>, _>>()
+        .map_err(|_| ())
+}
+
+/// Resolve an account record from a URL kid (full hash or display prefix).
+fn resolve_account(
+    db: &crate::db::DataStore,
+    kid_str: &str,
+) -> Result<Option<AccountRecord>, StatusCode> {
+    let kid = parse_kid_hex(kid_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+    match kid.len() {
+        32 => {
+            let mut full = [0u8; 32];
+            full.copy_from_slice(&kid);
+            Ok(db.get_account_by_kid(&full))
+        }
+        20 => {
+            let mut prefix = [0u8; 20];
+            prefix.copy_from_slice(&kid);
+            Ok(db.get_account_by_prefix(&prefix))
+        }
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+fn account_profile(record: &AccountRecord) -> AccountProfileResponse {
+    let mut kid_prefix = [0u8; 20];
+    kid_prefix.copy_from_slice(&record.kid[..20]);
+    AccountProfileResponse {
+        kid: record.kid,
+        kid_prefix,
+        pubkey: record.pubkey,
+        name: record.name.clone(),
+    }
+}
+
+/// Generate and store a single-use challenge sealed to a recipient public
+/// key, returning the encoded `RecipientAuthChallenge`. The ephemeral
+/// keypair + expected response are held in memory keyed by `key`.
+async fn make_recipient_challenge(
+    state: &AppState,
+    key: String,
+    recipient_pub: &[u8; 32],
+) -> Result<Vec<u8>, StatusCode> {
+    let (eph_priv, eph_pub) =
+        generate_x25519_keypair().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut secret = [0u8; 32];
+    getrandom::fill(&mut secret).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (nonce, sealed) = seal_challenge(&eph_priv, recipient_pub, &secret)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.challenges.insert(key, eph_priv, secret).await;
+    Ok(encode(&RecipientAuthChallenge {
+        challenge: ChallengeResponse {
+            ephemeral_pub: eph_pub,
+            nonce,
+            sealed,
+        },
+    }))
+}
+
+/// Issue a fresh 401 challenge sealed to a recipient public key and return it
+/// as the response body. Single-use: `verify_and_consume` removes it.
+async fn issue_recipient_challenge(
+    state: &AppState,
+    key: String,
+    recipient_pub: &[u8; 32],
+) -> Result<Response<Body>, ApiError> {
+    let body = make_recipient_challenge(state, key, recipient_pub)
+        .await
+        .map_err(ApiError::Status)?;
+    Ok((StatusCode::UNAUTHORIZED, Bytes::from(body)).into_response())
+}
+
+/// Issue a single-use challenge for a recipient-mode paste so the client can
+/// solve it and present `X-Account-Proof` directly on the next `/data`
+/// request — no unauthenticated probe round needed.
+pub async fn get_paste_challenge(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Vec<u8>, StatusCode> {
+    validate_id(&id)?;
+    let meta = state
+        .db
+        .get_meta(&id)
+        .filter(|m| m.expiration_timestamp == 0 || m.expiration_timestamp > epoch_secs())
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let Some(recipient_pub) = meta.recipient_pub else {
+        // Password-mode paste: there is no account challenge to issue.
+        return Err(StatusCode::NOT_FOUND);
+    };
+    make_recipient_challenge(&state, format!("paste:{}", id), &recipient_pub).await
+}
+
+/// Verify the `X-Account-Proof: <kid>:<b64-response>` header against the
+/// paste's stored recipient. Single-use challenge is consumed on success.
+async fn verify_recipient_proof(
+    state: &AppState,
+    id: &str,
+    headers: &HeaderMap,
+    meta: &mitsuzo_types::PasteMeta,
+) -> Result<bool, ApiError> {
+    let Some(recipient_kid) = meta.recipient_kid else {
+        return Ok(false);
+    };
+    let Some(proof) = headers.get("X-Account-Proof").and_then(|v| v.to_str().ok()) else {
+        return Ok(false);
+    };
+    let (kid_str, resp_b64) = proof
+        .split_once(':')
+        .ok_or(ApiError::Status(StatusCode::BAD_REQUEST))?;
+    let kid_bytes =
+        parse_kid_hex(kid_str).map_err(|_| ApiError::Status(StatusCode::BAD_REQUEST))?;
+    let response = general_purpose::STANDARD
+        .decode(resp_b64)
+        .map_err(|_| ApiError::Status(StatusCode::BAD_REQUEST))?;
+
+    let audience_ok = match kid_bytes.len() {
+        20 => &recipient_kid[..20] == kid_bytes.as_slice(),
+        32 => recipient_kid.as_slice() == kid_bytes.as_slice(),
+        _ => false,
+    };
+    if !audience_ok {
+        return Ok(false);
+    }
+    Ok(state
+        .challenges
+        .verify_and_consume(&format!("paste:{}", id), &response)
+        .await)
+}
+
 pub(crate) async fn get_paste_data(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response<Body>, ApiError> {
     validate_id(&id)?;
-    verify_password(&state.db, &id, &headers)?;
+    let meta = state
+        .db
+        .get_meta(&id)
+        .ok_or(ApiError::Status(StatusCode::NOT_FOUND))?;
+    // Enforce expiration for both auth modes. Password mode also gets this
+    // via `get_password_hash`, but recipient mode would otherwise keep
+    // serving an expired paste until the periodic cleanup removes it.
+    if meta.expiration_timestamp > 0 && meta.expiration_timestamp <= epoch_secs() {
+        return Err(ApiError::Status(StatusCode::NOT_FOUND));
+    }
 
-    let nonce = state.db.get_nonce(&id).ok_or(StatusCode::NOT_FOUND)?;
+    // Recipient-mode pastes authenticate via the X-Account-Proof challenge
+    // instead of X-Password-Hash. The proof is single-use and short-TTL.
+    let mut recipient_envelope: Option<RecipientEnvelope> = None;
+    if meta.recipient_pub.is_some() {
+        let challenge_key = format!("paste:{}", id);
+        if !verify_recipient_proof(&state, &id, &headers, &meta).await? {
+            let recipient_pub = meta
+                .recipient_pub
+                .ok_or(ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
+            return issue_recipient_challenge(&state, challenge_key, &recipient_pub).await;
+        }
+        recipient_envelope = Some(
+            state
+                .db
+                .get_recipient_envelope(&id)
+                .ok_or(ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR))?,
+        );
+    } else {
+        verify_password(&state.db, &id, &headers)?;
+    }
+
+    let nonce = state
+        .db
+        .get_nonce(&id)
+        .ok_or(ApiError::Status(StatusCode::NOT_FOUND))?;
     let nonce_arr: [u8; 12] = nonce
         .try_into()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let meta = state.db.get_meta(&id).ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|_| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
 
     let file_path = state
         .db
         .get_content_path(&id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or(ApiError::Status(StatusCode::NOT_FOUND))?;
     let file_meta = tokio::fs::metadata(&file_path)
         .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+        .map_err(|_| ApiError::Status(StatusCode::NOT_FOUND))?;
     let file_len = file_meta.len();
     state.db.increment_success();
 
-    // All paste metadata — including the wrapped content key — rides in the
-    // blob's frame, served only after the password check. Never in /salt.
     let (try_count, ttl) = remaining_attempts(&state.db, &id);
     let frame = GetPasteHeader {
         id: id.clone(),
@@ -414,6 +674,7 @@ pub(crate) async fn get_paste_data(
         try_count,
         ttl,
         burn_after_read: meta.burn_after_read,
+        recipient: recipient_envelope,
     }
     .encode_frame();
     let frame_len = frame.len() as u64;
@@ -424,12 +685,20 @@ pub(crate) async fn get_paste_data(
         .and_then(parse_range);
 
     if let Some((start, end)) = range {
+        // Reject unsatisfiable ranges instead of letting `end - start + 1`
+        // underflow into a bogus Content-Length.
+        if file_len == 0 || start >= file_len {
+            return Err(ApiError::Status(StatusCode::RANGE_NOT_SATISFIABLE));
+        }
         let end = end.min(file_len - 1);
+        if start > end {
+            return Err(ApiError::Status(StatusCode::RANGE_NOT_SATISFIABLE));
+        }
         let len = end - start + 1;
 
         let file = tokio::fs::File::open(&file_path)
             .await
-            .map_err(|_| StatusCode::NOT_FOUND)?;
+            .map_err(|_| ApiError::Status(StatusCode::NOT_FOUND))?;
 
         let file_stream =
             stream::unfold((file, start, false), move |(mut f, pos, done)| async move {
@@ -475,7 +744,7 @@ pub(crate) async fn get_paste_data(
 
     let file = tokio::fs::File::open(&file_path)
         .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+        .map_err(|_| ApiError::Status(StatusCode::NOT_FOUND))?;
 
     let file_stream = stream::unfold(file, |mut f| async {
         let mut buf = vec![0u8; 65536];
@@ -596,5 +865,185 @@ pub async fn get_stats(State(state): State<AppState>) -> Result<Vec<u8>, StatusC
         demo_mode: state.config.demo_mode,
         max_ttl_seconds: state.config.max_ttl_seconds,
         max_file_size: state.config.max_file_size,
+    }))
+}
+
+/// Register a new account. The server recomputes `kid = SHA-256(pubkey)` and
+/// rejects it if it does not match the submitted value (prevents squatting a
+/// different account's namespace); 409 if the kid is already registered.
+pub async fn register_account(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Vec<u8>, StatusCode> {
+    let ip = client_ip(&headers);
+    if !state.limiter.check(&format!("acct:{}", ip), 10, 60).await {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    let request: RegisterAccountRequest = decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.name.is_empty()
+        || request.name.len() > 64
+        || request.name.chars().any(|c| c.is_control())
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let computed_kid = kid_from_pubkey(&request.pubkey);
+    if !constant_time_eq(&computed_kid, &request.kid) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    if let Some(existing) = state.db.get_account_by_kid(&request.kid) {
+        // Same key re-registered (e.g. restoring from a seed on another
+        // machine): idempotent, return the existing profile unchanged.
+        if constant_time_eq(&existing.pubkey, &request.pubkey) {
+            return Ok(encode(&account_profile(&existing)));
+        }
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let record = AccountRecord {
+        kid: request.kid,
+        pubkey: request.pubkey,
+        name: request.name,
+        created_at,
+    };
+    state.db.put_account(&record);
+    info!(kid = %to_hex(&record.kid), "account registered");
+    Ok(encode(&account_profile(&record)))
+}
+
+/// Public account profile. Accepts the full 32-byte kid or the 20-byte prefix.
+pub async fn get_account(
+    State(state): State<AppState>,
+    Path(kid_str): Path<String>,
+) -> Result<Vec<u8>, StatusCode> {
+    let Some(record) = resolve_account(&state.db, &kid_str)? else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    Ok(encode(&account_profile(&record)))
+}
+
+/// Issue a single-use login challenge sealed to the account's public key.
+pub async fn get_account_challenge(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(kid_str): Path<String>,
+) -> Result<Vec<u8>, StatusCode> {
+    let ip = client_ip(&headers);
+    if !state
+        .limiter
+        .check(&format!("challenge:{}", ip), 30, 60)
+        .await
+    {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    let Some(record) = resolve_account(&state.db, &kid_str)? else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let (eph_priv, eph_pub) =
+        generate_x25519_keypair().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut secret = [0u8; 32];
+    getrandom::fill(&mut secret).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (nonce, sealed) = seal_challenge(&eph_priv, &record.pubkey, &secret)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state
+        .challenges
+        .insert(format!("acct:{}", to_hex(&record.kid)), eph_priv, secret)
+        .await;
+    Ok(encode(&ChallengeResponse {
+        ephemeral_pub: eph_pub,
+        nonce,
+        sealed,
+    }))
+}
+
+/// Change the account display name. Proves ownership by solving the
+/// challenge issued by `GET /api/account/{kid}/challenge`.
+pub async fn change_account_name(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(kid_str): Path<String>,
+    body: Bytes,
+) -> Result<Vec<u8>, StatusCode> {
+    let ip = client_ip(&headers);
+    if !state.limiter.check(&format!("name:{}", ip), 20, 60).await {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    let Some(record) = resolve_account(&state.db, &kid_str)? else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let request: ChangeNameRequest = decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.name.is_empty()
+        || request.name.len() > 64
+        || request.name.chars().any(|c| c.is_control())
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let challenge_key = format!("acct:{}", to_hex(&record.kid));
+    if !state
+        .challenges
+        .verify_and_consume(&challenge_key, &request.challenge_response)
+        .await
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let mut updated = record;
+    updated.name = request.name;
+    state.db.put_account(&updated);
+    info!(kid = %to_hex(&updated.kid), "account name changed");
+    Ok(encode(&account_profile(&updated)))
+}
+
+/// List recipient-mode pastes addressed to this account. Proves ownership by
+/// solving the challenge issued by `GET /api/account/{kid}/challenge` and
+/// sending the recovered nonce in an `X-Account-Proof: <kid>:<b64>` header.
+pub async fn get_account_inbox(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(kid_str): Path<String>,
+) -> Result<Vec<u8>, StatusCode> {
+    let Some(record) = resolve_account(&state.db, &kid_str)? else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    let Some(proof) = headers.get("X-Account-Proof").and_then(|v| v.to_str().ok()) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let (kid_str, resp_b64) = proof.split_once(':').ok_or(StatusCode::BAD_REQUEST)?;
+    let kid_bytes = parse_kid_hex(kid_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let audience_ok = match kid_bytes.len() {
+        20 => &record.kid[..20] == kid_bytes.as_slice(),
+        32 => record.kid.as_slice() == kid_bytes.as_slice(),
+        _ => false,
+    };
+    if !audience_ok {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let response = general_purpose::STANDARD
+        .decode(resp_b64)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let challenge_key = format!("acct:{}", to_hex(&record.kid));
+    if !state
+        .challenges
+        .verify_and_consume(&challenge_key, &response)
+        .await
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    Ok(encode(&InboxResponse {
+        pastes: state.db.list_recipient_pastes(&record.kid),
     }))
 }

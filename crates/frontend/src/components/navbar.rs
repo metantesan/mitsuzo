@@ -31,6 +31,10 @@ pub fn Navbar() -> Element {
         "px-3 py-1.5 text-sm font-medium relative transition-colors after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:h-0.5 after:bg-accent after:transition-all duration-200 {}",
         link_classes(current_route == Route::Docs {})
     );
+    let account_cls = format!(
+        "px-3 py-1.5 text-sm font-medium relative transition-colors after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:h-0.5 after:bg-accent after:transition-all duration-200 {}",
+        link_classes(current_route == Route::AccountPage {})
+    );
 
     let en_active = current_lang == langid!("en-US");
     let fa_active = current_lang == langid!("fa-IR");
@@ -71,6 +75,11 @@ pub fn Navbar() -> Element {
                         to: Route::Docs {},
                         class: "{docs_cls}",
                         {t!("nav-docs")}
+                    }
+                    Link {
+                        to: Route::AccountPage {},
+                        class: "{account_cls}",
+                        {t!("nav-account")}
                     }
                     a {
                         href: GITHUB_RELEASES,
@@ -151,6 +160,12 @@ pub fn Navbar() -> Element {
                         class: "text-sm font-medium text-text-secondary hover:text-accent transition-colors",
                         onclick: move |_| menu_open.set(false),
                         {t!("nav-docs")}
+                    }
+                    Link {
+                        to: Route::AccountPage {},
+                        class: "text-sm font-medium text-text-secondary hover:text-accent transition-colors",
+                        onclick: move |_| menu_open.set(false),
+                        {t!("nav-account")}
                     }
                     a {
                         href: GITHUB_RELEASES,

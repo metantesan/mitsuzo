@@ -1,4 +1,8 @@
 use crate::BASE_URL;
+use crate::account::{
+    AccountSession, RecipientEphemeral, solve_account_challenge, unlock_local_account, use_account,
+    use_recipient_ephemerals,
+};
 use crate::components::PopupContext;
 use crate::sanitize_id;
 use crate::utils::{copy_to_clipboard, do_xhr_get, do_xhr_post, do_xhr_post_headers};
@@ -7,11 +11,12 @@ use dioxus::prelude::*;
 use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{
-    ChangePasswordRequest, DataType, FailedAttempt, GetSaltResponse, KeyEnvelope, split_paste_frame,
+    ChangePasswordRequest, DataType, FailedAttempt, GetSaltResponse, KeyEnvelope, PasteAuthMode,
+    RecipientAuthChallenge, split_paste_frame,
 };
 use mitsuzo_utils::{
     compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_keys, encrypt_setup,
-    get_chunk_bounds, get_plaintext_size, unwrap_content_key,
+    get_chunk_bounds, get_plaintext_size, open_content_key_for_recipient, unwrap_content_key,
 };
 use wasm_bindgen::JsCast;
 use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
@@ -28,6 +33,14 @@ pub struct PasteContent {
 pub struct ProgressState {
     pub status: String,
     pub progress: f32,
+}
+
+/// Key material for recipient-mode decryption: either a logged-in account
+/// scalar or the sender's ephemeral key for this paste.
+#[derive(Clone, Copy)]
+struct RecipientKey {
+    kid: [u8; 32],
+    scalar: [u8; 32],
 }
 
 #[component]
@@ -49,6 +62,67 @@ pub fn paste_view(id: String) -> Element {
     let mut confirm_password_input = use_signal(String::new);
     let changing_password = use_signal(|| false);
 
+    let is_recipient_mode = use_signal(|| false);
+    let needs_account_password = use_signal(|| false);
+    let not_found = use_signal(|| false);
+    let mut account_password_input = use_signal(String::new);
+    let recipient_session: Signal<Option<RecipientKey>> = use_signal(|| None);
+    let ephemerals = use_recipient_ephemerals();
+    let account = use_account();
+    let mode_probed = use_signal(|| false);
+
+    // Probe the paste's auth mode on page load so the UI shows the right box
+    // at once: a password prompt for password-mode pastes, or the account
+    // unlock/decrypt flow for recipient-mode pastes — never both.
+    use_effect({
+        let mut is_recipient_mode = is_recipient_mode;
+        let mut needs_account_password = needs_account_password;
+        let mut not_found = not_found;
+        let mut mode_probed = mode_probed;
+        let ephemerals = ephemerals;
+        let account = account;
+        move || {
+            if *mode_probed.read() {
+                return;
+            }
+            let current_id = paste_id_state.read().clone();
+            spawn(async move {
+                let probe = do_xhr_get(
+                    &format!("{}/api/paste/{}/salt", BASE_URL, current_id),
+                    vec![],
+                    |_, _| {},
+                )
+                .await;
+                // The response carries the auth mode explicitly. A 404 (or an
+                // undecodable body) means the paste does not exist rather than
+                // "recipient mode" — never misdirect the user to the account
+                // unlock flow for a missing paste.
+                let recipient_mode = match &probe {
+                    Ok(r) if r.status >= 200 && r.status < 300 => r
+                        .body
+                        .as_ref()
+                        .and_then(|b| bitcode::decode::<GetSaltResponse>(b).ok())
+                        .is_some_and(|decoded| decoded.mode == PasteAuthMode::Recipient),
+                    Ok(r) if r.status == 404 => {
+                        not_found.set(true);
+                        false
+                    }
+                    _ => false,
+                };
+                is_recipient_mode.set(recipient_mode);
+                if recipient_mode {
+                    // A key is already available (sender ephemeral in session,
+                    // or account unlocked): offer decrypt directly. Otherwise
+                    // surface the account-password unlock form.
+                    let has_key = ephemerals.read().iter().any(|e| e.paste_id == current_id)
+                        || account.read().is_some();
+                    needs_account_password.set(!has_key);
+                }
+                mode_probed.set(true);
+            });
+        }
+    });
+
     let hash_from_url = (|| {
         let storage = web_sys::window().and_then(|w| w.session_storage().ok().flatten())?;
         let hash = storage.get_item("paste_hash").ok().flatten()?;
@@ -63,14 +137,26 @@ pub fn paste_view(id: String) -> Element {
     }
 
     let fetch_and_decrypt = {
-        let mut popup_ctx = popup_ctx;
+        let popup_ctx = popup_ctx;
+        let try_count = try_count;
+        let ttl = ttl;
+        let progress = progress;
+        let paste_content = paste_content;
+        let burn_after_read = burn_after_read;
+        let salt = salt;
+        let content_key = content_key;
+        let old_password_hash = old_password_hash;
+        let can_change_password = can_change_password;
+        let is_recipient_mode2 = is_recipient_mode;
+        let needs_account_password = needs_account_password;
+        let recipient_session = recipient_session;
+        let ephemerals = ephemerals;
+        let account = account;
         move |_| {
             let current_id = paste_id_state.read().clone();
             let current_password = password_input.read().clone();
-            if current_password.is_empty() {
-                popup_ctx.write().show_error(t!("error-password-empty"));
-                return;
-            }
+            // An empty password is allowed here: for recipient-mode pastes the
+            // /salt probe answers 404 and we switch into the account flow.
             spawn(do_decrypt(
                 current_id,
                 current_password,
@@ -84,6 +170,11 @@ pub fn paste_view(id: String) -> Element {
                 content_key,
                 old_password_hash,
                 can_change_password,
+                is_recipient_mode2,
+                needs_account_password,
+                recipient_session,
+                ephemerals,
+                account,
             ));
         }
     };
@@ -92,6 +183,20 @@ pub fn paste_view(id: String) -> Element {
 
     use_effect({
         let mut hash_processed = hash_processed;
+        let is_recipient_mode = is_recipient_mode;
+        let try_count = try_count;
+        let ttl = ttl;
+        let progress = progress;
+        let paste_content = paste_content;
+        let burn_after_read = burn_after_read;
+        let salt = salt;
+        let content_key = content_key;
+        let old_password_hash = old_password_hash;
+        let can_change_password = can_change_password;
+        let needs_account_password = needs_account_password;
+        let recipient_session = recipient_session;
+        let ephemerals = ephemerals;
+        let account = account;
         move || {
             if *hash_processed.read() {
                 return;
@@ -113,10 +218,72 @@ pub fn paste_view(id: String) -> Element {
                     content_key,
                     old_password_hash,
                     can_change_password,
+                    is_recipient_mode,
+                    needs_account_password,
+                    recipient_session,
+                    ephemerals,
+                    account,
                 ));
             }
         }
     });
+
+    let unlock_for_recipient = {
+        let mut popup_ctx = popup_ctx;
+        let is_recipient_mode = is_recipient_mode;
+        let try_count = try_count;
+        let ttl = ttl;
+        let progress = progress;
+        let paste_content = paste_content;
+        let burn_after_read = burn_after_read;
+        let salt = salt;
+        let content_key = content_key;
+        let old_password_hash = old_password_hash;
+        let can_change_password = can_change_password;
+        let needs_account_password = needs_account_password;
+        let mut recipient_session = recipient_session;
+        let mut needs_account_password2 = needs_account_password;
+        let ephemerals = ephemerals;
+        let account = account;
+        move |_| {
+            let pw = account_password_input.read().clone();
+            if pw.is_empty() {
+                popup_ctx.write().show_error(t!("account-password-empty"));
+                return;
+            }
+            match unlock_local_account(&pw) {
+                Ok(session) => {
+                    recipient_session.set(Some(RecipientKey {
+                        kid: session.kid,
+                        scalar: session.scalar,
+                    }));
+                    needs_account_password2.set(false);
+                    account_password_input.set(String::new());
+                    let current_id = paste_id_state.read().clone();
+                    spawn(do_decrypt(
+                        current_id,
+                        String::new(),
+                        popup_ctx,
+                        try_count,
+                        ttl,
+                        progress,
+                        paste_content,
+                        burn_after_read,
+                        salt,
+                        content_key,
+                        old_password_hash,
+                        can_change_password,
+                        is_recipient_mode,
+                        needs_account_password,
+                        recipient_session,
+                        ephemerals,
+                        account,
+                    ));
+                }
+                Err(e) => popup_ctx.write().show_error(e),
+            }
+        }
+    };
 
     let change_password_action = move |_| {
         let current_id = paste_id_state.read().clone();
@@ -157,20 +324,75 @@ pub fn paste_view(id: String) -> Element {
                 {t!("paste-view-title")}
             }
 
-            div {
-                class: "mb-4",
-                input {
-                    class: "w-full p-4 mb-2 bg-surface text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
-                    r#type: "password",
-                    placeholder: "{t!(\"decrypt-password-placeholder\")}",
-                    autocomplete: "new-password",
-                    oninput: move |evt| password_input.set(evt.value()),
-                    value: "{password_input}",
+            if paste_content.read().is_none() && !*mode_probed.read() {
+                div {
+                    class: "mb-4 p-4 bg-surface rounded-lg text-center text-muted",
+                    {t!("paste-loading")}
                 }
-                button {
-                    class: "px-6 py-3 bg-accent text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200",
-                    onclick: fetch_and_decrypt,
-                    {t!("decrypt-paste")}
+            }
+
+            if *not_found.read() {
+                div {
+                    class: "mb-4 p-4 bg-surface rounded-lg text-center text-muted",
+                    {t!("paste-not-found")}
+                }
+            } else if *mode_probed.read() && !*is_recipient_mode.read() {
+                div {
+                    class: "mb-4",
+                    input {
+                        class: "w-full p-4 mb-2 bg-surface text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
+                        r#type: "password",
+                        placeholder: "{t!(\"decrypt-password-placeholder\")}",
+                        autocomplete: "new-password",
+                        oninput: move |evt| password_input.set(evt.value()),
+                        value: "{password_input}",
+                    }
+                    button {
+                        class: "px-6 py-3 bg-accent text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200",
+                        onclick: fetch_and_decrypt,
+                        {t!("decrypt-paste")}
+                    }
+                }
+            }
+
+            if *is_recipient_mode.read() {
+                div {
+                    class: "mb-4 p-4 bg-accent/15 border border-accent rounded-lg text-sm text-accent",
+                    {t!("recipient-mode-notice")}
+                }
+            }
+
+            if *is_recipient_mode.read() && *needs_account_password.read() {
+                div {
+                    class: "mb-4 p-4 bg-surface rounded-lg",
+                    p {
+                        class: "text-sm font-semibold mb-2",
+                        {t!("recipient-unlock-title")}
+                    }
+                    div {
+                        class: "flex flex-col sm:flex-row gap-3",
+                        input {
+                            class: "flex-1 p-4 bg-bg text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
+                            r#type: "password",
+                            placeholder: "{t!(\"account-password-placeholder\")}",
+                            oninput: move |evt| account_password_input.set(evt.value()),
+                            value: "{account_password_input}",
+                        }
+                        button {
+                            class: "px-6 py-3 bg-accent text-bg font-semibold rounded-lg hover:bg-accent-hover transition-all duration-200",
+                            onclick: unlock_for_recipient,
+                            {t!("recipient-unlock-button")}
+                        }
+                    }
+                }
+            } else if *is_recipient_mode.read() && *mode_probed.read() {
+                div {
+                    class: "mb-4",
+                    button {
+                        class: "px-6 py-3 bg-accent text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200",
+                        onclick: fetch_and_decrypt,
+                        {t!("recipient-decrypt-button")}
+                    }
                 }
             }
 
@@ -399,7 +621,11 @@ pub fn paste_view(id: String) -> Element {
                     None => rsx! {
                         div {
                             class: "text-center text-muted",
-                            {t!("enter-password-desc")}
+                            {if *is_recipient_mode.read() {
+                                t!("recipient-mode-notice")
+                            } else {
+                                t!("enter-password-desc")
+                            }}
                         }
                     }
                 }
@@ -465,12 +691,18 @@ async fn do_decrypt(
     mut content_key: Signal<Option<[u8; 32]>>,
     mut old_password_hash: Signal<Option<[u8; 32]>>,
     mut can_change_password: Signal<bool>,
+    mut is_recipient_mode: Signal<bool>,
+    mut needs_account_password: Signal<bool>,
+    recipient_session: Signal<Option<RecipientKey>>,
+    ephemerals: Signal<Vec<RecipientEphemeral>>,
+    account: Signal<Option<AccountSession>>,
 ) {
     progress.set(Some(ProgressState {
         status: t!("progress-downloading-metadata"),
         progress: 10.0,
     }));
     can_change_password.set(false);
+    needs_account_password.set(false);
 
     let salt_result = do_xhr_get(
         &format!("{}/api/paste/{}/salt", BASE_URL, current_id),
@@ -488,15 +720,80 @@ async fn do_decrypt(
     )
     .await;
 
+    // The salt probe answers 200 with an explicit auth mode: `Recipient`
+    // pastes route through the account/challenge flow, `Password` pastes
+    // continue below. Any other status (404 etc.) falls through to the
+    // generic error handling.
+    let is_recipient_mode_salt = match &salt_result {
+        Ok(response) if response.status >= 200 && response.status < 300 => response
+            .body
+            .as_ref()
+            .and_then(|b| bitcode::decode::<GetSaltResponse>(b).ok())
+            .is_some_and(|decoded| decoded.mode == PasteAuthMode::Recipient),
+        _ => false,
+    };
+    if is_recipient_mode_salt {
+        is_recipient_mode.set(true);
+        let recipient_key = {
+            // 1. Sender reopening: ephemeral key held for this session.
+            let from_ephemeral = ephemerals
+                .read()
+                .iter()
+                .find(|e| e.paste_id == current_id)
+                .map(|e| RecipientKey {
+                    kid: e.recipient_kid,
+                    scalar: e.ephemeral_priv,
+                });
+            from_ephemeral
+                // 2. Account already unlocked.
+                .or_else(|| {
+                    account.read().clone().map(|a| RecipientKey {
+                        kid: a.kid,
+                        scalar: a.scalar,
+                    })
+                })
+                // 3. Unlocked explicitly for this paste view.
+                .or_else(|| *recipient_session.read())
+        };
+        let Some(key) = recipient_key else {
+            needs_account_password.set(true);
+            progress.set(None);
+            return;
+        };
+        return do_recipient_decrypt(
+            &current_id,
+            key,
+            popup_ctx,
+            try_count,
+            ttl,
+            progress,
+            paste_content,
+            burn_after_read,
+            content_key,
+            can_change_password,
+            recipient_session,
+        )
+        .await;
+    }
+
     let salt_bytes = match salt_result {
         Ok(response) => {
             if response.status >= 200 && response.status < 300 {
                 if let Some(body) = response.body {
                     match bitcode::decode::<GetSaltResponse>(&body) {
-                        Ok(decoded) => {
-                            salt.set(Some(decoded.salt.clone()));
-                            decoded.salt
-                        }
+                        Ok(decoded) => match decoded.salt {
+                            Some(raw_salt) => {
+                                salt.set(Some(raw_salt.clone()));
+                                raw_salt
+                            }
+                            None => {
+                                popup_ctx
+                                    .write()
+                                    .show_error(t!("error-decode-salt-failed", error: t!("recipient-mode-notice")));
+                                progress.set(None);
+                                return;
+                            }
+                        },
                         Err(e) => {
                             popup_ctx
                                 .write()
@@ -528,6 +825,14 @@ async fn do_decrypt(
             return;
         }
     };
+
+    // We only reach here for password-mode pastes (recipient pastes answer
+    // the salt probe above), so a password is required now.
+    if current_password.is_empty() {
+        popup_ctx.write().show_error(t!("error-password-empty"));
+        progress.set(None);
+        return;
+    }
 
     progress.set(Some(ProgressState {
         status: t!("progress-deriving-key"),
@@ -711,6 +1016,231 @@ async fn do_decrypt(
                     ttl.set(Some(attempt.ttl));
                 }
             }
+        }
+        Err(e) => {
+            popup_ctx
+                .write()
+                .show_error(t!("error-send-request-failed", error: e));
+            progress.set(None);
+        }
+    }
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Recipient-mode decryption: prove ownership of the recipient account (or
+/// hold the sender's ephemeral key), then open the CEK via ECDH symmetry.
+#[allow(clippy::too_many_arguments)]
+async fn do_recipient_decrypt(
+    current_id: &str,
+    key: RecipientKey,
+    mut popup_ctx: Signal<PopupContext>,
+    mut try_count: Signal<Option<u32>>,
+    mut ttl: Signal<Option<u64>>,
+    mut progress: Signal<Option<ProgressState>>,
+    mut paste_content: Signal<Option<PasteContent>>,
+    mut burn_after_read: Signal<bool>,
+    mut content_key: Signal<Option<[u8; 32]>>,
+    mut can_change_password: Signal<bool>,
+    mut recipient_session: Signal<Option<RecipientKey>>,
+) {
+    progress.set(Some(ProgressState {
+        status: t!("recipient-authenticating"),
+        progress: 30.0,
+    }));
+
+    let data_url = format!("{}/api/paste/{}/data", BASE_URL, current_id);
+
+    // Round 1: fetch a single-use challenge sealed to the paste's stored
+    // recipient public key, then present the solved proof on /data directly.
+    let challenge_resp = do_xhr_get(
+        &format!("{}/api/paste/{}/challenge", BASE_URL, current_id),
+        vec![],
+        |_, _| {},
+    )
+    .await;
+    let challenge: Option<RecipientAuthChallenge> = match challenge_resp {
+        Ok(r) if (200..300).contains(&r.status) => r
+            .body
+            .as_ref()
+            .and_then(|b| bitcode::decode::<RecipientAuthChallenge>(b).ok()),
+        _ => None,
+    };
+    let challenge = match challenge {
+        Some(c) => c,
+        None => {
+            popup_ctx.write().show_error(t!("recipient-auth-failed"));
+            progress.set(None);
+            return;
+        }
+    };
+
+    let response_nonce = match solve_account_challenge(&key.scalar, &challenge.challenge) {
+        Ok(nonce) => nonce,
+        Err(e) => {
+            popup_ctx
+                .write()
+                .show_error(t!("error-decryption-failed", error: e));
+            progress.set(None);
+            return;
+        }
+    };
+    let proof = format!(
+        "{}:{}",
+        to_hex(&key.kid[..20]),
+        general_purpose::STANDARD.encode(response_nonce)
+    );
+
+    progress.set(Some(ProgressState {
+        status: t!("progress-downloading-content"),
+        progress: 50.0,
+    }));
+
+    let content_result = do_xhr_get(
+        &data_url,
+        vec![("X-Account-Proof".to_string(), proof)],
+        |loaded, total| {
+            if total > 0 {
+                let percent = (loaded as f32 / total as f32) * 40.0;
+                let status_text = t!("progress-downloading-percent", percent: format!("{:.0}", (percent / 40.0) * 100.0));
+                progress.set(Some(ProgressState {
+                    status: status_text,
+                    progress: 50.0 + percent,
+                }));
+            } else if loaded > 0 {
+                let status_text = t!("progress-downloading-kb", kb: format!("{:.1}", loaded as f32 / 1024.0));
+                progress.set(Some(ProgressState {
+                    status: status_text,
+                    progress: 90.0,
+                }));
+            }
+        },
+    )
+    .await;
+
+    match content_result {
+        Ok(response) if response.status >= 200 && response.status < 300 => {
+            let Some(body) = response.body else {
+                popup_ctx.write().show_error(t!("error-empty-response"));
+                progress.set(None);
+                return;
+            };
+            let (frame_header, ciphertext) = match split_paste_frame(&body) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    popup_ctx
+                        .write()
+                        .show_error(t!("error-decryption-failed", error: e));
+                    progress.set(None);
+                    return;
+                }
+            };
+            let Some(envelope) = frame_header.recipient.clone() else {
+                popup_ctx
+                    .write()
+                    .show_error(t!("error-decryption-failed", error: "missing recipient envelope"));
+                progress.set(None);
+                return;
+            };
+            // ECDH symmetry: recipient (account scalar) and sender
+            // (ephemeral scalar) both derive the same sealing key.
+            let encryption_key = match open_content_key_for_recipient(
+                &key.scalar,
+                &envelope.ephemeral_pub,
+                &envelope.nonce,
+                &envelope.sealed_cek,
+            ) {
+                Ok(ck) => ck,
+                Err(e) => {
+                    popup_ctx
+                        .write()
+                        .show_error(t!("error-decryption-failed", error: e));
+                    progress.set(None);
+                    return;
+                }
+            };
+            content_key.set(Some(encryption_key));
+            try_count.set(None);
+            ttl.set(Some(frame_header.ttl));
+            burn_after_read.set(frame_header.burn_after_read);
+            recipient_session.set(Some(key));
+            let paste_total_chunks = frame_header.total_chunks;
+            let header_nonce = frame_header.nonce;
+            let header_burn_after_read = frame_header.burn_after_read;
+            let content = ciphertext;
+
+            let plaintext_size = match get_plaintext_size(paste_total_chunks, content.len()) {
+                Ok(s) => s,
+                Err(e) => {
+                    popup_ctx
+                        .write()
+                        .show_error(t!("error-decryption-failed", error: e.to_string()));
+                    progress.set(None);
+                    return;
+                }
+            };
+
+            let mut plaintext = Vec::with_capacity(plaintext_size);
+            let result: Result<(), String> = async {
+                for i in 0..paste_total_chunks {
+                    if i % 8 == 0 {
+                        let pct = 90.0 + (i as f32 / paste_total_chunks as f32) * 10.0;
+                        progress.set(Some(ProgressState {
+                            status: t!("progress-decrypting-percent", percent: format!("{:.0}", (i as f32 / paste_total_chunks as f32) * 100.0)),
+                            progress: pct,
+                        }));
+                        TimeoutFuture::new(0).await;
+                    }
+                    let (start, end) = get_chunk_bounds(paste_total_chunks, i, content.len());
+                    decrypt_chunk_into(&content[start..end], &encryption_key, &header_nonce, i, &mut plaintext)?;
+                }
+                Ok(())
+            }
+            .await;
+
+            match result {
+                Ok(()) => {
+                    if header_burn_after_read {
+                        let receipt = compute_burn_receipt(&encryption_key);
+                        let burn_result = do_xhr_post(
+                            &format!("{}/api/paste/{}/burn", BASE_URL, current_id),
+                            receipt.to_vec(),
+                            |_, _| {},
+                        )
+                        .await;
+                        match burn_result {
+                            Ok(r) if r.status >= 200 && r.status < 300 => {
+                                popup_ctx.write().show_error(t!("burn-complete"));
+                            }
+                            Ok(r) if r.status == 410 => {}
+                            _ => {}
+                        }
+                    }
+                    can_change_password.set(false);
+                    paste_content.set(Some(PasteContent {
+                        bytes: plaintext,
+                        data_type: frame_header.data_type,
+                        filename: frame_header.filename,
+                        content_type: frame_header.content_type,
+                        allow_download: frame_header.allow_download,
+                    }));
+                    progress.set(None);
+                }
+                Err(e) => {
+                    popup_ctx
+                        .write()
+                        .show_error(t!("error-decryption-failed", error: e.to_string()));
+                    progress.set(None);
+                }
+            }
+        }
+        Ok(response) => {
+            popup_ctx
+                .write()
+                .show_error(t!("error-get-paste-failed", status: response.status.to_string()));
+            progress.set(None);
         }
         Err(e) => {
             popup_ctx
