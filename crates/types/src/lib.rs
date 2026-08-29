@@ -73,22 +73,57 @@ pub struct GetPasteHeader {
     pub total_size: u64,
     pub total_chunks: u32,
     pub allow_download: bool,
+    /// Password-wrapped content key, delivered only with the authenticated
+    /// blob. `None` for legacy pastes created before envelope encryption.
+    pub key: Option<KeyEnvelope>,
+    /// Remaining tries after this successful decryption.
+    pub try_count: u32,
+    /// Seconds until the paste expires (0/MAX when it never expires).
+    pub ttl: u64,
+    pub burn_after_read: bool,
+}
+
+impl GetPasteHeader {
+    /// Serialize as a length-prefixed metadata frame: `[u32 LE len][bitcode]`.
+    pub fn encode_frame(&self) -> Vec<u8> {
+        let header_bytes = bitcode::encode(self);
+        let mut out = Vec::with_capacity(4 + header_bytes.len());
+        out.extend_from_slice(&(header_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&header_bytes);
+        out
+    }
+}
+
+/// Split a framed paste body into its metadata header and the trailing
+/// ciphertext.
+pub fn split_paste_frame(data: &[u8]) -> Result<(GetPasteHeader, &[u8]), String> {
+    if data.len() < 4 {
+        return Err("truncated paste frame".to_string());
+    }
+    let len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if 4 + len > data.len() {
+        return Err("truncated paste frame".to_string());
+    }
+    let header: GetPasteHeader = bitcode::decode(&data[4..4 + len]).map_err(|e| e.to_string())?;
+    Ok((header, &data[4 + len..]))
 }
 
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
 pub struct GetSaltResponse {
+    /// Argon2id salt. The only field ever served without authentication —
+    /// the client needs it to derive the validation key before it can
+    /// produce the password hash. All other metadata requires X-Password-Hash
+    /// and is delivered in the authenticated /data metadata frame.
     pub salt: Vec<u8>,
+}
+
+/// Body of an unauthenticated (401) attempt against a content or password
+/// endpoint. Carries the remaining try count and TTL so the UI can stay in
+/// sync with the server's enforcement.
+#[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
+pub struct FailedAttempt {
     pub try_count: u32,
     pub ttl: u64,
-    pub total_chunks: u32,
-    pub total_size: u64,
-    pub nonce: [u8; 12],
-    pub key: Option<KeyEnvelope>,
-    pub data_type: DataType,
-    pub filename: Option<String>,
-    pub content_type: Option<String>,
-    pub allow_download: bool,
-    pub burn_after_read: bool,
 }
 
 /// Body of `POST /paste/{id}/password`. New credentials only — the old

@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use mitsuzo_types::{
     CHUNK_SIZE, ChangePasswordRequest, ChunkInfoResponse, CreatePasteHeader, DataType,
-    GetSaltResponse, InitPasteResponse, KeyEnvelope, UPLOAD_CHUNK_SIZE,
+    GetSaltResponse, InitPasteResponse, KeyEnvelope, UPLOAD_CHUNK_SIZE, split_paste_frame,
 };
 use mitsuzo_utils::{
     compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_keys,
@@ -408,7 +408,41 @@ async fn main() -> eyre::Result<()> {
             }
 
             let salt_body = salt_resp.bytes().await?;
-            let meta: GetSaltResponse = bitcode::decode(&salt_body)?;
+            let salt_bytes = bitcode::decode::<GetSaltResponse>(&salt_body)?.salt;
+
+            let (derived_key, mut vk) = derive_keys(&password, &salt_bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let mut ph = compute_password_hash(&vk, &salt_bytes);
+            let auth = base64::engine::general_purpose::STANDARD.encode(ph);
+            ph.zeroize();
+            vk.zeroize();
+
+            let data_url = format!("{}/api/paste/{}/data", base_url, id);
+
+            // All metadata rides in the authenticated blob frame. A tiny range
+            // request fetches it (nonce, chunks, filename, wrapped key) without
+            // downloading the whole ciphertext.
+            let meta_resp = client
+                .get(&data_url)
+                .header("X-Password-Hash", &auth)
+                .header("Range", "bytes=0-0")
+                .send()
+                .await?;
+            if !meta_resp.status().is_success() {
+                eprintln!(
+                    "{} {}",
+                    "Error:".red().bold(),
+                    if meta_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                        "Wrong password."
+                    } else {
+                        "Failed to fetch paste."
+                    }
+                );
+                return Ok(());
+            }
+            let meta_body = meta_resp.bytes().await?;
+            let (meta, _) = split_paste_frame(&meta_body)
+                .map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
 
             let enc_bytes = encrypted_size(meta.total_size, meta.total_chunks);
 
@@ -419,13 +453,6 @@ async fn main() -> eyre::Result<()> {
                 meta.total_chunks,
                 indicatif::HumanBytes(enc_bytes as u64),
             );
-
-            let (derived_key, mut vk) = derive_keys(&password, &meta.salt)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let mut ph = compute_password_hash(&vk, &meta.salt);
-            let auth = base64::engine::general_purpose::STANDARD.encode(ph);
-            ph.zeroize();
-            vk.zeroize();
 
             let pb = make_pb(enc_bytes as u64, "green/yellow", "");
             let num_parts = PARALLELISM.clamp(1, 16);
@@ -443,7 +470,7 @@ async fn main() -> eyre::Result<()> {
             let dl_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let pb = Arc::new(pb);
             let client = Arc::new(client);
-            let url = format!("{}/api/paste/{}/data", base_url, id);
+            let url = data_url;
 
             let mut dl = Vec::new();
             for p in 0..num_parts {
@@ -469,10 +496,11 @@ async fn main() -> eyre::Result<()> {
                             .send()
                             .await
                             && let Ok(data) = resp.bytes().await
+                            && let Ok((_, slice)) = split_paste_frame(&data)
                         {
                             let mut b = buf.lock().unwrap();
-                            b[s as usize..][..data.len()].copy_from_slice(&data);
-                            pb.inc(data.len() as u64);
+                            b[s as usize..][..slice.len()].copy_from_slice(slice);
+                            pb.inc(slice.len() as u64);
                             pb.set_message(indicatif::HumanBytes(pb.position()).to_string());
                             break;
                         }
@@ -499,9 +527,9 @@ async fn main() -> eyre::Result<()> {
 
             let encrypted = Arc::try_unwrap(buf).unwrap().into_inner().unwrap();
 
-            // Envelope pastes: unwrap the random content key with the
-            // password-derived KEK. Legacy pastes: the derived key IS the
-            // content key.
+            // The password-wrapped content key rides in the blob metadata frame
+            // fetched above, served only after the server verified the password.
+            // Legacy pastes have no envelope: the derived KEK IS the content key.
             let mut ek = match &meta.key {
                 Some(envelope) => {
                     unwrap_content_key(&envelope.wrapped_key, &envelope.wrap_nonce, &derived_key)
@@ -666,10 +694,29 @@ async fn main() -> eyre::Result<()> {
             ph.zeroize();
             vk.zeroize();
 
-            // Content key: unwrap for envelope pastes. For legacy pastes the
-            // derived key IS the content key — changing the password here
-            // upgrades the paste to envelope encryption.
-            let content_key = Zeroizing::new(match &meta.key {
+            // The wrapped content key is only served with the ciphertext, after
+            // the server validates the password. A tiny range request
+            // retrieves the metadata frame without downloading the blob.
+            let key_resp = client
+                .get(format!("{}/api/paste/{}/data", base_url, id))
+                .header("X-Password-Hash", &auth)
+                .header("Range", "bytes=0-0")
+                .send()
+                .await?;
+            if !key_resp.status().is_success() {
+                eprintln!("{} Wrong password.", "Error:".red().bold());
+                return Ok(());
+            }
+            let key_body = key_resp.bytes().await?;
+            let envelope = match split_paste_frame(&key_body) {
+                Ok((hdr, _)) => hdr.key,
+                Err(e) => return Err(eyre::eyre!("Invalid paste frame: {}", e)),
+            };
+
+            // Content key: unwrap the envelope. For legacy pastes the derived
+            // key IS the content key — changing the password here upgrades the
+            // paste to envelope encryption.
+            let content_key = Zeroizing::new(match envelope {
                 Some(envelope) => {
                     unwrap_content_key(&envelope.wrapped_key, &envelope.wrap_nonce, &derived_key)
                         .map_err(|e| eyre::eyre!("Wrong password: {}", e))?

@@ -3,14 +3,14 @@ use axum::{
     body::{Body, Bytes},
     extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
 use bitcode::{decode, encode};
 use futures::stream::{self, StreamExt};
 use mitsuzo_types::{
-    CHUNK_SIZE, ChangePasswordRequest, ChunkInfoResponse, CreatePasteHeader, GetPasteHeader,
-    GetSaltResponse, GetStatsResponse, InitPasteResponse, UPLOAD_CHUNK_SIZE,
+    CHUNK_SIZE, ChangePasswordRequest, ChunkInfoResponse, CreatePasteHeader, FailedAttempt,
+    GetPasteHeader, GetSaltResponse, GetStatsResponse, InitPasteResponse, UPLOAD_CHUNK_SIZE,
 };
 use mitsuzo_utils::{get_ciphertext_size, get_plaintext_size};
 use rand::RngExt;
@@ -94,13 +94,56 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     result == 0
 }
 
+/// Remaining try count and TTL in seconds, read after a failed attempt so the
+/// 401 response body can reflect the server's authoritative state.
+fn remaining_attempts(db: &crate::db::DataStore, id: &str) -> (u32, u64) {
+    let Some(meta) = db.get_meta(id) else {
+        return (0, 0);
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let ttl = if meta.expiration_timestamp > 0 && meta.expiration_timestamp > now {
+        meta.expiration_timestamp - now
+    } else {
+        0
+    };
+    (meta.try_count, ttl)
+}
+
+#[derive(Debug)]
+pub(crate) enum ApiError {
+    Status(StatusCode),
+    Unauthorized { try_count: u32, ttl: u64 },
+}
+
+impl From<StatusCode> for ApiError {
+    fn from(status: StatusCode) -> Self {
+        ApiError::Status(status)
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        match self {
+            ApiError::Status(status) => status.into_response(),
+            ApiError::Unauthorized { try_count, ttl } => (
+                StatusCode::UNAUTHORIZED,
+                Bytes::from(encode(&FailedAttempt { try_count, ttl })),
+            )
+                .into_response(),
+        }
+    }
+}
+
 fn verify_password(
     db: &crate::db::DataStore,
     id: &str,
     headers: &HeaderMap,
-) -> Result<(), StatusCode> {
+) -> Result<(), ApiError> {
     let Some(stored_hash) = db.get_password_hash(id) else {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(ApiError::Status(StatusCode::NOT_FOUND));
     };
     let Some(provided_hash_str) = headers
         .get("X-Password-Hash")
@@ -108,21 +151,24 @@ fn verify_password(
     else {
         db.decrement_try_count(id);
         db.increment_fail();
-        return Err(StatusCode::UNAUTHORIZED);
+        let (try_count, ttl) = remaining_attempts(db, id);
+        return Err(ApiError::Unauthorized { try_count, ttl });
     };
     let provided_hash = match general_purpose::STANDARD.decode(provided_hash_str) {
         Ok(h) => h,
         Err(_) => {
             db.decrement_try_count(id);
             db.increment_fail();
-            return Err(StatusCode::UNAUTHORIZED);
+            let (try_count, ttl) = remaining_attempts(db, id);
+            return Err(ApiError::Unauthorized { try_count, ttl });
         }
     };
 
     if !constant_time_eq(&provided_hash, &stored_hash) {
         db.decrement_try_count(id);
         db.increment_fail();
-        return Err(StatusCode::UNAUTHORIZED);
+        let (try_count, ttl) = remaining_attempts(db, id);
+        return Err(ApiError::Unauthorized { try_count, ttl });
     }
     Ok(())
 }
@@ -247,54 +293,22 @@ pub async fn get_salt(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
-    if let (Some(salt), Some(meta)) = (state.db.get_salt(&id), state.db.get_meta(&id)) {
-        if meta.try_count == 0 {
-            return Err(StatusCode::NOT_FOUND);
-        }
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let ttl = if meta.expiration_timestamp > 0 && meta.expiration_timestamp > current_time {
-            meta.expiration_timestamp - current_time
-        } else {
-            0
-        };
-
-        let content_len = state.db.get_content_size(&id).unwrap_or(0);
-        let total_size =
-            get_plaintext_size(meta.total_chunks, content_len as usize).unwrap_or(0) as u64;
-
-        let nonce = state.db.get_nonce(&id).ok_or(StatusCode::NOT_FOUND)?;
-        let nonce_arr: [u8; 12] = nonce
-            .try_into()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let response = GetSaltResponse {
-            salt,
-            try_count: meta.try_count,
-            ttl,
-            total_chunks: meta.total_chunks,
-            total_size,
-            nonce: nonce_arr,
-            key: state.db.get_key(&id),
-            data_type: meta.data_type,
-            filename: meta.filename,
-            content_type: meta.content_type,
-            allow_download: meta.allow_download,
-            burn_after_read: meta.burn_after_read,
-        };
-        Ok(encode(&response))
+    // Only the Argon2id salt is ever served without authentication — the
+    // client needs it to derive the validation key and produce the password
+    // hash. All remaining metadata requires X-Password-Hash and is delivered
+    // in the authenticated /data metadata frame.
+    if let Some(salt) = state.db.get_salt(&id) {
+        Ok(encode(&GetSaltResponse { salt }))
     } else {
         Err(StatusCode::NOT_FOUND)
     }
 }
 
-pub async fn get_paste(
+pub(crate) async fn get_paste(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-) -> Result<Response<Body>, StatusCode> {
+) -> Result<Response<Body>, ApiError> {
     validate_id(&id)?;
     verify_password(&state.db, &id, &headers)?;
 
@@ -315,6 +329,8 @@ pub async fn get_paste(
     let nonce_arr: [u8; 12] = nonce
         .try_into()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let key = state.db.get_key(&id);
+    let (try_count, ttl) = remaining_attempts(&state.db, &id);
 
     let header = GetPasteHeader {
         id,
@@ -325,6 +341,10 @@ pub async fn get_paste(
         total_size,
         total_chunks: meta.total_chunks,
         allow_download: meta.allow_download,
+        key,
+        try_count,
+        ttl,
+        burn_after_read: meta.burn_after_read,
     };
 
     let header_bytes = encode(&header);
@@ -354,13 +374,19 @@ pub async fn get_paste(
     )))
 }
 
-pub async fn get_paste_data(
+pub(crate) async fn get_paste_data(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-) -> Result<Response<Body>, StatusCode> {
+) -> Result<Response<Body>, ApiError> {
     validate_id(&id)?;
     verify_password(&state.db, &id, &headers)?;
+
+    let nonce = state.db.get_nonce(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let nonce_arr: [u8; 12] = nonce
+        .try_into()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let meta = state.db.get_meta(&id).ok_or(StatusCode::NOT_FOUND)?;
 
     let file_path = state
         .db
@@ -371,6 +397,26 @@ pub async fn get_paste_data(
         .map_err(|_| StatusCode::NOT_FOUND)?;
     let file_len = file_meta.len();
     state.db.increment_success();
+
+    // All paste metadata — including the wrapped content key — rides in the
+    // blob's frame, served only after the password check. Never in /salt.
+    let (try_count, ttl) = remaining_attempts(&state.db, &id);
+    let frame = GetPasteHeader {
+        id: id.clone(),
+        nonce: nonce_arr,
+        data_type: meta.data_type.clone(),
+        filename: meta.filename.clone(),
+        content_type: meta.content_type.clone(),
+        total_size: get_plaintext_size(meta.total_chunks, file_len as usize).unwrap_or(0) as u64,
+        total_chunks: meta.total_chunks,
+        allow_download: meta.allow_download,
+        key: state.db.get_key(&id),
+        try_count,
+        ttl,
+        burn_after_read: meta.burn_after_read,
+    }
+    .encode_frame();
+    let frame_len = frame.len() as u64;
 
     let range = headers
         .get(header::RANGE)
@@ -412,6 +458,9 @@ pub async fn get_paste_data(
                 }
             });
 
+        let frame_stream = stream::once(async move { Ok::<_, std::io::Error>(Bytes::from(frame)) });
+        // Content-Length includes the metadata frame prefix; Content-Range
+        // stays in ciphertext coordinates so range math is unchanged.
         return Response::builder()
             .status(StatusCode::PARTIAL_CONTENT)
             .header(header::ACCEPT_RANGES, "bytes")
@@ -419,9 +468,9 @@ pub async fn get_paste_data(
                 header::CONTENT_RANGE,
                 format!("bytes {}-{}/{}", start, end, file_len),
             )
-            .header(header::CONTENT_LENGTH, len.to_string())
-            .body(Body::from_stream(file_stream))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+            .header(header::CONTENT_LENGTH, (frame_len + len).to_string())
+            .body(Body::from_stream(frame_stream.chain(file_stream)))
+            .map_err(|_| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR));
     }
 
     let file = tokio::fs::File::open(&file_path)
@@ -440,31 +489,32 @@ pub async fn get_paste_data(
         }
     });
 
+    let frame_stream = stream::once(async move { Ok::<_, std::io::Error>(Bytes::from(frame)) });
     Response::builder()
         .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CONTENT_LENGTH, file_len.to_string())
-        .body(Body::from_stream(file_stream))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .header(header::CONTENT_LENGTH, (frame_len + file_len).to_string())
+        .body(Body::from_stream(frame_stream.chain(file_stream)))
+        .map_err(|_| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
-pub async fn change_password(
+pub(crate) async fn change_password(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<(), StatusCode> {
+) -> Result<(), ApiError> {
     validate_id(&id)?;
 
     let ip = client_ip(&headers);
     if !state.limiter.check(&format!("passwd:{}", ip), 5, 60).await {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
+        return Err(ApiError::Status(StatusCode::TOO_MANY_REQUESTS));
     }
 
     // Reject like get_salt once the try-count is exhausted.
     if let Some(meta) = state.db.get_meta(&id)
         && meta.try_count == 0
     {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(ApiError::Status(StatusCode::NOT_FOUND));
     }
 
     // Verifies the OLD password hash; on failure decrements try_count and

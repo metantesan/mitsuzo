@@ -76,6 +76,8 @@ crates/
 - **Envelope encryption**: a random 32-byte content key (CEK) encrypts the data — the password never directly touches your content
 - Argon2id (19 MB memory, 2 iterations, 1 parallel) → 32-byte master key → HKDF-SHA256 expands into a key-encryption key (KEK) + validation key
 - The CEK is wrapped with ChaCha20Poly1305 under the KEK and stored server-side; changing the password unwraps and re-wraps only the CEK — ciphertext is untouched
+- Paste metadata is password-gated: only the Argon2id salt is public (it is required to derive the validation key); nonce, file info, wrapped key, and try count are delivered in the authenticated `/data` frame after the password check
+- Failed attempts answer 401 with the remaining try count, and try-count enforcement is purely server-side
 - Legacy pastes (pre-envelope) still decrypt via the old direct derived-key path
 - ChaCha20Poly1305 authenticated encryption, 64 KB chunks with unique nonces
 - HMAC-SHA256 for password validation (encryption key never leaves your device)

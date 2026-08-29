@@ -14,6 +14,22 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.9.2",
+            date: "2026-08",
+            items_en: vec![
+                "All paste metadata now requires the password: /salt returns only the Argon2id salt (needed to derive the validation key), while the wrapped content key, nonce, chunk/file info, and try count travel in the metadata frame (length-prefixed GetPasteHeader) of the authenticated /data response, together with the ciphertext",
+                "Fixed wrong-password attempts not decrementing the try count and not counting toward the failure stats: the client short-circuited before contacting the server, so failed attempts were never recorded",
+                "Failed attempts now answer 401 with the remaining try count and TTL in the body, so the UI stays in sync with the server's try-count enforcement",
+                "Web UI and `cli passwd` obtain the metadata/wrapped key from the data frame; changing the password still never re-encrypts the ciphertext",
+            ],
+            items_fa: vec![
+                "تمام متادیتای Paste اکنون به رمز عبور نیاز دارد: /salt فقط salt (فرایند Argon2id) را برمی‌گرداند — که برای مشتق کردن کلید اعتبارسنجی لازم است — در حالی که کلید محتوای کپسوله‌شده، nonce، اطلاعات تکه/فایل و تعداد تلاش در فریم متادیتا (GetPasteHeader با پیشوند طول) پاسخ احرازهویت‌شده /data و همراه با ciphertext ارسال می‌شوند",
+                "رفع مشکل کاهش نیافتن تعداد تلاش و شمارش نشدن آمار شکست در رمز عبورهای اشتباه: کلاینت قبل از تماس با سرور متوقف می‌شد و تلاش‌های ناموفق هرگز ثبت نمی‌شدند",
+                "تلاش‌های ناموفق اکنون با ۴۰۱ و بدنه‌ای شامل تعداد تلاش و TTL باقی‌مانده پاسخ می‌دهند تا رابط کاربری با اجرای تعداد تلاش در سمت سرور هماهنگ بماند",
+                "رابط کاربری و `cli passwd` متادیتا/کلید کپسوله‌شده را از فریم داده دریافت می‌کنند؛ تغییر رمز همچنان هرگز ciphertext را دوباره رمزگذاری نمی‌کند",
+            ],
+        },
+        Change {
             version: "v0.9.1",
             date: "2026-08",
             items_en: vec![

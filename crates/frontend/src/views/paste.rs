@@ -6,7 +6,9 @@ use base64::{Engine as _, engine::general_purpose};
 use dioxus::prelude::*;
 use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
-use mitsuzo_types::{ChangePasswordRequest, DataType, GetSaltResponse, KeyEnvelope};
+use mitsuzo_types::{
+    ChangePasswordRequest, DataType, FailedAttempt, GetSaltResponse, KeyEnvelope, split_paste_frame,
+};
 use mitsuzo_utils::{
     compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_keys, encrypt_setup,
     get_chunk_bounds, get_plaintext_size, unwrap_content_key,
@@ -486,37 +488,14 @@ async fn do_decrypt(
     )
     .await;
 
-    let (
-        salt_bytes,
-        total_chunks,
-        header_nonce,
-        header_data_type,
-        header_filename,
-        header_content_type,
-        header_allow_download,
-        header_burn_after_read,
-        decoded_envelope,
-    ) = match salt_result {
+    let salt_bytes = match salt_result {
         Ok(response) => {
             if response.status >= 200 && response.status < 300 {
                 if let Some(body) = response.body {
                     match bitcode::decode::<GetSaltResponse>(&body) {
                         Ok(decoded) => {
-                            try_count.set(Some(decoded.try_count));
-                            ttl.set(Some(decoded.ttl));
-                            burn_after_read.set(decoded.burn_after_read);
                             salt.set(Some(decoded.salt.clone()));
-                            (
-                                decoded.salt,
-                                decoded.total_chunks,
-                                decoded.nonce,
-                                decoded.data_type,
-                                decoded.filename,
-                                decoded.content_type,
-                                decoded.allow_download,
-                                decoded.burn_after_read,
-                                decoded.key,
-                            )
+                            decoded.salt
                         }
                         Err(e) => {
                             popup_ctx
@@ -555,25 +534,11 @@ async fn do_decrypt(
         progress: 40.0,
     }));
 
-    // Envelope pastes: unwrap the random content key with the password-derived
-    // KEK. Legacy pastes (created before envelope encryption): the derived
-    // encryption key IS the content key.
-    let (content_key_bytes, validation_key) = match derive_keys(&current_password, &salt_bytes) {
-        Ok((kek, validation_key)) => match decoded_envelope {
-            Some(envelope) => {
-                match unwrap_content_key(&envelope.wrapped_key, &envelope.wrap_nonce, &kek) {
-                    Ok(ck) => (ck, validation_key),
-                    Err(e) => {
-                        popup_ctx
-                            .write()
-                            .show_error(t!("error-decryption-failed", error: e));
-                        progress.set(None);
-                        return;
-                    }
-                }
-            }
-            None => (kek, validation_key),
-        },
+    // Derive the KEK and validation key from the password. The KEK later
+    // unwraps the content key that arrives with the ciphertext; the
+    // validation key produces the hash the server checks before streaming.
+    let (kek, validation_key) = match derive_keys(&current_password, &salt_bytes) {
+        Ok(kv) => kv,
         Err(e) => {
             popup_ctx
                 .write()
@@ -582,10 +547,8 @@ async fn do_decrypt(
             return;
         }
     };
-    content_key.set(Some(content_key_bytes));
 
     let password_hash = compute_password_hash(&validation_key, &salt_bytes);
-    old_password_hash.set(Some(password_hash));
     let encoded_hash = general_purpose::STANDARD.encode(password_hash);
 
     progress.set(Some(ProgressState {
@@ -618,9 +581,49 @@ async fn do_decrypt(
     match content_result {
         Ok(response) => {
             if response.status >= 200 && response.status < 300 {
-                if let Some(content) = response.body {
-                    let paste_total_chunks = total_chunks;
-                    let encryption_key = content_key_bytes;
+                if let Some(body) = response.body {
+                    // The body is a length-prefixed metadata frame carrying the
+                    // password-wrapped content key, followed by the ciphertext.
+                    let (frame_header, ciphertext) = match split_paste_frame(&body) {
+                        Ok(pair) => pair,
+                        Err(e) => {
+                            popup_ctx
+                                .write()
+                                .show_error(t!("error-decryption-failed", error: e));
+                            progress.set(None);
+                            return;
+                        }
+                    };
+                    // Envelope pastes: unwrap the CEK from the frame's metadata.
+                    // Legacy pastes have no envelope: the derived KEK IS the key.
+                    let encryption_key = match frame_header.key {
+                        Some(envelope) => {
+                            match unwrap_content_key(
+                                &envelope.wrapped_key,
+                                &envelope.wrap_nonce,
+                                &kek,
+                            ) {
+                                Ok(ck) => ck,
+                                Err(e) => {
+                                    popup_ctx
+                                        .write()
+                                        .show_error(t!("error-decryption-failed", error: e));
+                                    progress.set(None);
+                                    return;
+                                }
+                            }
+                        }
+                        None => kek,
+                    };
+                    content_key.set(Some(encryption_key));
+                    old_password_hash.set(Some(password_hash));
+                    try_count.set(Some(frame_header.try_count));
+                    ttl.set(Some(frame_header.ttl));
+                    burn_after_read.set(frame_header.burn_after_read);
+                    let paste_total_chunks = frame_header.total_chunks;
+                    let header_nonce = frame_header.nonce;
+                    let header_burn_after_read = frame_header.burn_after_read;
+                    let content = ciphertext;
 
                     let plaintext_size = match get_plaintext_size(paste_total_chunks, content.len())
                     {
@@ -678,10 +681,10 @@ async fn do_decrypt(
                             can_change_password.set(!header_burn_after_read);
                             paste_content.set(Some(PasteContent {
                                 bytes: plaintext,
-                                data_type: header_data_type,
-                                filename: header_filename,
-                                content_type: header_content_type,
-                                allow_download: header_allow_download,
+                                data_type: frame_header.data_type,
+                                filename: frame_header.filename,
+                                content_type: frame_header.content_type,
+                                allow_download: frame_header.allow_download,
                             }));
                             progress.set(None);
                         }
@@ -701,11 +704,11 @@ async fn do_decrypt(
                     .write()
                     .show_error(t!("error-get-paste-failed", status: response.status.to_string()));
                 progress.set(None);
-                let current = *try_count.read();
-                if let Some(count) = current
-                    && count > 0
+                if let Some(body) = response.body
+                    && let Ok(attempt) = bitcode::decode::<FailedAttempt>(&body)
                 {
-                    try_count.set(Some(count - 1));
+                    try_count.set(Some(attempt.try_count));
+                    ttl.set(Some(attempt.ttl));
                 }
             }
         }

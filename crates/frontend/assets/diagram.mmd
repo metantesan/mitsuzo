@@ -23,23 +23,25 @@ Sled DB: pass, salt, key, meta, burn
     Note over U,S:VIEW PASTE
     U->>B:Paste ID + Password (from URL #hash)
     B->>S:GET /api/paste/{id}/salt
-    S->>B:Return {salt, key envelope, try_count, ttl, total_chunks}
-    B->>B:master = Argon2id(password, salt) → kek = HKDF(master)
-    B->>B:Unwrap CEK with kek (legacy pastes: derived key = CEK)
+    S->>B:Return salt only (KDF bootstrap — everything else requires auth)
+    B->>B:master = Argon2id(password, salt) → kek + val_key = HKDF(master)
     B->>B:hash = HMAC-SHA256(val_key, salt)
     B->>S:GET /api/paste/{id}/data + X-Password-Hash [Range supported]
     alt Hash matches (constant-time compare)
-        S->>B:Framed: GetPasteHeader + encrypted_chunks
+        S->>B:Metadata frame (nonce, chunks, type, size, wrapped CEK, tries) + ciphertext
+        B->>B:Unwrap CEK with kek (legacy pastes: derived key = CEK)
         B->>B:Decrypt chunks with CEK and derived nonce
         B->>U:Display plaintext / Download file
     else Hash mismatch
-        S->>S:try_count--
+        S->>S:try_count-- + fail stats++
         S->>S:if try_count==0, delete paste
-        S->>B:401 Unauthorized
+        S->>B:401 + remaining try_count/ttl body
     end
 
     Note over U,S:CHANGE PASSWORD
     U->>B:New password
+    B->>S:GET /api/paste/{id}/data (range) + X-Password-Hash [old hash]
+    S->>B:Metadata frame (password-wrapped CEK)
     B->>B:Unwrap CEK with old kek
     B->>B:New salt → master' = Argon2id(new password, salt')
     B->>B:kek' + val_key' = HKDF(master') → re-wrap CEK with kek'
