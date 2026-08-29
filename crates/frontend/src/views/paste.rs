@@ -135,16 +135,16 @@ pub fn paste_view(id: String) -> Element {
         let (Some(key), Some(old_hash)) = (key, old_hash) else {
             return;
         };
-        spawn(do_change_password(
+        spawn(do_change_password(ChangePasswordParams {
             current_id,
             new_password,
-            key,
+            content_key: key,
             old_hash,
             popup_ctx,
-            changing_password,
+            busy: changing_password,
             new_password_input,
             confirm_password_input,
-        ));
+        }));
     };
 
     rsx! {
@@ -718,16 +718,28 @@ async fn do_decrypt(
     }
 }
 
-async fn do_change_password(
+struct ChangePasswordParams {
     current_id: String,
     new_password: String,
     content_key: [u8; 32],
     old_hash: [u8; 32],
-    mut popup_ctx: Signal<PopupContext>,
-    mut busy: Signal<bool>,
-    mut new_password_input: Signal<String>,
-    mut confirm_password_input: Signal<String>,
-) {
+    popup_ctx: Signal<PopupContext>,
+    busy: Signal<bool>,
+    new_password_input: Signal<String>,
+    confirm_password_input: Signal<String>,
+}
+
+async fn do_change_password(params: ChangePasswordParams) {
+    let ChangePasswordParams {
+        current_id,
+        new_password,
+        content_key,
+        old_hash,
+        mut popup_ctx,
+        mut busy,
+        mut new_password_input,
+        mut confirm_password_input,
+    } = params;
     busy.set(true);
     let result: Result<(), String> = async {
         // Re-wrap the same content key under the new password; the ciphertext

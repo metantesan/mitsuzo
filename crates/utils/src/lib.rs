@@ -440,7 +440,7 @@ mod tests {
             .is_err()
         );
         decrypted.clear();
-        let _ = decrypt_with_key_into(
+        decrypt_with_key_into(
             &ciphertext,
             &recovered_cek,
             &setup.base_nonce,
