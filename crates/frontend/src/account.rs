@@ -103,8 +103,16 @@ pub fn use_recipient_ephemerals() -> Signal<Vec<RecipientEphemeral>> {
     use_context::<Signal<Vec<RecipientEphemeral>>>()
 }
 
+/// Account key material derived from a BIP39 seed phrase.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountKeyMaterial {
+    pub scalar: [u8; 32],
+    pub pubkey: [u8; 32],
+    pub kid: [u8; 32],
+}
+
 /// Generate a 24-word BIP39 mnemonic and the derived account key material.
-pub fn new_account_key() -> Result<(String, [u8; 32], [u8; 32], [u8; 32]), String> {
+pub fn new_account_key() -> Result<(String, AccountKeyMaterial), String> {
     let mut entropy = [0u8; 32];
     getrandom::fill(&mut entropy).map_err(|e| format!("Failed to generate entropy: {}", e))?;
     let mnemonic = Mnemonic::from_entropy(&entropy)
@@ -114,18 +122,29 @@ pub fn new_account_key() -> Result<(String, [u8; 32], [u8; 32], [u8; 32]), Strin
     let scalar = derive_account_scalar(&seed);
     let pubkey = pubkey_from_scalar(&scalar);
     let kid = kid_from_pubkey(&pubkey);
-    Ok((phrase, scalar, pubkey, kid))
+    Ok((
+        phrase,
+        AccountKeyMaterial {
+            scalar,
+            pubkey,
+            kid,
+        },
+    ))
 }
 
 /// Recover the key material from an existing seed phrase.
-pub fn account_key_from_mnemonic(phrase: &str) -> Result<([u8; 32], [u8; 32], [u8; 32]), String> {
+pub fn account_key_from_mnemonic(phrase: &str) -> Result<AccountKeyMaterial, String> {
     let mnemonic =
         Mnemonic::parse(phrase.trim()).map_err(|e| format!("Invalid seed phrase: {}", e))?;
     let seed = mnemonic.to_seed("");
     let scalar = derive_account_scalar(&seed);
     let pubkey = pubkey_from_scalar(&scalar);
     let kid = kid_from_pubkey(&pubkey);
-    Ok((scalar, pubkey, kid))
+    Ok(AccountKeyMaterial {
+        scalar,
+        pubkey,
+        kid,
+    })
 }
 
 /// Persist the password-encrypted blob plus public metadata to localStorage.
@@ -378,15 +397,15 @@ pub fn account_view() -> Element {
             let mut name_input = name_input;
             spawn(async move {
                 let result: Result<(), String> = async {
-                    let (phrase, scalar, pubkey, kid) = new_account_key()?;
+                    let (phrase, material) = new_account_key()?;
                     // Keep the name + password in memory for the backup step.
                     password_input.set(password);
                     name_input.set(name);
                     reg.set(RegState::Backup {
                         mnemonic: phrase,
-                        scalar,
-                        pubkey,
-                        kid,
+                        scalar: material.scalar,
+                        pubkey: material.pubkey,
+                        kid: material.kid,
                     });
                     Ok(())
                 }
@@ -496,15 +515,15 @@ pub fn account_view() -> Element {
             let mut popup_ctx = popup_ctx;
             spawn(async move {
                 let result: Result<(), String> = async {
-                    let (scalar, pubkey, kid) = account_key_from_mnemonic(&phrase)?;
-                    persist_account(&name, &scalar, &pubkey, &password)?;
+                    let material = account_key_from_mnemonic(&phrase)?;
+                    persist_account(&name, &material.scalar, &material.pubkey, &password)?;
                     let mut prefix = [0u8; 20];
-                    prefix.copy_from_slice(&kid[..20]);
+                    prefix.copy_from_slice(&material.kid[..20]);
                     let session = AccountSession {
-                        scalar,
-                        kid,
+                        scalar: material.scalar,
+                        kid: material.kid,
                         kid_prefix: prefix,
-                        pubkey,
+                        pubkey: material.pubkey,
                         name,
                     };
                     match register_on_server(&session).await {
@@ -604,8 +623,6 @@ pub fn account_view() -> Element {
     };
 
     let load_inbox = {
-        let account = account;
-        let inbox = inbox;
         let mut inbox_loading = inbox_loading;
         let popup_ctx = popup_ctx;
         move |_| {
@@ -631,8 +648,6 @@ pub fn account_view() -> Element {
 
     // Load the inbox once automatically when the account becomes available.
     use_effect({
-        let account = account;
-        let inbox = inbox;
         let mut inbox_loading = inbox_loading;
         let popup_ctx = popup_ctx;
         let mut inbox_loaded = inbox_loaded;
@@ -766,7 +781,6 @@ pub fn account_view() -> Element {
                                                 {pastes.iter().map(|p| {
                                                     let id = p.id.clone();
                                                     let desc = inbox_entry_label(p);
-                                                    let navigator = navigator;
                                                     rsx! {
                                                         button {
                                                             class: "w-full p-3 bg-bg rounded-lg border border-border flex justify-between items-center text-left hover:border-accent transition-all duration-200",
@@ -919,8 +933,6 @@ pub fn user_view(id: String) -> Element {
     let recipient = use_recipient_target();
 
     use_effect({
-        let loading = loading;
-        let not_found = not_found;
         move || {
             if !*loading.read() {
                 return;
@@ -951,7 +963,6 @@ pub fn user_view(id: String) -> Element {
 
     let send_action = {
         let mut recipient = recipient;
-        let navigator = navigator;
         move |_| {
             let Some(p) = profile.read().clone() else {
                 return;
