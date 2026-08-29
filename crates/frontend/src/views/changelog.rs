@@ -14,6 +14,18 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.9.1",
+            date: "2026-08",
+            items_en: vec![
+                "Fixed Docker builds: removed the dev-only web proxy from Dioxus.toml, which newer dioxus-cli releases rejected",
+                "Default BASE_URL now points to the local backend (http://localhost:3030) for same-origin development without the proxy",
+            ],
+            items_fa: vec![
+                "رفع بیلد داکر: حذف پروکسی مخصوص توسعه از Dioxus.toml که نسخه‌های جدیدتر dioxus-cli آن را رد می‌کردند",
+                "مقدار پیش‌فرض BASE_URL اکنون به بک‌اند محلی (http://localhost:3030) اشاره می‌کند تا توسعه بدون پروکسی و با آدرس نسبی امکان‌پذیر باشد",
+            ],
+        },
+        Change {
             version: "v0.9.0",
             date: "2026-08",
             items_en: vec![

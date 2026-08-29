@@ -10,14 +10,9 @@ use dioxus_i18n::prelude::*;
 use mitsuzo_types::GetStatsResponse;
 use unic_langid::langid;
 
-/// API base URL. Empty by default: the backend serves the frontend, so
-/// same-origin relative URLs are used. Set `BASE_URL` at build time
-/// (e.g. `BASE_URL=https://api.example.com dx build --release`) only when
-/// the API runs separately from the frontend — it is baked in at compile
-/// time and cannot be changed at runtime.
 pub const BASE_URL: &str = match option_env!("BASE_URL") {
     Some(url) => url,
-    None => "",
+    None => "http://localhost:3030",
 };
 
 #[derive(Routable, Clone, PartialEq)]
