@@ -46,7 +46,7 @@ jobs:
 
       - run: cargo build --release --package ${{ env.CRATE_NAME }} --target ${{ matrix.target }}
 
-      - run: cp target/${{ matrix.target }}/release/${{ env.CRATE_NAME }}${{ matrix.binary_postfix }} ${{ env.BIN_NAME }}${{ matrix.binary_postfix }}
+      - run: cp target/${{ matrix.target }}/release/${{ env.BIN_NAME }}${{ matrix.binary_postfix }} ${{ env.BIN_NAME }}${{ matrix.binary_postfix }}
 
       - name: Compress binary
         shell: bash

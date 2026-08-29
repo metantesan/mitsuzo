@@ -14,6 +14,18 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.10.1",
+            date: "2026-08",
+            items_en: vec![
+                "Fixed all Clippy warnings (denied as errors): account key material and the sender's ephemeral key are now named structs instead of nested tuples, and redundant Signal re-bindings were removed",
+                "Fixed the CLI release workflow: the `cli` crate now ships a binary named `mitsuzo`, and the workflow builds and publishes it under its actual artifact name",
+            ],
+            items_fa: vec![
+                "رفع تمام هشدارهای Clippy (سطح deny): کلیدهای حساب و کلید موقت فرستنده به جای تاپل‌های تو در تو به ساختارهای نام‌گذاری‌شده تبدیل شدند و بازتعریف‌های اضافیِ Signal حذف شد",
+                "رفع workflow انتشار CLI: کِرِیت `cli` اکنون باینری به نام `mitsuzo` تولید می‌کند و workflow آن را با نام اصلیِ خروجی می‌سازد و منتشر می‌کند",
+            ],
+        },
+        Change {
             version: "v0.10.0",
             date: "2026-08",
             items_en: vec![

@@ -23,6 +23,13 @@ use mitsuzo_utils::{
 use wasm_bindgen::JsCast;
 use web_sys;
 
+/// Sender-held recipient key material kept for the session so the creator can
+/// reopen their own recipient-mode paste.
+struct SenderEphemeralKey {
+    recipient_kid: [u8; 32],
+    ephemeral_priv: [u8; 32],
+}
+
 fn format_count(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
@@ -345,7 +352,7 @@ pub fn home_view() -> Element {
                     (file_size_for_chunks as usize).div_ceil(CHUNK_SIZE) as u32
                 };
 
-                let (header, session_ephemeral): (CreatePasteHeader, Option<([u8; 32], [u8; 32])>) =
+                let (header, session_ephemeral): (CreatePasteHeader, Option<SenderEphemeralKey>) =
                     if !password_mode {
                         // Recipient mode: seal the CEK to the recipient's
                         // public key. Both the recipient (via account scalar)
@@ -408,7 +415,13 @@ pub fn home_view() -> Element {
                             }),
                             recipient_pub: Some(target.pubkey),
                         };
-                        (header, Some((target.kid, eph_priv)))
+                        (
+                            header,
+                            Some(SenderEphemeralKey {
+                                recipient_kid: target.kid,
+                                ephemeral_priv: eph_priv,
+                            }),
+                        )
                     } else {
                         let setup = match encrypt_setup(&password, &content_key) {
                             Ok(data) => data,
@@ -561,11 +574,11 @@ pub fn home_view() -> Element {
 
                 // Remember the sender's ephemeral key so this session can
                 // reopen the paste (ECDH symmetry with the recipient).
-                if let Some((kid, eph_priv)) = session_ephemeral {
+                if let Some(eph) = session_ephemeral {
                     recipient_ephemerals.write().push(RecipientEphemeral {
                         paste_id: paste_id.clone(),
-                        recipient_kid: kid,
-                        ephemeral_priv: eph_priv,
+                        recipient_kid: eph.recipient_kid,
+                        ephemeral_priv: eph.ephemeral_priv,
                     });
                 }
 

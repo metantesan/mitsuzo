@@ -79,8 +79,6 @@ pub fn paste_view(id: String) -> Element {
         let mut needs_account_password = needs_account_password;
         let mut not_found = not_found;
         let mut mode_probed = mode_probed;
-        let ephemerals = ephemerals;
-        let account = account;
         move || {
             if *mode_probed.read() {
                 return;
@@ -138,20 +136,7 @@ pub fn paste_view(id: String) -> Element {
 
     let fetch_and_decrypt = {
         let popup_ctx = popup_ctx;
-        let try_count = try_count;
-        let ttl = ttl;
-        let progress = progress;
-        let paste_content = paste_content;
-        let burn_after_read = burn_after_read;
-        let salt = salt;
-        let content_key = content_key;
-        let old_password_hash = old_password_hash;
-        let can_change_password = can_change_password;
         let is_recipient_mode2 = is_recipient_mode;
-        let needs_account_password = needs_account_password;
-        let recipient_session = recipient_session;
-        let ephemerals = ephemerals;
-        let account = account;
         move |_| {
             let current_id = paste_id_state.read().clone();
             let current_password = password_input.read().clone();
@@ -183,20 +168,6 @@ pub fn paste_view(id: String) -> Element {
 
     use_effect({
         let mut hash_processed = hash_processed;
-        let is_recipient_mode = is_recipient_mode;
-        let try_count = try_count;
-        let ttl = ttl;
-        let progress = progress;
-        let paste_content = paste_content;
-        let burn_after_read = burn_after_read;
-        let salt = salt;
-        let content_key = content_key;
-        let old_password_hash = old_password_hash;
-        let can_change_password = can_change_password;
-        let needs_account_password = needs_account_password;
-        let recipient_session = recipient_session;
-        let ephemerals = ephemerals;
-        let account = account;
         move || {
             if *hash_processed.read() {
                 return;
@@ -230,21 +201,8 @@ pub fn paste_view(id: String) -> Element {
 
     let unlock_for_recipient = {
         let mut popup_ctx = popup_ctx;
-        let is_recipient_mode = is_recipient_mode;
-        let try_count = try_count;
-        let ttl = ttl;
-        let progress = progress;
-        let paste_content = paste_content;
-        let burn_after_read = burn_after_read;
-        let salt = salt;
-        let content_key = content_key;
-        let old_password_hash = old_password_hash;
-        let can_change_password = can_change_password;
-        let needs_account_password = needs_account_password;
         let mut recipient_session = recipient_session;
         let mut needs_account_password2 = needs_account_password;
-        let ephemerals = ephemerals;
-        let account = account;
         move |_| {
             let pw = account_password_input.read().clone();
             if pw.is_empty() {
