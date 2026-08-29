@@ -5,31 +5,50 @@ sequenceDiagram
 
     Note over U,S:CREATE PASTE
     U->>B:Text/File + Password (or empty for auto-generated)
-    B->>B:Generate salt(16B) + nonce(12B)
+    B->>B:Generate salt(16B) + nonce(12B) + random content key CEK(32B)
     B->>B:master = Argon2id(password, salt, 32B)
-    B->>B:enc_key = HKDF(master, "mitsuzo-encryption-key")
+    B->>B:kek = HKDF(master, "mitsuzo-encryption-key")
     B->>B:val_key = HKDF(master, "mitsuzo-validation-key")
     B->>B:hash = HMAC-SHA256(val_key, salt)
-    B->>B:Encrypt chunks with ChaCha20-Poly1305(enc_key)
+    B->>B:Wrap CEK: ChaCha20-Poly1305(kek, wrap_nonce) → wrapped_key(48B)
+    B->>B:Encrypt chunks with ChaCha20-Poly1305(CEK)
     Note right of B:Derived nonce = base_nonce XOR chunk_index
-    B->>S:POST /api/paste [framed: header + encrypted_chunks]
-    Note right of S:Stores: files/{id} + files/{id}.nonce
-Sled DB: pass, salt, meta
+    B->>S:POST /api/paste [header: salt, hash, key envelope, meta]
     S->>B:Return paste ID
+    B->>S:PUT /api/paste/{id}/chunk/{i} [16MB upload chunks, resumable]
+    B->>S:POST /api/paste/{id}/complete
+    Note right of S:Stores: files/{id} + files/{id}.nonce
+Sled DB: pass, salt, key, meta, burn
 
     Note over U,S:VIEW PASTE
     U->>B:Paste ID + Password (from URL #hash)
     B->>S:GET /api/paste/{id}/salt
-    S->>B:Return {salt, try_count, ttl, total_chunks}
-    B->>B:Re-derive keys (Argon2id + HKDF)
+    S->>B:Return {salt, key envelope, try_count, ttl, total_chunks}
+    B->>B:master = Argon2id(password, salt) → kek = HKDF(master)
+    B->>B:Unwrap CEK with kek (legacy pastes: derived key = CEK)
     B->>B:hash = HMAC-SHA256(val_key, salt)
-    B->>S:GET /api/paste/{id} + X-Password-Hash
+    B->>S:GET /api/paste/{id}/data + X-Password-Hash [Range supported]
     alt Hash matches (constant-time compare)
         S->>B:Framed: GetPasteHeader + encrypted_chunks
-        B->>B:Decrypt chunks with derived nonce
+        B->>B:Decrypt chunks with CEK and derived nonce
         B->>U:Display plaintext / Download file
     else Hash mismatch
         S->>S:try_count--
         S->>S:if try_count==0, delete paste
+        S->>B:401 Unauthorized
+    end
+
+    Note over U,S:CHANGE PASSWORD
+    U->>B:New password
+    B->>B:Unwrap CEK with old kek
+    B->>B:New salt → master' = Argon2id(new password, salt')
+    B->>B:kek' + val_key' = HKDF(master') → re-wrap CEK with kek'
+    B->>B:hash' = HMAC-SHA256(val_key', salt')
+    B->>S:POST /api/paste/{id}/password + X-Password-Hash [old hash]
+    alt Old hash matches
+        Note right of S:Updates only pass, salt, key — ciphertext untouched
+        S->>B:200 OK
+    else Hash mismatch
+        S->>S:try_count--
         S->>B:401 Unauthorized
     end

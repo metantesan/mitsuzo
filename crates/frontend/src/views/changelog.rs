@@ -14,6 +14,30 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.9.0",
+            date: "2026-08",
+            items_en: vec![
+                "Envelope encryption: pastes are encrypted with a random per-paste content key, wrapped with the password-derived key (Argon2id + HKDF)",
+                "Changeable password: re-wraps only the content key — paste data is never re-encrypted or re-uploaded",
+                "New 'Change password' section in the web UI after decryption, and a `cli passwd <id>` subcommand",
+                "New POST /api/paste/{id}/password endpoint with old-password authentication, try-count enforcement, and rate limiting",
+                "Legacy pastes created before this version still decrypt via the old direct derived-key path",
+                "Burn-after-read receipts are now derived from the content key, so they stay valid across password changes",
+                "How It Works page, workflow diagram, and README updated to document the new key hierarchy",
+                "New /docs page consolidating How It Works with a security model spec, API reference, and self-hosting guide",
+            ],
+            items_fa: vec![
+                "رمزگذاری پاکتی: داده‌ها با یک کلید محتوای تصادفی مخصوص هر Paste رمزگذاری می‌شوند که با کلید مشتق‌شده از رمز عبور (Argon2id + HKDF) کپسوله می‌شود",
+                "تغییر رمز عبور: فقط کلید محتوا دوباره کپسوله می‌شود — داده‌های Paste هرگز رمزگذاری یا بارگذاری مجدد نمی‌شوند",
+                "بخش جدید «تغییر رمز عبور» در رابط کاربری پس از رمزگشایی و زیرفرمان `cli passwd <id>` در CLI",
+                "ان‌پوینت جدید POST /api/paste/{id}/password با احرازهویت رمز قدیمی، اجرای تعداد تلاش و محدودیت نرخ",
+                "Pasteهای قدیمیِ ساخته‌شده قبل از این نسخه همچنان از مسیر مستقیم مشتق کلید رمزگشایی می‌شوند",
+                "رسید حذف پس از مشاهده اکنون از کلید محتوا مشتق می‌شود و با تغییر رمز عبور معتبر می‌ماند",
+                "به‌روزرسانی صفحه نحوه کارکرد، نمودار جریان کار و README برای مستندسازی سلسله‌مراتب جدید کلیدها",
+                "صفحه جدید /docs شامل نحوه کارکرد به‌همراه مستندات مدل امنیتی، مرجع API و راهنمای اجرای اختصاصی",
+            ],
+        },
+        Change {
             version: "v0.8.0",
             date: "2026-08",
             items_en: vec![
@@ -297,17 +321,17 @@ fn get_changelog() -> Vec<Change> {
 }
 
 #[component]
-pub fn changelog_view() -> Element {
+pub fn changelog_section() -> Element {
     let i18n = i18n();
     let is_fa = i18n.language() == langid!("fa-IR");
     let changelog = get_changelog();
     let current_version = APP_VERSION;
 
     rsx! {
-        div {
-            class: "container mx-auto p-4 max-w-3xl",
-            h1 {
-                class: "text-3xl font-bold text-text mb-8 text-center",
+        section {
+            class: "mb-8 p-6 bg-surface rounded-lg",
+            h2 {
+                class: "text-2xl font-bold mb-4 text-accent",
                 {t!("changelog-title")}
             }
             {changelog.into_iter().map(|entry| {
@@ -316,17 +340,17 @@ pub fn changelog_view() -> Element {
                 let date = entry.date.to_string();
                 let items = if is_fa { entry.items_fa.clone() } else { entry.items_en.clone() };
                 let card_class = if is_current {
-                    "mb-6 p-5 bg-surface rounded-lg ring-2 ring-accent".to_string()
+                    "mb-4 p-4 bg-bg rounded-lg ring-2 ring-accent".to_string()
                 } else {
-                    "mb-6 p-5 bg-surface rounded-lg".to_string()
+                    "mb-4 p-4 bg-bg rounded-lg".to_string()
                 };
                 rsx! {
                     div {
                         class: "{card_class}",
                         div {
                             class: "flex items-center justify-between mb-3",
-                            h2 {
-                                class: "text-xl font-bold text-text",
+                            h3 {
+                                class: "text-lg font-bold text-text",
                                 "{version}"
                             }
                             span {

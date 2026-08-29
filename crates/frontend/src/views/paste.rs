@@ -1,15 +1,15 @@
 use crate::BASE_URL;
 use crate::components::PopupContext;
 use crate::sanitize_id;
-use crate::utils::{copy_to_clipboard, do_xhr_get, do_xhr_post};
+use crate::utils::{copy_to_clipboard, do_xhr_get, do_xhr_post, do_xhr_post_headers};
 use base64::{Engine as _, engine::general_purpose};
 use dioxus::prelude::*;
 use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
-use mitsuzo_types::{DataType, GetSaltResponse};
+use mitsuzo_types::{ChangePasswordRequest, DataType, GetSaltResponse, KeyEnvelope};
 use mitsuzo_utils::{
-    compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_keys, get_chunk_bounds,
-    get_plaintext_size,
+    compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_keys, encrypt_setup,
+    get_chunk_bounds, get_plaintext_size, unwrap_content_key,
 };
 use wasm_bindgen::JsCast;
 use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
@@ -40,6 +40,12 @@ pub fn paste_view(id: String) -> Element {
     let salt: Signal<Option<Vec<u8>>> = use_signal(|| None);
     let progress: Signal<Option<ProgressState>> = use_signal(|| None);
     let mut popup_ctx = use_context::<Signal<PopupContext>>();
+    let content_key: Signal<Option<[u8; 32]>> = use_signal(|| None);
+    let old_password_hash: Signal<Option<[u8; 32]>> = use_signal(|| None);
+    let can_change_password = use_signal(|| false);
+    let mut new_password_input = use_signal(String::new);
+    let mut confirm_password_input = use_signal(String::new);
+    let changing_password = use_signal(|| false);
 
     let hash_from_url = (|| {
         let storage = web_sys::window().and_then(|w| w.session_storage().ok().flatten())?;
@@ -73,6 +79,9 @@ pub fn paste_view(id: String) -> Element {
                 paste_content,
                 burn_after_read,
                 salt,
+                content_key,
+                old_password_hash,
+                can_change_password,
             ));
         }
     };
@@ -99,10 +108,44 @@ pub fn paste_view(id: String) -> Element {
                     paste_content,
                     burn_after_read,
                     salt,
+                    content_key,
+                    old_password_hash,
+                    can_change_password,
                 ));
             }
         }
     });
+
+    let change_password_action = move |_| {
+        let current_id = paste_id_state.read().clone();
+        let new_password = new_password_input.read().clone();
+        let confirm = confirm_password_input.read().clone();
+        let key = *content_key.read();
+        let old_hash = *old_password_hash.read();
+        if new_password.is_empty() {
+            popup_ctx.write().show_error(t!("error-password-empty"));
+            return;
+        }
+        if new_password != confirm {
+            popup_ctx
+                .write()
+                .show_error(t!("error-change-password-mismatch"));
+            return;
+        }
+        let (Some(key), Some(old_hash)) = (key, old_hash) else {
+            return;
+        };
+        spawn(do_change_password(
+            current_id,
+            new_password,
+            key,
+            old_hash,
+            popup_ctx,
+            changing_password,
+            new_password_input,
+            confirm_password_input,
+        ));
+    };
 
     rsx! {
         div {
@@ -359,6 +402,49 @@ pub fn paste_view(id: String) -> Element {
                     }
                 }
             }
+
+            {if *can_change_password.read() {
+                rsx! {
+                    div {
+                        class: "bg-surface p-6 rounded-lg shadow-lg mt-6",
+                        h2 {
+                            class: "text-xl font-semibold mb-2",
+                            {t!("change-password-title")}
+                        }
+                        p {
+                            class: "text-muted text-sm mb-4",
+                            {t!("change-password-desc")}
+                        }
+                        div {
+                            class: "space-y-3",
+                            input {
+                                class: "w-full p-4 bg-bg text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
+                                r#type: "password",
+                                placeholder: "{t!(\"change-password-new-placeholder\")}",
+                                autocomplete: "new-password",
+                                oninput: move |evt| new_password_input.set(evt.value()),
+                                value: "{new_password_input}",
+                            }
+                            input {
+                                class: "w-full p-4 bg-bg text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
+                                r#type: "password",
+                                placeholder: "{t!(\"change-password-confirm-placeholder\")}",
+                                autocomplete: "new-password",
+                                oninput: move |evt| confirm_password_input.set(evt.value()),
+                                value: "{confirm_password_input}",
+                            }
+                            button {
+                                class: "px-6 py-3 bg-accent text-bg font-semibold rounded-lg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 transition-all duration-200 disabled:opacity-50",
+                                disabled: *changing_password.read(),
+                                onclick: change_password_action,
+                                {t!("change-password-button")}
+                            }
+                        }
+                    }
+                }
+            } else {
+                rsx! { Fragment {} }
+            }}
         }
     }
 }
@@ -374,11 +460,15 @@ async fn do_decrypt(
     mut paste_content: Signal<Option<PasteContent>>,
     mut burn_after_read: Signal<bool>,
     mut salt: Signal<Option<Vec<u8>>>,
+    mut content_key: Signal<Option<[u8; 32]>>,
+    mut old_password_hash: Signal<Option<[u8; 32]>>,
+    mut can_change_password: Signal<bool>,
 ) {
     progress.set(Some(ProgressState {
         status: t!("progress-downloading-metadata"),
         progress: 10.0,
     }));
+    can_change_password.set(false);
 
     let salt_result = do_xhr_get(
         &format!("{}/api/paste/{}/salt", BASE_URL, current_id),
@@ -405,6 +495,7 @@ async fn do_decrypt(
         header_content_type,
         header_allow_download,
         header_burn_after_read,
+        decoded_envelope,
     ) = match salt_result {
         Ok(response) => {
             if response.status >= 200 && response.status < 300 {
@@ -424,6 +515,7 @@ async fn do_decrypt(
                                 decoded.content_type,
                                 decoded.allow_download,
                                 decoded.burn_after_read,
+                                decoded.key,
                             )
                         }
                         Err(e) => {
@@ -463,8 +555,25 @@ async fn do_decrypt(
         progress: 40.0,
     }));
 
-    let (_encryption_key, validation_key) = match derive_keys(&current_password, &salt_bytes) {
-        Ok(keys) => keys,
+    // Envelope pastes: unwrap the random content key with the password-derived
+    // KEK. Legacy pastes (created before envelope encryption): the derived
+    // encryption key IS the content key.
+    let (content_key_bytes, validation_key) = match derive_keys(&current_password, &salt_bytes) {
+        Ok((kek, validation_key)) => match decoded_envelope {
+            Some(envelope) => {
+                match unwrap_content_key(&envelope.wrapped_key, &envelope.wrap_nonce, &kek) {
+                    Ok(ck) => (ck, validation_key),
+                    Err(e) => {
+                        popup_ctx
+                            .write()
+                            .show_error(t!("error-decryption-failed", error: e));
+                        progress.set(None);
+                        return;
+                    }
+                }
+            }
+            None => (kek, validation_key),
+        },
         Err(e) => {
             popup_ctx
                 .write()
@@ -473,8 +582,10 @@ async fn do_decrypt(
             return;
         }
     };
+    content_key.set(Some(content_key_bytes));
 
     let password_hash = compute_password_hash(&validation_key, &salt_bytes);
+    old_password_hash.set(Some(password_hash));
     let encoded_hash = general_purpose::STANDARD.encode(password_hash);
 
     progress.set(Some(ProgressState {
@@ -509,17 +620,7 @@ async fn do_decrypt(
             if response.status >= 200 && response.status < 300 {
                 if let Some(content) = response.body {
                     let paste_total_chunks = total_chunks;
-
-                    let (encryption_key, _) = match derive_keys(&current_password, &salt_bytes) {
-                        Ok(k) => k,
-                        Err(e) => {
-                            popup_ctx
-                                .write()
-                                .show_error(t!("error-decryption-failed", error: e));
-                            progress.set(None);
-                            return;
-                        }
-                    };
+                    let encryption_key = content_key_bytes;
 
                     let plaintext_size = match get_plaintext_size(paste_total_chunks, content.len())
                     {
@@ -574,6 +675,7 @@ async fn do_decrypt(
                                     _ => {}
                                 }
                             }
+                            can_change_password.set(!header_burn_after_read);
                             paste_content.set(Some(PasteContent {
                                 bytes: plaintext,
                                 data_type: header_data_type,
@@ -613,6 +715,60 @@ async fn do_decrypt(
                 .show_error(t!("error-send-request-failed", error: e));
             progress.set(None);
         }
+    }
+}
+
+async fn do_change_password(
+    current_id: String,
+    new_password: String,
+    content_key: [u8; 32],
+    old_hash: [u8; 32],
+    mut popup_ctx: Signal<PopupContext>,
+    mut busy: Signal<bool>,
+    mut new_password_input: Signal<String>,
+    mut confirm_password_input: Signal<String>,
+) {
+    busy.set(true);
+    let result: Result<(), String> = async {
+        // Re-wrap the same content key under the new password; the ciphertext
+        // itself is never touched.
+        let setup = encrypt_setup(&new_password, &content_key)?;
+        let request = ChangePasswordRequest {
+            salt: setup.salt,
+            password_hash: setup.password_hash,
+            key: KeyEnvelope {
+                wrap_nonce: setup.wrap_nonce,
+                wrapped_key: setup.wrapped_key,
+            },
+        };
+        let encoded_hash = general_purpose::STANDARD.encode(old_hash);
+        let response = do_xhr_post_headers(
+            &format!("{}/api/paste/{}/password", BASE_URL, current_id),
+            bitcode::encode(&request),
+            vec![("X-Password-Hash".to_string(), encoded_hash)],
+            |_, _| {},
+        )
+        .await;
+        match response {
+            Ok(r) if r.status >= 200 && r.status < 300 => Ok(()),
+            Ok(r) if r.status == 401 => Err(t!("error-change-password-expired").to_string()),
+            Ok(r) => {
+                Err(t!("error-change-password-failed", status: r.status.to_string()).to_string())
+            }
+            Err(e) => Err(t!("error-change-password-failed", status: e).to_string()),
+        }
+    }
+    .await;
+    busy.set(false);
+    match result {
+        Ok(()) => {
+            new_password_input.set(String::new());
+            confirm_password_input.set(String::new());
+            popup_ctx
+                .write()
+                .show_success(t!("change-password-success"));
+        }
+        Err(e) => popup_ctx.write().show_error(e),
     }
 }
 

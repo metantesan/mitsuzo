@@ -19,3 +19,8 @@ script = []
 # Javascript code file
 # serve: [dev-server] only
 script = []
+
+# Forward /api requests to the backend during `dx serve` so the frontend
+# can use same-origin relative URLs in development.
+[web.proxy]
+backend = "http://localhost:3030"

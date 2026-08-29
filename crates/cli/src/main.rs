@@ -2,12 +2,13 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use colored::*;
 use mitsuzo_types::{
-    CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, DataType, GetSaltResponse, InitPasteResponse,
-    UPLOAD_CHUNK_SIZE,
+    CHUNK_SIZE, ChangePasswordRequest, ChunkInfoResponse, CreatePasteHeader, DataType,
+    GetSaltResponse, InitPasteResponse, KeyEnvelope, UPLOAD_CHUNK_SIZE,
 };
 use mitsuzo_utils::{
     compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_keys,
-    encrypt_chunk_into, encrypt_setup, get_chunk_bounds, get_plaintext_size,
+    encrypt_chunk_into, encrypt_setup, generate_content_key, get_chunk_bounds, get_plaintext_size,
+    unwrap_content_key,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -53,6 +54,9 @@ enum Commands {
         id: String,
         #[arg(short, long)]
         output: Option<String>,
+    },
+    Passwd {
+        id: String,
     },
 }
 
@@ -181,19 +185,22 @@ async fn main() -> eyre::Result<()> {
                 total_enc_chunks
             );
 
-            let setup = encrypt_setup(&password)
-                .map_err(|e| eyre::eyre!("Encryption setup failed: {}", e))?;
-            let (salt, nonce, mut encryption_key, password_hash) = (
-                setup.salt,
-                setup.base_nonce,
-                setup.encryption_key,
-                setup.password_hash,
+            let content_key = Zeroizing::new(
+                generate_content_key().map_err(|e| eyre::eyre!("Key generation failed: {}", e))?,
             );
+            let setup = encrypt_setup(&password, &content_key)
+                .map_err(|e| eyre::eyre!("Encryption setup failed: {}", e))?;
+            let (salt, nonce, password_hash) = (setup.salt, setup.base_nonce, setup.password_hash);
+            let key_envelope = KeyEnvelope {
+                wrap_nonce: setup.wrap_nonce,
+                wrapped_key: setup.wrapped_key,
+            };
 
             let mut header = CreatePasteHeader {
                 nonce,
                 salt,
                 password_hash,
+                key: key_envelope,
                 try_count: Some(*try_count),
                 ttl_seconds: Some(*ttl),
                 data_type,
@@ -206,7 +213,7 @@ async fn main() -> eyre::Result<()> {
             };
 
             if *burn_after_read {
-                header.burn_receipt_hash = compute_burn_receipt(&encryption_key);
+                header.burn_receipt_hash = compute_burn_receipt(&content_key);
             }
 
             let header_bytes = bitcode::encode(&header);
@@ -227,7 +234,7 @@ async fn main() -> eyre::Result<()> {
                     if sc >= ec {
                         continue;
                     }
-                    let k = encryption_key;
+                    let k = *content_key;
                     let nce = nonce;
                     let data = &content;
                     let done = &done;
@@ -258,7 +265,7 @@ async fn main() -> eyre::Result<()> {
             let mut results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
             results.sort_by_key(|(t, _)| *t);
             let ciphertext: Vec<u8> = results.into_iter().flat_map(|(_, buf)| buf).collect();
-            encryption_key.zeroize();
+            drop(content_key);
             pb.finish_and_clear();
 
             let init_response = client
@@ -413,7 +420,7 @@ async fn main() -> eyre::Result<()> {
                 indicatif::HumanBytes(enc_bytes as u64),
             );
 
-            let (_encryption_key, mut vk) = derive_keys(&password, &meta.salt)
+            let (derived_key, mut vk) = derive_keys(&password, &meta.salt)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             let mut ph = compute_password_hash(&vk, &meta.salt);
             let auth = base64::engine::general_purpose::STANDARD.encode(ph);
@@ -492,8 +499,16 @@ async fn main() -> eyre::Result<()> {
 
             let encrypted = Arc::try_unwrap(buf).unwrap().into_inner().unwrap();
 
-            let (mut ek, _) = derive_keys(&password, &meta.salt)
-                .map_err(|e| eyre::eyre!("Key derivation failed: {}", e))?;
+            // Envelope pastes: unwrap the random content key with the
+            // password-derived KEK. Legacy pastes: the derived key IS the
+            // content key.
+            let mut ek = match &meta.key {
+                Some(envelope) => {
+                    unwrap_content_key(&envelope.wrapped_key, &envelope.wrap_nonce, &derived_key)
+                        .map_err(|e| eyre::eyre!("Key unwrap failed: {}", e))?
+                }
+                None => derived_key,
+            };
 
             // Send burn receipt if paste is burn-after-read
             if meta.burn_after_read {
@@ -602,6 +617,99 @@ async fn main() -> eyre::Result<()> {
                         io::stdout().write_all(&decrypted)?;
                     }
                 }
+            }
+        }
+        Commands::Passwd { id } => {
+            let current_password = Zeroizing::new(rpassword::prompt_password(format!(
+                "{} ",
+                "Current password:".cyan().bold()
+            ))?);
+            let new_password = Zeroizing::new(rpassword::prompt_password(format!(
+                "{} ",
+                "New password:".cyan().bold()
+            ))?);
+            let new_password_confirm = Zeroizing::new(rpassword::prompt_password(format!(
+                "{} ",
+                "Confirm new password:".cyan().bold()
+            ))?);
+
+            if new_password.is_empty() {
+                eprintln!("{} New password cannot be empty.", "Error:".red().bold());
+                return Ok(());
+            }
+            if new_password != new_password_confirm {
+                eprintln!("{} Passwords do not match.", "Error:".red().bold());
+                return Ok(());
+            }
+
+            let salt_resp = client
+                .get(format!("{}/api/paste/{}/salt", base_url, id))
+                .send()
+                .await?;
+
+            if !salt_resp.status().is_success() {
+                eprintln!(
+                    "{} Failed to get paste metadata: {}",
+                    "Error:".red().bold(),
+                    salt_resp.status()
+                );
+                return Ok(());
+            }
+            let meta: GetSaltResponse = bitcode::decode(&salt_resp.bytes().await?)?;
+
+            eprintln!("{} Deriving keys (Argon2id)...", "·".bright_black());
+
+            let (derived_key, mut vk) = derive_keys(&current_password, &meta.salt)
+                .map_err(|e| eyre::eyre!("Key derivation failed: {}", e))?;
+            let mut ph = compute_password_hash(&vk, &meta.salt);
+            let auth = base64::engine::general_purpose::STANDARD.encode(ph);
+            ph.zeroize();
+            vk.zeroize();
+
+            // Content key: unwrap for envelope pastes. For legacy pastes the
+            // derived key IS the content key — changing the password here
+            // upgrades the paste to envelope encryption.
+            let content_key = Zeroizing::new(match &meta.key {
+                Some(envelope) => {
+                    unwrap_content_key(&envelope.wrapped_key, &envelope.wrap_nonce, &derived_key)
+                        .map_err(|e| eyre::eyre!("Wrong password: {}", e))?
+                }
+                None => derived_key,
+            });
+
+            let new_setup = encrypt_setup(&new_password, &content_key)
+                .map_err(|e| eyre::eyre!("Encryption setup failed: {}", e))?;
+
+            let request = ChangePasswordRequest {
+                salt: new_setup.salt,
+                password_hash: new_setup.password_hash,
+                key: KeyEnvelope {
+                    wrap_nonce: new_setup.wrap_nonce,
+                    wrapped_key: new_setup.wrapped_key,
+                },
+            };
+
+            let resp = client
+                .post(format!("{}/api/paste/{}/password", base_url, id))
+                .header("X-Password-Hash", auth)
+                .body(bitcode::encode(&request))
+                .send()
+                .await?;
+
+            if resp.status().is_success() {
+                println!(
+                    "{} Password changed for paste {} — content was not re-encrypted",
+                    "✓".green().bold(),
+                    id.yellow().bold()
+                );
+            } else if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                eprintln!("{} Wrong password.", "Error:".red().bold());
+            } else {
+                eprintln!(
+                    "{} Failed to change password: {}",
+                    "Error:".red().bold(),
+                    resp.status()
+                );
             }
         }
     }

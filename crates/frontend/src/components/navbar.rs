@@ -27,13 +27,9 @@ pub fn Navbar() -> Element {
         "px-3 py-1.5 text-sm font-medium relative transition-colors after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:h-0.5 after:bg-accent after:transition-all duration-200 {}",
         link_classes(current_route == Route::Home {})
     );
-    let how_cls = format!(
+    let docs_cls = format!(
         "px-3 py-1.5 text-sm font-medium relative transition-colors after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:h-0.5 after:bg-accent after:transition-all duration-200 {}",
-        link_classes(current_route == Route::HowItWorks {})
-    );
-    let changelog_cls = format!(
-        "px-3 py-1.5 text-sm font-medium relative transition-colors after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:h-0.5 after:bg-accent after:transition-all duration-200 {}",
-        link_classes(current_route == Route::Changelog {})
+        link_classes(current_route == Route::Docs {})
     );
 
     let en_active = current_lang == langid!("en-US");
@@ -72,14 +68,9 @@ pub fn Navbar() -> Element {
                         {t!("nav-home")}
                     }
                     Link {
-                        to: Route::HowItWorks {},
-                        class: "{how_cls}",
-                        {t!("nav-how-it-works")}
-                    }
-                    Link {
-                        to: Route::Changelog {},
-                        class: "{changelog_cls}",
-                        {t!("nav-changelog")}
+                        to: Route::Docs {},
+                        class: "{docs_cls}",
+                        {t!("nav-docs")}
                     }
                     a {
                         href: GITHUB_RELEASES,
@@ -156,16 +147,10 @@ pub fn Navbar() -> Element {
                         {t!("nav-home")}
                     }
                     Link {
-                        to: Route::HowItWorks {},
+                        to: Route::Docs {},
                         class: "text-sm font-medium text-text-secondary hover:text-accent transition-colors",
                         onclick: move |_| menu_open.set(false),
-                        {t!("nav-how-it-works")}
-                    }
-                    Link {
-                        to: Route::Changelog {},
-                        class: "text-sm font-medium text-text-secondary hover:text-accent transition-colors",
-                        onclick: move |_| menu_open.set(false),
-                        {t!("nav-changelog")}
+                        {t!("nav-docs")}
                     }
                     a {
                         href: GITHUB_RELEASES,

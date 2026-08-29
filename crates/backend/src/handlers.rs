@@ -9,8 +9,8 @@ use base64::{Engine as _, engine::general_purpose};
 use bitcode::{decode, encode};
 use futures::stream::{self, StreamExt};
 use mitsuzo_types::{
-    CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, GetPasteHeader, GetSaltResponse,
-    GetStatsResponse, InitPasteResponse, UPLOAD_CHUNK_SIZE,
+    CHUNK_SIZE, ChangePasswordRequest, ChunkInfoResponse, CreatePasteHeader, GetPasteHeader,
+    GetSaltResponse, GetStatsResponse, InitPasteResponse, UPLOAD_CHUNK_SIZE,
 };
 use mitsuzo_utils::{get_ciphertext_size, get_plaintext_size};
 use rand::RngExt;
@@ -277,6 +277,7 @@ pub async fn get_salt(
             total_chunks: meta.total_chunks,
             total_size,
             nonce: nonce_arr,
+            key: state.db.get_key(&id),
             data_type: meta.data_type,
             filename: meta.filename,
             content_type: meta.content_type,
@@ -444,6 +445,39 @@ pub async fn get_paste_data(
         .header(header::CONTENT_LENGTH, file_len.to_string())
         .body(Body::from_stream(file_stream))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+pub async fn change_password(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(), StatusCode> {
+    validate_id(&id)?;
+
+    let ip = client_ip(&headers);
+    if !state.limiter.check(&format!("passwd:{}", ip), 5, 60).await {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    // Reject like get_salt once the try-count is exhausted.
+    if let Some(meta) = state.db.get_meta(&id)
+        && meta.try_count == 0
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Verifies the OLD password hash; on failure decrements try_count and
+    // counts a failed request, same as the data endpoint.
+    verify_password(&state.db, &id, &headers)?;
+
+    let request: ChangePasswordRequest = decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    state
+        .db
+        .set_password(&id, &request.salt, &request.password_hash, &request.key);
+    info!(id = %id, "paste password changed");
+    Ok(())
 }
 
 fn parse_range(header: &str) -> Option<(u64, u64)> {

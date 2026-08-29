@@ -36,6 +36,7 @@ pub fn api_router(state: AppState) -> Router {
         .route("/paste/{id}/complete", post(handlers::complete_paste))
         .route("/paste/{id}/salt", get(handlers::get_salt))
         .route("/paste/{id}/data", get(handlers::get_paste_data))
+        .route("/paste/{id}/password", post(handlers::change_password))
         .route("/paste/{id}/burn", post(handlers::burn_paste))
         .route("/paste/stats", get(handlers::get_stats))
         .with_state(state)

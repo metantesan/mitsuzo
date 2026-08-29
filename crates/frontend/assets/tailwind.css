@@ -38,6 +38,7 @@
     --radius-lg: 0.5rem;
     --radius-xl: 0.75rem;
     --radius-2xl: 1rem;
+    --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
     --blur-sm: 8px;
     --default-transition-duration: 150ms;
     --default-transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
@@ -53,6 +54,7 @@
     --color-muted: #6a6a80;
     --color-accent: #d4a84a;
     --color-accent-hover: #e0b85a;
+    --color-accent-dim: #a08030;
     --color-danger: #cc5555;
     --color-danger-hover: #dd6666;
     --color-success: #55aa77;
@@ -300,6 +302,9 @@
   .mt-4 {
     margin-top: calc(var(--spacing) * 4);
   }
+  .mt-6 {
+    margin-top: calc(var(--spacing) * 6);
+  }
   .mt-8 {
     margin-top: calc(var(--spacing) * 8);
   }
@@ -345,6 +350,9 @@
   .inline-block {
     display: inline-block;
   }
+  .table {
+    display: table;
+  }
   .h-0\.5 {
     height: calc(var(--spacing) * 0.5);
   }
@@ -374,6 +382,9 @@
   }
   .w-64 {
     width: calc(var(--spacing) * 64);
+  }
+  .w-fit {
+    width: fit-content;
   }
   .w-full {
     width: 100%;
@@ -477,6 +488,13 @@
       margin-block-end: calc(calc(var(--spacing) * 2) * calc(1 - var(--tw-space-y-reverse)));
     }
   }
+  .space-y-3 {
+    :where(& > :not(:last-child)) {
+      --tw-space-y-reverse: 0;
+      margin-block-start: calc(calc(var(--spacing) * 3) * var(--tw-space-y-reverse));
+      margin-block-end: calc(calc(var(--spacing) * 3) * calc(1 - var(--tw-space-y-reverse)));
+    }
+  }
   .overflow-auto {
     overflow: auto;
   }
@@ -541,6 +559,12 @@
   .border-border {
     border-color: var(--color-border);
   }
+  .border-border\/50 {
+    border-color: color-mix(in srgb, #28283e 50%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      border-color: color-mix(in oklab, var(--color-border) 50%, transparent);
+    }
+  }
   .border-danger\/30 {
     border-color: color-mix(in srgb, #cc5555 30%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
@@ -555,6 +579,18 @@
   }
   .bg-accent {
     background-color: var(--color-accent);
+  }
+  .bg-accent-dim\/15 {
+    background-color: color-mix(in srgb, #a08030 15%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-accent-dim) 15%, transparent);
+    }
+  }
+  .bg-accent\/15 {
+    background-color: color-mix(in srgb, #d4a84a 15%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-accent) 15%, transparent);
+    }
   }
   .bg-bg {
     background-color: var(--color-bg);
@@ -584,6 +620,12 @@
     background-color: color-mix(in srgb, #55aa77 10%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
       background-color: color-mix(in oklab, var(--color-success) 10%, transparent);
+    }
+  }
+  .bg-success\/15 {
+    background-color: color-mix(in srgb, #55aa77 15%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-success) 15%, transparent);
     }
   }
   .bg-surface {
@@ -654,6 +696,9 @@
   .py-8 {
     padding-block: calc(var(--spacing) * 8);
   }
+  .pr-4 {
+    padding-right: calc(var(--spacing) * 4);
+  }
   .text-center {
     text-align: center;
   }
@@ -693,9 +738,6 @@
   .text-xs {
     font-size: var(--text-xs);
     line-height: var(--tw-leading, var(--text-xs--line-height));
-  }
-  .text-\[10px\] {
-    font-size: 10px;
   }
   .leading-none {
     --tw-leading: 1;
@@ -737,6 +779,9 @@
   }
   .text-accent {
     color: var(--color-accent);
+  }
+  .text-accent-dim {
+    color: var(--color-accent-dim);
   }
   .text-bg {
     color: var(--color-bg);
@@ -959,9 +1004,34 @@
       outline-style: none;
     }
   }
+  .disabled\:opacity-50 {
+    &:disabled {
+      opacity: 50%;
+    }
+  }
+  .sm\:ml-auto {
+    @media (width >= 40rem) {
+      margin-left: auto;
+    }
+  }
   .sm\:flex-row {
     @media (width >= 40rem) {
       flex-direction: row;
+    }
+  }
+  .sm\:items-center {
+    @media (width >= 40rem) {
+      align-items: center;
+    }
+  }
+  .sm\:gap-3 {
+    @media (width >= 40rem) {
+      gap: calc(var(--spacing) * 3);
+    }
+  }
+  .sm\:text-right {
+    @media (width >= 40rem) {
+      text-align: right;
     }
   }
   .md\:flex {

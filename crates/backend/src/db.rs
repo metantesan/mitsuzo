@@ -93,6 +93,10 @@ impl DataStore {
         let _ = self
             .db
             .insert(format!("salt:{}", id), header.salt.as_slice());
+        let mut key_blob = Vec::with_capacity(60);
+        key_blob.extend_from_slice(&header.key.wrap_nonce);
+        key_blob.extend_from_slice(&header.key.wrapped_key);
+        let _ = self.db.insert(format!("key:{}", id), key_blob.as_slice());
 
         let expiration_timestamp = match header.ttl_seconds {
             Some(ttl) if ttl > 0 => epoch_secs() + u64::from(ttl),
@@ -215,6 +219,50 @@ impl DataStore {
             .map(|v| v.to_vec())
     }
 
+    /// Fetch the password-wrapped content key. `None` for legacy pastes
+    /// created before envelope encryption was introduced.
+    pub fn get_key(&self, id: &str) -> Option<mitsuzo_types::KeyEnvelope> {
+        if self.is_expired(id) {
+            return None;
+        }
+        let blob = self
+            .db
+            .get(format!("key:{}", id))
+            .ok()?
+            .map(|v| v.to_vec())?;
+        if blob.len() != 60 {
+            return None;
+        }
+        let mut wrap_nonce = [0u8; 12];
+        let mut wrapped_key = [0u8; 48];
+        wrap_nonce.copy_from_slice(&blob[..12]);
+        wrapped_key.copy_from_slice(&blob[12..]);
+        Some(mitsuzo_types::KeyEnvelope {
+            wrap_nonce,
+            wrapped_key,
+        })
+    }
+
+    /// Atomically replace password credentials after a password change:
+    /// new salt, new password hash, and the re-wrapped content key.
+    pub fn set_password(
+        &self,
+        id: &str,
+        salt: &[u8; 16],
+        password_hash: &[u8; 32],
+        key: &mitsuzo_types::KeyEnvelope,
+    ) {
+        let mut key_blob = Vec::with_capacity(60);
+        key_blob.extend_from_slice(&key.wrap_nonce);
+        key_blob.extend_from_slice(&key.wrapped_key);
+        let _ = self.db.insert(format!("salt:{}", id), salt.as_slice());
+        let _ = self
+            .db
+            .insert(format!("pass:{}", id), password_hash.as_slice());
+        let _ = self.db.insert(format!("key:{}", id), key_blob.as_slice());
+        let _ = self.db.flush();
+    }
+
     pub fn get_meta(&self, id: &str) -> Option<PasteMeta> {
         match self.db.get(format!("meta:{}", id)) {
             Ok(Some(value)) => decode(&value).ok(),
@@ -257,6 +305,7 @@ impl DataStore {
     fn delete_paste_inner(&self, id: &str) {
         let _ = self.db.remove(format!("pass:{}", id));
         let _ = self.db.remove(format!("salt:{}", id));
+        let _ = self.db.remove(format!("key:{}", id));
         let _ = self.db.remove(format!("meta:{}", id));
         let _ = self.db.remove(format!("crecv:{}", id));
         let _ = self.db.remove(format!("burn:{}", id));

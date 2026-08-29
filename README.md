@@ -5,11 +5,14 @@ Encrypted pastebin with end-to-end encryption.
 ## Features
 
 - **Client-side encryption** — ChaCha20Poly1305 + Argon2id, all in your browser
+- **Envelope encryption** — data is encrypted with a random per-paste content key, wrapped with the password-derived key
+- **Changeable password** — re-wraps only the content key; paste data is never re-encrypted or re-uploaded (web UI and `cli passwd`)
 - **Zero-knowledge password validation** — server never sees your password or plaintext
 - **Chunked encryption** — supports pastes up to 1 GB, 64 KB chunks with unique nonces
 - **Self-destructing pastes** — TTL + try-count limits, auto-deleted on expiry
+- **Burn after reading** — cryptographic receipt proves full decryption before deletion
 - **File upload with preview** — images previewed inline, files downloadable
-- **CLI client** — `create` and `get` commands
+- **CLI client** — `create`, `get`, and `passwd` commands
 - **i18n** — English and Persian
 - **Dark theme**
 
@@ -54,6 +57,7 @@ echo "secret message" | cli create
 cli create --file document.pdf
 cli get 123456
 cli get 123456 --output decrypted.pdf
+cli passwd 123456
 ```
 
 ## Architecture
@@ -64,13 +68,16 @@ crates/
 ├── frontend/    Dioxus WASM app
 ├── cli/         Rust CLI client
 ├── types/       Shared types + bitcode serialization
-└── utils/       Argon2id, ChaCha20Poly1305, HMAC-SHA256
+└── utils/       Argon2id, HKDF-SHA256, ChaCha20Poly1305, HMAC-SHA256
 ```
 
 ## Security
 
-- Argon2id (19MB memory, 2 iterations, 1 parallel) → 64 bytes split into encryption + validation keys
-- ChaCha20Poly1305 authenticated encryption
+- **Envelope encryption**: a random 32-byte content key (CEK) encrypts the data — the password never directly touches your content
+- Argon2id (19 MB memory, 2 iterations, 1 parallel) → 32-byte master key → HKDF-SHA256 expands into a key-encryption key (KEK) + validation key
+- The CEK is wrapped with ChaCha20Poly1305 under the KEK and stored server-side; changing the password unwraps and re-wraps only the CEK — ciphertext is untouched
+- Legacy pastes (pre-envelope) still decrypt via the old direct derived-key path
+- ChaCha20Poly1305 authenticated encryption, 64 KB chunks with unique nonces
 - HMAC-SHA256 for password validation (encryption key never leaves your device)
 - Constant-time comparison against timing attacks
 - No plaintext on server — even full compromise cannot expose data

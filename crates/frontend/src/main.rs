@@ -3,19 +3,21 @@ mod utils;
 mod views;
 use crate::utils::do_xhr_get;
 use crate::views::paste_view as P;
-use crate::views::{
-    app_layout, changelog_view as Changelog, home_view as Home, how_it_works_view as HowItWorks,
-    paste_view as Paste,
-};
+use crate::views::{app_layout, docs_view as Docs, home_view as Home, paste_view as Paste};
 use components::PopupContext;
 use dioxus::prelude::*;
 use dioxus_i18n::prelude::*;
 use mitsuzo_types::GetStatsResponse;
 use unic_langid::langid;
 
+/// API base URL. Empty by default: the backend serves the frontend, so
+/// same-origin relative URLs are used. Set `BASE_URL` at build time
+/// (e.g. `BASE_URL=https://api.example.com dx build --release`) only when
+/// the API runs separately from the frontend — it is baked in at compile
+/// time and cannot be changed at runtime.
 pub const BASE_URL: &str = match option_env!("BASE_URL") {
     Some(url) => url,
-    None => "http://localhost:3030",
+    None => "",
 };
 
 #[derive(Routable, Clone, PartialEq)]
@@ -24,10 +26,8 @@ enum Route {
     #[layout(app_layout)]
     #[route("/")]
     Home {},
-    #[route("/how-it-works")]
-    HowItWorks {},
-    #[route("/changelog")]
-    Changelog {},
+    #[route("/docs")]
+    Docs {},
     #[route("/paste/:id")]
     Paste { id: String },
    #[route("/p/:id")]

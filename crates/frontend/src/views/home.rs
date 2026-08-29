@@ -10,9 +10,11 @@ use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{
     CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, DataType, GetStatsResponse,
-    InitPasteResponse, MAX_PASTE_SIZE, UPLOAD_CHUNK_SIZE,
+    InitPasteResponse, KeyEnvelope, MAX_PASTE_SIZE, UPLOAD_CHUNK_SIZE,
 };
-use mitsuzo_utils::{compute_burn_receipt, encrypt_chunk_into, encrypt_setup};
+use mitsuzo_utils::{
+    compute_burn_receipt, encrypt_chunk_into, encrypt_setup, generate_content_key,
+};
 use wasm_bindgen::JsCast;
 use web_sys;
 
@@ -250,7 +252,17 @@ pub fn home_view() -> Element {
                     text_fallback = Some(text_content.into_bytes());
                 }
 
-                let setup = match encrypt_setup(&password) {
+                let content_key = match generate_content_key() {
+                    Ok(k) => k,
+                    Err(e) => {
+                        popup_ctx
+                            .write()
+                            .show_error(t!("error-encryption-failed", error: e.to_string()));
+                        progress.set(None);
+                        return;
+                    }
+                };
+                let setup = match encrypt_setup(&password, &content_key) {
                     Ok(data) => data,
                     Err(e) => {
                         popup_ctx
@@ -262,7 +274,7 @@ pub fn home_view() -> Element {
                 };
                 let salt_bytes = setup.salt;
                 let nonce_bytes = setup.base_nonce;
-                let encryption_key = setup.encryption_key;
+                let encryption_key = content_key;
                 let password_hash = setup.password_hash;
 
                 let total_chunks = if file_size_for_chunks == 0 {
@@ -275,6 +287,10 @@ pub fn home_view() -> Element {
                     nonce: nonce_bytes,
                     salt: salt_bytes,
                     password_hash,
+                    key: KeyEnvelope {
+                        wrap_nonce: setup.wrap_nonce,
+                        wrapped_key: setup.wrapped_key,
+                    },
                     try_count,
                     ttl_seconds: ttl_seconds_option,
                     data_type,
