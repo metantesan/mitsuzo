@@ -710,6 +710,33 @@ pub fn home_view() -> Element {
                 {t!("app-title")}
             }
 
+            p {
+                class: "w-full max-w-xl text-center text-xl leading-relaxed text-text mb-3",
+                {t!("home-tagline")}
+            }
+            p {
+                class: "w-full max-w-xl text-center text-sm leading-relaxed text-text-secondary mb-6",
+                {t!("home-intro")}
+            }
+            div {
+                class: "w-full max-w-xl grid grid-cols-3 gap-2 mb-8 text-center",
+                div {
+                    class: "px-2 py-3 border-y border-border",
+                    p { class: "text-accent font-semibold text-sm", {t!("feature-encrypted")} }
+                    p { class: "text-xs text-muted mt-1", {t!("feature-encrypted-detail")} }
+                }
+                div {
+                    class: "px-2 py-3 border-y border-border",
+                    p { class: "text-accent font-semibold text-sm", {t!("feature-expiring")} }
+                    p { class: "text-xs text-muted mt-1", {t!("feature-expiring-detail")} }
+                }
+                div {
+                    class: "px-2 py-3 border-y border-border",
+                    p { class: "text-accent font-semibold text-sm", {t!("feature-self-hosted")} }
+                    p { class: "text-xs text-muted mt-1", {t!("feature-self-hosted-detail")} }
+                }
+            }
+
             if demo_mode {
                 div {
                     class: "w-full max-w-xl mb-6 p-4 bg-surface border border-accent rounded-lg text-center",
