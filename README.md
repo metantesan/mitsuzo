@@ -31,6 +31,16 @@ control.
 3. Choose an expiry, try limit, or burn-after-reading so the handoff does not
    become permanent storage.
 
+### Two ways to share
+
+**Password mode** is the fast path: no account is needed. Choose a password,
+send the link, and the recipient enters that password to decrypt the paste.
+
+**Recipient mode** is for a known person. The sender encrypts the paste to the
+recipient's public account key, so only that recipient can decrypt it. The
+account is an encryption identity, not a general sign-up requirement for using
+Mitsuzo.
+
 ### What the server sees
 
 | Stored by the server | Kept on your device |
