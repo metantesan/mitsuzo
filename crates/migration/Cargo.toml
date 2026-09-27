@@ -1,0 +1,16 @@
+[package]
+name = "mitsuzo-migration"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
+tokio.workspace = true
