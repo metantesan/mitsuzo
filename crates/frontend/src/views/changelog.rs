@@ -14,6 +14,20 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.12.5",
+            date: "2026-09-27",
+            items_en: vec![
+                "Sharpened the homepage and README around Mitsuzo's core promise: send it once and keep the plaintext yours",
+                "Added a clearer 30-second usage flow, server-visibility table, and practical sharing use cases",
+                "Improved English and Persian hero copy plus search and social descriptions",
+            ],
+            items_fa: vec![
+                "بازنویسی صفحه اصلی و README حول پیام اصلی Mitsuzo: یک‌بار بفرستید و متن اصلی برای خودتان بماند",
+                "افزودن روند استفاده ۳۰ ثانیه‌ای، جدول دید سرور و کاربردهای واقعی اشتراک‌گذاری",
+                "بهبود متن hero انگلیسی و فارسی و توضیحات جست‌وجو و شبکه‌های اجتماعی",
+            ],
+        },
+        Change {
             version: "v0.12.4",
             date: "2026-09-27",
             items_en: vec![
