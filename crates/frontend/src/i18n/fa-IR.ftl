@@ -118,6 +118,7 @@ account-password-mismatch = رمزهای عبور یکسان نیستند.
 account-backup-required = ابتدا باید تأیید کنید که عبارت بازیابی را نسخه پشتیبان گرفته‌اید.
 account-logged-in = وارد شده
 account-logout = خروج
+account-lock = قفل کردن
 account-name-label = نام نمایشی
 account-kid-label = شناسه حساب
 account-pubkey-label = کلید عمومی

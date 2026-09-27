@@ -95,6 +95,12 @@ fn save_persisted(account: &PersistedAccount) {
     }
 }
 
+pub fn clear_persisted_account() {
+    if let Some(s) = storage() {
+        let _ = s.delete(ACCOUNT_STORAGE_KEY);
+    }
+}
+
 pub fn use_account() -> Signal<Option<AccountSession>> {
     use_context::<Signal<Option<AccountSession>>>()
 }
@@ -347,7 +353,6 @@ enum RegState {
         mnemonic: String,
         scalar: [u8; 32],
         pubkey: [u8; 32],
-        kid: [u8; 32],
     },
 }
 
@@ -369,6 +374,8 @@ pub fn account_view() -> Element {
     let inbox_loading = use_signal(|| false);
     let inbox: Signal<Option<Vec<PasteInboxListing>>> = use_signal(|| None);
     let inbox_loaded = use_signal(|| false);
+    let recipient_target = use_recipient_target();
+    let recipient_ephemerals = use_recipient_ephemerals();
 
     let existing = persisted_account();
 
@@ -409,7 +416,6 @@ pub fn account_view() -> Element {
                         mnemonic: phrase,
                         scalar: material.scalar,
                         pubkey: material.pubkey,
-                        kid: material.kid,
                     });
                     Ok(())
                 }
@@ -437,7 +443,7 @@ pub fn account_view() -> Element {
                 mnemonic: _,
                 scalar,
                 pubkey,
-                kid,
+                ..
             } = reg.read().clone()
             else {
                 return;
@@ -453,21 +459,25 @@ pub fn account_view() -> Element {
             busy.set(true);
             let mut popup_ctx = popup_ctx;
             spawn(async move {
-                let mut prefix = [0u8; 20];
-                prefix.copy_from_slice(&kid[..20]);
-                let session = AccountSession {
-                    scalar,
-                    kid,
-                    kid_prefix: prefix,
-                    pubkey,
-                    name: name.clone(),
-                };
                 // Persist the encrypted blob locally first...
                 if let Err(e) = persist_account(&name, &scalar, &pubkey, &password) {
                     popup_ctx.write().show_error(e);
                     busy.set(false);
                     return;
                 }
+                // Re-open the just-persisted blob instead of retaining the
+                // pre-persistence scalar. This keeps the in-memory session
+                // identical to the account key that survives a refresh and
+                // avoids recipient-mode ECDH failures immediately after
+                // creating a new account.
+                let session = match unlock_local_account(&password) {
+                    Ok(session) => session,
+                    Err(e) => {
+                        popup_ctx.write().show_error(e);
+                        busy.set(false);
+                        return;
+                    }
+                };
                 // ...then register on the server.
                 match register_on_server(&session).await {
                     Ok(profile) => {
@@ -621,8 +631,36 @@ pub fn account_view() -> Element {
 
     let logout_action = {
         let mut account = account;
+        let mut recipient_target = recipient_target;
+        let mut recipient_ephemerals = recipient_ephemerals;
+        let mut unlock_password = unlock_password;
+        let mut password_input = password_input;
+        let mut confirm_input = confirm_input;
         move |_| {
             account.set(None);
+            recipient_target.set(None);
+            recipient_ephemerals.set(Vec::new());
+            clear_persisted_account();
+            unlock_password.set(String::new());
+            password_input.set(String::new());
+            confirm_input.set(String::new());
+        }
+    };
+
+    let lock_action = {
+        let mut account = account;
+        let mut recipient_target = recipient_target;
+        let mut recipient_ephemerals = recipient_ephemerals;
+        let mut unlock_password = unlock_password;
+        let mut password_input = password_input;
+        let mut confirm_input = confirm_input;
+        move |_| {
+            account.set(None);
+            recipient_target.set(None);
+            recipient_ephemerals.set(Vec::new());
+            unlock_password.set(String::new());
+            password_input.set(String::new());
+            confirm_input.set(String::new());
         }
     };
 
@@ -712,10 +750,18 @@ pub fn account_view() -> Element {
                                 class: "text-xl font-semibold",
                                 {t!("account-logged-in")}
                             }
-                            button {
-                                class: "px-3 py-1.5 text-sm bg-elevated text-text hover:text-danger rounded transition-colors",
-                                onclick: logout_action,
-                                {t!("account-logout")}
+                            div {
+                                class: "flex gap-2",
+                                button {
+                                    class: "px-3 py-1.5 text-sm bg-elevated text-text hover:text-accent rounded transition-colors",
+                                    onclick: lock_action,
+                                    {t!("account-lock")}
+                                }
+                                button {
+                                    class: "px-3 py-1.5 text-sm bg-elevated text-text hover:text-danger rounded transition-colors",
+                                    onclick: logout_action,
+                                    {t!("account-logout")}
+                                }
                             }
                         }
                         div {

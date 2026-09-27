@@ -14,6 +14,18 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.12.10",
+            date: "2026-09-27",
+            items_en: vec![
+                "Fixed newly-created accounts using a stale in-memory key after registration by reloading the persisted account blob",
+                "Logout now removes the encrypted account blob and all account-related in-memory state",
+            ],
+            items_fa: vec![
+                "رفع استفاده از کلید قدیمی در memory پس از ساخت account با بارگذاری دوباره blob ذخیره‌شده",
+                "logout اکنون blob رمز‌شده و تمام stateهای مرتبط با account را از حافظه و localStorage حذف می‌کند",
+            ],
+        },
+        Change {
             version: "v0.12.9",
             date: "2026-09-27",
             items_en: vec![

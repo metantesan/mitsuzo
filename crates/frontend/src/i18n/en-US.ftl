@@ -118,6 +118,7 @@ account-password-mismatch = Passwords do not match.
 account-backup-required = You must confirm you backed up the seed phrase first.
 account-logged-in = Logged in
 account-logout = Log out
+account-lock = Lock
 account-name-label = Display name
 account-kid-label = Account id
 account-pubkey-label = Public key
