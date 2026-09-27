@@ -82,6 +82,14 @@ pub async fn robots_txt(headers: HeaderMap) -> Result<Response, StatusCode> {
     Ok(static_response(&headers, content, "text/plain"))
 }
 
+pub async fn install_script(headers: HeaderMap) -> Result<Response, StatusCode> {
+    Ok(static_response(
+        &headers,
+        public_file("install.sh")?,
+        "text/plain; charset=utf-8",
+    ))
+}
+
 fn validate_id(id: &str) -> Result<(), StatusCode> {
     id.chars()
         .all(|c| c.is_ascii_digit())

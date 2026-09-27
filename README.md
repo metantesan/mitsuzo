@@ -56,16 +56,17 @@ Release binaries are published for Linux, macOS, and Windows on the
 
 ### Install a pre-built binary
 
-For Linux x86_64:
+For Linux, macOS, and other Unix-like systems, use the installer:
 
 ```bash
-curl -L https://github.com/metantesan/mitsuzo/releases/latest/download/mitsuzo-x86_64-unknown-linux-gnu.zip -o mitsuzo.zip
-unzip mitsuzo.zip
-mkdir -p ~/.local/bin
-install -m 0755 mitsuzo ~/.local/bin/mitsuzo
+curl -fsSL https://mitsuzo.metantesan.com/install.sh -o /tmp/mitsuzo-install.sh
+sh /tmp/mitsuzo-install.sh
 ```
 
-The release page also includes builds for Linux ARM64, macOS Intel,
+The installer detects your platform, downloads the matching release, verifies
+`checksums.txt`, and installs to `~/.local/bin`. Set
+`MITSUZO_INSTALL_DIR=/usr/local/bin` if you want a different destination and
+have permission to write there. The release page also includes builds for Linux ARM64,
 macOS Apple Silicon, Windows x86_64, and Windows ARM64. Every release includes
 `checksums.txt` for verification.
 

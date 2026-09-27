@@ -63,6 +63,7 @@ pub fn app_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(handlers::serve_index))
         .route("/robots.txt", get(handlers::robots_txt))
+        .route("/install.sh", get(handlers::install_script))
         .nest("/api", api_router(state))
         .nest_service("/assets", ServeDir::new(assets_path))
         .fallback(get(handlers::fallback_to_index))

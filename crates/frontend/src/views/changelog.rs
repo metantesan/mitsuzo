@@ -14,6 +14,30 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.12.2",
+            date: "2026-09-27",
+            items_en: vec![
+                "Fixed SeaORM startup runtime nesting so the migrated storage layer initializes reliably in the backend",
+                "Published the v0.12.2 Docker and CLI release artifacts",
+            ],
+            items_fa: vec![
+                "رفع تو در تو شدن runtime در زمان راه‌اندازی SeaORM تا لایه ذخیره‌سازی مهاجرت‌یافته به‌صورت پایدار در backend راه‌اندازی شود",
+                "انتشار artifactهای Docker و CLI برای نسخه v0.12.2",
+            ],
+        },
+        Change {
+            version: "v0.12.1",
+            date: "2026-09-27",
+            items_en: vec![
+                "Added a separate rate limit for upload chunks to reduce bandwidth and storage abuse on public demo deployments",
+                "Bumped the workspace version to v0.12.1 and published the release",
+            ],
+            items_fa: vec![
+                "افزودن محدودیت نرخ جداگانه برای تکه‌های آپلود جهت کاهش سوءاستفاده از پهنای باند و فضای ذخیره‌سازی در دموهای عمومی",
+                "ارتقای نسخه workspace به v0.12.1 و انتشار release",
+            ],
+        },
+        Change {
             version: "v0.10.1",
             date: "2026-08",
             items_en: vec![
