@@ -14,6 +14,22 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.12.4",
+            date: "2026-09-27",
+            items_en: vec![
+                "Upgraded SeaORM and SeaORM Migration to 2.0.3",
+                "Upgraded Orion to 0.18 and migrated the ChaCha20-Poly1305 API without changing the ciphertext format",
+                "Refreshed Dependabot dependencies and patched vulnerable transitive crates",
+                "Made the Rust dependency audit report successfully in GitHub Actions",
+            ],
+            items_fa: vec![
+                "ارتقای SeaORM و SeaORM Migration به نسخه ۲.۰.۳",
+                "ارتقای Orion به نسخه ۰.۱۸ و مهاجرت API رمزنگاری ChaCha20-Poly1305 بدون تغییر فرمت ciphertext",
+                "به‌روزرسانی وابستگی‌های Dependabot و رفع آسیب‌پذیری‌های وابستگی‌های غیرمستقیم",
+                "اصلاح گزارش‌دهی audit وابستگی‌های Rust در GitHub Actions",
+            ],
+        },
+        Change {
             version: "v0.12.3",
             date: "2026-09-27",
             items_en: vec![
