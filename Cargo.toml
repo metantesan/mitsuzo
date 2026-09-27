@@ -21,13 +21,13 @@ mitsuzo-types = { path = "crates/types" }
 mitsuzo-utils = { path = "crates/utils" }
 cli = { path = "crates/cli" }
 
-argon2 = "0.5.3"
+argon2 = "0.6"
 sha2 = "0.11.0"
-base64 = "0.22.1"
+base64 = "0.23"
 bitcode = { version = "0.6.7", features = ["serde"] }
-orion = "0.17"
+orion = "0.18"
 getrandom = { version = "0.4", features = ["wasm_js"] }
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dioxus = { version = "0.7", features = ["router", "web"] }
 log = "0.4"
@@ -57,19 +57,19 @@ dioxus-i18n = "0.5"
 unic-langid = { version = "0.9", features = ["macros"] }
 
 clap = { version = "4", features = ["derive"] }
-dirs = "6.0.0"
+dirs = "7.0.0"
 reqwest = "0.13"
 rpassword = "7.5.4"
 serde_yaml = "0.9.34"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-rand = "0.10.1"
+rand = "0.10"
 axum = "0.8"
 tower-http = { version = "0.7", features = ["cors", "fs"] }
 sled = "0.34.7"
-sea-orm = { version = "1.1", default-features = false, features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
-sea-orm-migration = { version = "1.1", default-features = false, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+sea-orm = { version = "2", default-features = false, features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
+sea-orm-migration = { version = "2", default-features = false, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 async-trait = "0.1"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 eyre = "0.6"
