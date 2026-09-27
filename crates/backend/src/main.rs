@@ -14,7 +14,7 @@ async fn main() -> eyre::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
         .init();
 
-    let db = DataStore::new()?;
+    let db = DataStore::new().await?;
     let limiter = RateLimiter::new();
     let config = RuntimeConfig::from_env();
     if config.demo_mode {

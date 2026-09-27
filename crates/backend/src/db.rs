@@ -76,24 +76,19 @@ pub struct DataStore {
 }
 
 impl DataStore {
-    pub fn new() -> eyre::Result<Self> {
+    pub async fn new() -> eyre::Result<Self> {
         let database_dir = Path::new("database");
         std::fs::create_dir_all(database_dir).wrap_err("Failed to create database directory")?;
         let sqlite_path = database_dir.join("mitsuzo.sqlite");
         let sqlite_url = format!("sqlite://{}?mode=rwc", sqlite_path.display());
-        let migration_runtime =
-            tokio::runtime::Runtime::new().wrap_err("Failed to create SQLite migration runtime")?;
-        migration_runtime.block_on(async {
-            let mut options = ConnectOptions::new(sqlite_url);
-            options.sqlx_logging(false);
-            let connection = Database::connect(options)
-                .await
-                .wrap_err("Failed to connect to SQLite")?;
-            mitsuzo_migration::Migrator::up(&connection, None)
-                .await
-                .wrap_err("Failed to apply SeaORM migrations")?;
-            Ok::<_, eyre::Report>(())
-        })?;
+        let mut options = ConnectOptions::new(sqlite_url);
+        options.sqlx_logging(false);
+        let connection = Database::connect(options)
+            .await
+            .wrap_err("Failed to connect to SQLite")?;
+        mitsuzo_migration::Migrator::up(&connection, None)
+            .await
+            .wrap_err("Failed to apply SeaORM migrations")?;
         info!(path = %sqlite_path.display(), "SeaORM SQLite migrations applied");
 
         let db =
