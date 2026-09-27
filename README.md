@@ -11,6 +11,8 @@ in the browser or CLI before anything is uploaded.
 [![Docker image](https://img.shields.io/badge/docker-ghcr.io%2Fmetantesan%2Fmitsuzo-blue)](https://github.com/metantesan/mitsuzo/pkgs/container/mitsuzo)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-green)](LICENSE)
 
+[Live demo](https://mitsuzo.metantesan.com) · [Documentation](https://mitsuzo.metantesan.com/docs) · [Releases](https://github.com/metantesan/mitsuzo/releases)
+
 ## Why Mitsuzo?
 
 Regular pastebins and chat messages are convenient, but the service can often
@@ -35,8 +37,9 @@ minimum state needed to enforce expiry and access limits.
 docker run --rm -p 3030:3030 ghcr.io/metantesan/mitsuzo:latest
 ```
 
-Open <http://localhost:3030> and create a paste. For a safe, short-lived demo
-deployment, use the restricted demo mode:
+Open <http://localhost:3030> and create a paste. You can also try the
+[public live demo](https://mitsuzo.metantesan.com). For a safe, short-lived
+self-hosted demo deployment, use the restricted demo mode:
 
 ```bash
 docker run --rm -p 3030:3030 \

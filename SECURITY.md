@@ -2,7 +2,7 @@
 
 Mitsuzo is designed so that the server does not receive paste plaintext or
 user passwords. That reduces the impact of a server compromise, but it does
-not make the project or its deployment automatically secure.
+not make every deployment or client device automatically secure.
 
 ## Reporting a vulnerability
 
@@ -14,13 +14,12 @@ privately at `me@metantesan.com` with:
 - clear reproduction steps or a proof of concept;
 - any suggested mitigation.
 
-You will receive an acknowledgement as soon as practical. Please allow time
-for investigation and a fix before publicly disclosing the issue.
+Please allow time for investigation and a fix before public disclosure.
 
-## Scope and limitations
+## Deployment guidance
 
-- Always verify that the web application is served over HTTPS.
+- Serve the application over HTTPS.
 - Keep passwords and generated links out of logs, analytics, and screenshots.
-- A self-hosted deployment is responsible for its own backups, access control,
-  TLS configuration, and dependency updates.
+- A self-hosted deployment is responsible for backups, access control, TLS,
+  storage permissions, and dependency updates.
 - Mitsuzo has not undergone an independent third-party security audit yet.
