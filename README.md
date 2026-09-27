@@ -54,12 +54,40 @@ Demo mode caps the TTL at one minute and the upload size at 5 MB.
 Release binaries are published for Linux, macOS, and Windows on the
 [Releases page](https://github.com/metantesan/mitsuzo/releases).
 
+### Install a pre-built binary
+
+For Linux x86_64:
+
+```bash
+curl -L https://github.com/metantesan/mitsuzo/releases/latest/download/mitsuzo-x86_64-unknown-linux-gnu.zip -o mitsuzo.zip
+unzip mitsuzo.zip
+mkdir -p ~/.local/bin
+install -m 0755 mitsuzo ~/.local/bin/mitsuzo
+```
+
+The release page also includes builds for Linux ARM64, macOS Intel,
+macOS Apple Silicon, Windows x86_64, and Windows ARM64. Every release includes
+`checksums.txt` for verification.
+
 ```bash
 echo "secret message" | mitsuzo create
 mitsuzo create --file document.pdf
 mitsuzo get 123456 --output decrypted.pdf
 mitsuzo passwd 123456
 mitsuzo account register --name alice
+```
+
+To use a remote server, pass its URL before the command:
+
+```bash
+mitsuzo --base-url https://mitsuzo.metantesan.com create
+```
+
+You can also save the URL in `config.yml` under your platform's config
+directory:
+
+```yaml
+base_url: https://mitsuzo.metantesan.com
 ```
 
 ## How the security model works
