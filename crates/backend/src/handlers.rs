@@ -279,9 +279,21 @@ pub async fn init_paste(
 pub async fn upload_chunk(
     State(state): State<AppState>,
     Path((id, chunk_index)): Path<(String, u32)>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<(), StatusCode> {
     validate_id(&id)?;
+    // Uploads are separately rate-limited because a client can otherwise
+    // initialize a small number of pastes and use unlimited chunk requests
+    // to consume bandwidth/storage on a public demo.
+    let ip = client_ip(&headers);
+    if !state
+        .limiter
+        .check(&format!("upload:{}", ip), 180, 60)
+        .await
+    {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     if body.len() > UPLOAD_CHUNK_SIZE {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
