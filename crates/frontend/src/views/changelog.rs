@@ -14,6 +14,20 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.12.8",
+            date: "2026-09-27",
+            items_en: vec![
+                "Added a transactional, idempotent startup import for legacy Sled data into the SeaORM schema",
+                "Migrated paste metadata, credentials, recipient envelopes, chunks, accounts, inbox listings, and statistics for storage compatibility",
+                "Kept legacy data intact when migration fails so the import can be retried safely",
+            ],
+            items_fa: vec![
+                "افزودن import تراکنشی و idempotent هنگام راه‌اندازی برای انتقال داده‌های قدیمی Sled به schema مبتنی بر SeaORM",
+                "انتقال metadata مربوط به Paste، credentialها، envelopeهای گیرنده، chunkها، accountها، inbox و آمار برای سازگاری ذخیره‌سازی",
+                "حفظ داده‌های قدیمی در صورت خطای migration تا امکان تلاش مجدد امن وجود داشته باشد",
+            ],
+        },
+        Change {
             version: "v0.12.7",
             date: "2026-09-27",
             items_en: vec![
