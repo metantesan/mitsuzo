@@ -14,6 +14,22 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.12.3",
+            date: "2026-09-27",
+            items_en: vec![
+                "Added a verified CLI installer at /install.sh with platform detection and SHA-256 checksum validation",
+                "Added a public installer endpoint so the live demo can provide the CLI directly",
+                "Documented one-command CLI installation and remote-server configuration",
+                "CLI releases now target Linux x86_64/ARM64, macOS Apple Silicon, and Windows x86_64/ARM64",
+            ],
+            items_fa: vec![
+                "افزودن installer تأییدشده CLI در /install.sh با تشخیص پلتفرم و اعتبارسنجی checksum با SHA-256",
+                "افزودن endpoint عمومی installer تا دمو بتواند CLI را مستقیماً ارائه کند",
+                "مستندسازی نصب یک‌دستوری CLI و پیکربندی سرور راه دور",
+                "انتشار CLI برای Linux x86_64/ARM64، macOS Apple Silicon و Windows x86_64/ARM64",
+            ],
+        },
+        Change {
             version: "v0.12.2",
             date: "2026-09-27",
             items_en: vec![
