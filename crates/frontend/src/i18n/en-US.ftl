@@ -38,6 +38,11 @@ ttl-custom = Custom
 create-paste = Create Paste
 
 paste-created = Paste created!
+full-link = Full link
+paste-id-label = Paste ID
+passcode-label = Passcode
+qr-code-label = QR code for the paste link
+qr-scan-hint = Scan to open
 paste-id = ID: { $id }
 remember-password = Please remember your password for decryption.
 

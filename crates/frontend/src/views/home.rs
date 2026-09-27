@@ -3,7 +3,7 @@ use crate::Route;
 use crate::account::{
     RecipientEphemeral, RecipientTarget, use_recipient_ephemerals, use_recipient_target,
 };
-use crate::components::PopupContext;
+use crate::components::{PopupContext, QrCode};
 use crate::sanitize_id;
 use crate::utils::{copy_to_clipboard, do_xhr_get, do_xhr_post, do_xhr_put};
 use base64::Engine as _;
@@ -1048,55 +1048,59 @@ pub fn home_view() -> Element {
                 });
                 rsx!{
                     div {
-                        class: "mt-4 p-4 bg-success text-text rounded-lg shadow-md",
+                        class: "mt-4 rounded-lg bg-success p-4 text-text shadow-md",
                         p { class: "font-bold text-lg", {{t!("paste-created")}} }
                         div {
-                            class: "mt-2",
+                            class: "mt-3 flex flex-col gap-4 sm:flex-row sm:items-start",
                             div {
-                                class: "flex justify-between items-center",
-                                p { class: "text-sm text-text-secondary", "Full Link:" }
-                                button {
-                                    class: "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded hover:bg-accent-hover transition-all duration-200",
-                                    onclick: {
-                                        let url = paste_url.clone();
-                                        move |_| {
-                                            if let Err(e) = copy_to_clipboard(&url) {
-                                                popup_ctx.write().show_error(&e);
-                                            } else {
-                                                popup_ctx.write().show_success(t!("copy-success"));
+                                class: "min-w-0 flex-1",
+                                div {
+                                    class: "flex justify-between items-center",
+                                    p { class: "text-sm text-text-secondary", {t!("full-link")} }
+                                    button {
+                                        class: "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded hover:bg-accent-hover transition-all duration-200",
+                                        onclick: {
+                                            let url = paste_url.clone();
+                                            move |_| {
+                                                if let Err(e) = copy_to_clipboard(&url) {
+                                                    popup_ctx.write().show_error(&e);
+                                                } else {
+                                                    popup_ctx.write().show_success(t!("copy-success"));
+                                                }
                                             }
-                                        }
-                                    },
-                                    {t!("copy-clipboard")}
+                                        },
+                                        {t!("copy-clipboard")}
+                                    }
                                 }
-                            }
-                            input {
-                                class: "w-full p-2 mt-1 bg-success text-text rounded text-sm font-mono",
-                                value: "{paste_url}",
-                                readonly: "true",
-                                onclick: move |_| {},
-                            }
-                        }
-                        div {
-                            class: "mt-3 grid grid-cols-2 gap-2",
-                            div {
-                                p { class: "text-sm text-text-secondary", "Paste ID:" }
                                 input {
                                     class: "w-full p-2 mt-1 bg-success text-text rounded text-sm font-mono",
-                                    value: "{id}",
+                                    value: "{paste_url}",
                                     readonly: "true",
+                                    onclick: move |_| {},
                                 }
-                            }
-                            if is_auto {
                                 div {
-                                    p { class: "text-sm text-text-secondary", "Passcode:" }
-                                    input {
-                                        class: "w-full p-2 mt-1 bg-success text-text rounded text-sm font-mono",
-                                        value: "{password}",
-                                        readonly: "true",
+                                    class: "mt-3 grid grid-cols-2 gap-2",
+                                    div {
+                                        p { class: "text-sm text-text-secondary", {t!("paste-id-label")} }
+                                        input {
+                                            class: "w-full p-2 mt-1 bg-success text-text rounded text-sm font-mono",
+                                            value: "{id}",
+                                            readonly: "true",
+                                        }
+                                    }
+                                    if is_auto {
+                                        div {
+                                            p { class: "text-sm text-text-secondary", {t!("passcode-label")} }
+                                            input {
+                                                class: "w-full p-2 mt-1 bg-success text-text rounded text-sm font-mono",
+                                                value: "{password}",
+                                                readonly: "true",
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            QrCode { url: paste_url.clone() }
                         }
                         p { class: "mt-2 text-xs text-text-secondary", {{t!("remember-password")}} }
                     }

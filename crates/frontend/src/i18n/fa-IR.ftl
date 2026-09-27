@@ -38,6 +38,11 @@ ttl-custom = دلخواه
 create-paste = ایجاد Paste
 
 paste-created = Paste ایجاد شد!
+full-link = لینک کامل
+paste-id-label = شناسه Paste
+passcode-label = رمز عبور
+qr-code-label = کد QR لینک Paste
+qr-scan-hint = برای بازکردن اسکن کنید
 paste-id = ID: { $id }
 remember-password = لطفاً رمز عبور خود را به خاطر بسپارید.
 

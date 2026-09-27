@@ -14,6 +14,20 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.12.6",
+            date: "2026-09-27",
+            items_en: vec![
+                "Added QR codes to generated paste links for fast sharing from a phone or camera",
+                "QR codes include the full client-side link, including auto-generated password fragments",
+                "Added localized QR labels and kept the share result responsive on small screens",
+            ],
+            items_fa: vec![
+                "افزودن کد QR به لینک Pasteهای ساخته‌شده برای اشتراک‌گذاری سریع با موبایل یا دوربین",
+                "کد QR شامل لینک کامل سمت کلاینت، از جمله fragment رمزهای خودکار، است",
+                "افزودن برچسب‌های فارسی و انگلیسی برای QR و واکنش‌گرا کردن نتیجه اشتراک‌گذاری در نمایشگرهای کوچک",
+            ],
+        },
+        Change {
             version: "v0.12.5",
             date: "2026-09-27",
             items_en: vec![

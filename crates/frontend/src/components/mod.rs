@@ -10,3 +10,6 @@ pub use footer::Footer;
 
 mod popup;
 pub use popup::{Popup, PopupContext};
+
+mod qr_code;
+pub use qr_code::QrCode;

@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.12.5"
+version = "0.12.6"
 license = "BSD-3-Clause"
 authors = ["hikari <me@metantesan.com>"]
 edition = "2024"
@@ -82,6 +82,7 @@ mermaid-rs-renderer = { version = "0.3", default-features = false }
 
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 bip39 = { version = "2", default-features = false, features = ["std"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [profile.release]
 opt-level = "z"

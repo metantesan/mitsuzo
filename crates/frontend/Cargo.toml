@@ -28,6 +28,7 @@ mitsuzo-utils = { workspace = true }
 wasm-bindgen-futures.workspace = true
 dioxus-i18n.workspace = true
 unic-langid.workspace = true
+qrcode.workspace = true
 
 
 [build-dependencies]
