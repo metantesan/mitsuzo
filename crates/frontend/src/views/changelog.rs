@@ -14,6 +14,18 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.12.9",
+            date: "2026-09-27",
+            items_en: vec![
+                "Fixed recipient-mode decryption when the sender opens a paste addressed to their own account",
+                "Used the recipient public key with the sender's ephemeral private key for the symmetric ECDH path",
+            ],
+            items_fa: vec![
+                "رفع رمزگشایی در حالت گیرنده هنگام بازکردن Paste توسط فرستنده برای account خودش",
+                "استفاده از کلید عمومی گیرنده همراه با کلید خصوصی موقت فرستنده در مسیر ECDH متقارن",
+            ],
+        },
+        Change {
             version: "v0.12.8",
             date: "2026-09-27",
             items_en: vec![

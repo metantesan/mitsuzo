@@ -41,6 +41,9 @@ pub struct ProgressState {
 struct RecipientKey {
     kid: [u8; 32],
     scalar: [u8; 32],
+    /// Public key paired with a sender-held ephemeral scalar. Ignored for a
+    /// recipient account scalar, which uses the envelope ephemeral public key.
+    sender_recipient_pub: Option<[u8; 32]>,
 }
 
 #[component]
@@ -214,6 +217,7 @@ pub fn paste_view(id: String) -> Element {
                     recipient_session.set(Some(RecipientKey {
                         kid: session.kid,
                         scalar: session.scalar,
+                        sender_recipient_pub: None,
                     }));
                     needs_account_password2.set(false);
                     account_password_input.set(String::new());
@@ -701,6 +705,7 @@ async fn do_decrypt(
                 .map(|e| RecipientKey {
                     kid: e.recipient_kid,
                     scalar: e.ephemeral_priv,
+                    sender_recipient_pub: Some(e.recipient_pub),
                 });
             from_ephemeral
                 // 2. Account already unlocked.
@@ -708,6 +713,7 @@ async fn do_decrypt(
                     account.read().clone().map(|a| RecipientKey {
                         kid: a.kid,
                         scalar: a.scalar,
+                        sender_recipient_pub: None,
                     })
                 })
                 // 3. Unlocked explicitly for this paste view.
@@ -1104,9 +1110,13 @@ async fn do_recipient_decrypt(
             };
             // ECDH symmetry: recipient (account scalar) and sender
             // (ephemeral scalar) both derive the same sealing key.
+            let ecdh_peer = key
+                .sender_recipient_pub
+                .as_ref()
+                .unwrap_or(&envelope.ephemeral_pub);
             let encryption_key = match open_content_key_for_recipient(
                 &key.scalar,
-                &envelope.ephemeral_pub,
+                ecdh_peer,
                 &envelope.nonce,
                 &envelope.sealed_cek,
             ) {

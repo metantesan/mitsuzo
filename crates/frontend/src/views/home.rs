@@ -27,6 +27,7 @@ use web_sys;
 /// reopen their own recipient-mode paste.
 struct SenderEphemeralKey {
     recipient_kid: [u8; 32],
+    recipient_pub: [u8; 32],
     ephemeral_priv: [u8; 32],
 }
 
@@ -419,6 +420,7 @@ pub fn home_view() -> Element {
                             header,
                             Some(SenderEphemeralKey {
                                 recipient_kid: target.kid,
+                                recipient_pub: target.pubkey,
                                 ephemeral_priv: eph_priv,
                             }),
                         )
@@ -578,6 +580,7 @@ pub fn home_view() -> Element {
                     recipient_ephemerals.write().push(RecipientEphemeral {
                         paste_id: paste_id.clone(),
                         recipient_kid: eph.recipient_kid,
+                        recipient_pub: eph.recipient_pub,
                         ephemeral_priv: eph.ephemeral_priv,
                     });
                 }

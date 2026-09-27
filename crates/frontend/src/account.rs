@@ -55,6 +55,10 @@ impl RecipientTarget {
 pub struct RecipientEphemeral {
     pub paste_id: String,
     pub recipient_kid: [u8; 32],
+    /// Recipient public key paired with `ephemeral_priv`. The sender opens
+    /// the envelope with ECDH(ephemeral_priv, recipient_pub), not with the
+    /// envelope's own ephemeral public key.
+    pub recipient_pub: [u8; 32],
     pub ephemeral_priv: [u8; 32],
 }
 
