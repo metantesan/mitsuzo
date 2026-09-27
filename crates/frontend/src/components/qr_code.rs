@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose};
 use dioxus::prelude::*;
 use dioxus_i18n::t;
 use qrcode::QrCode as Qr;
@@ -19,13 +20,19 @@ pub fn QrCode(url: String) -> Element {
                 .build()
         })
         .unwrap_or_default();
+    let image_url = format!(
+        "data:image/svg+xml;base64,{}",
+        general_purpose::STANDARD.encode(svg.as_bytes())
+    );
 
     rsx! {
         div {
             class: "flex shrink-0 flex-col items-center gap-2 rounded-lg bg-white p-3 text-center shadow-sm",
-            role: "img",
-            aria_label: t!("qr-code-label"),
-            dangerous_inner_html: svg,
+            img {
+                class: "h-48 w-48",
+                src: "{image_url}",
+                alt: t!("qr-code-label"),
+            }
             span {
                 class: "text-[11px] font-medium text-bg/70",
                 {t!("qr-scan-hint")}

@@ -14,6 +14,18 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.12.7",
+            date: "2026-09-27",
+            items_en: vec![
+                "Fixed QR rendering after paste creation by embedding the generated SVG as a browser image",
+                "Prevented a client-side DOM reconciliation error from hiding the share result",
+            ],
+            items_fa: vec![
+                "رفع نمایش QR پس از ساخت Paste با قراردادن SVG تولیدشده به‌صورت تصویر در مرورگر",
+                "جلوگیری از خطای هماهنگ‌سازی DOM سمت کلاینت که نتیجه اشتراک‌گذاری را مخفی می‌کرد",
+            ],
+        },
+        Change {
             version: "v0.12.6",
             date: "2026-09-27",
             items_en: vec![
