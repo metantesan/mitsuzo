@@ -118,20 +118,20 @@ fn app() -> Element {
         document::Title { "Mitsuzo — Private encrypted sharing" }
         document::Meta {
             name: "description",
-            content: "Share text and files privately with end-to-end encryption. Mitsuzo is a zero-knowledge, self-hostable encrypted pastebin."
+            content: "Send secrets and files privately. Mitsuzo encrypts in your browser or CLI before upload, then expires or burns the share. Open source and self-hostable."
         }
         document::Meta { name: "theme-color", content: "#0a0a10" }
         document::Meta { property: "og:type", content: "website" }
         document::Meta { property: "og:title", content: "Mitsuzo — Private encrypted sharing" }
         document::Meta {
             property: "og:description",
-            content: "Share text and files privately. The server never sees your plaintext."
+            content: "Send secrets and files privately. Encrypt before upload, set an expiry, and keep the plaintext off the server."
         }
         document::Meta { name: "twitter:card", content: "summary" }
         document::Meta { name: "twitter:title", content: "Mitsuzo — Private encrypted sharing" }
         document::Meta {
             name: "twitter:description",
-            content: "A zero-knowledge, self-hostable encrypted pastebin."
+            content: "Encrypt secrets and files before upload. No account required; open source and self-hostable."
         }
         document::Stylesheet { href: asset!("assets/tailwind.css") }
         Router::<Route> {}

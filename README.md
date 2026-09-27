@@ -1,10 +1,10 @@
 # Mitsuzo
 
-**Share secrets and files privately. The server never sees your plaintext.**
+**Send it once. Keep the plaintext yours.**
 
-Mitsuzo is a zero-knowledge, self-hostable encrypted pastebin for sending
-passwords, snippets, documents, and other short-lived files. Encryption happens
-in the browser or CLI before anything is uploaded.
+Mitsuzo is an open-source, self-hostable handoff for secrets and short-lived
+files. It encrypts in the browser or CLI before anything is uploaded, so the
+server stores ciphertext instead of your plaintext.
 
 [![CI](https://github.com/metantesan/mitsuzo/actions/workflows/ci.yml/badge.svg)](https://github.com/metantesan/mitsuzo/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/metantesan/mitsuzo)](https://github.com/metantesan/mitsuzo/releases)
@@ -15,10 +15,29 @@ in the browser or CLI before anything is uploaded.
 
 ## Why Mitsuzo?
 
-Regular pastebins and chat messages are convenient, but the service can often
-read, retain, or index what you send. Mitsuzo keeps the plaintext and password
-on your device. The server stores encrypted data, delivery metadata, and the
-minimum state needed to enforce expiry and access limits.
+When a password, `.env` file, recovery code, or private note needs to cross a
+boundary, chat history and ordinary pastebins leave too much behind. Mitsuzo is
+designed for that handoff: encrypt locally, share a link, and let the paste
+expire or burn after it is read.
+
+No account is required for the basic flow. When you need a private deployment,
+run the same project yourself with Docker and keep the storage under your
+control.
+
+## The 30-second flow
+
+1. Drop text or a file into the web app, or pipe a secret to the CLI.
+2. Mitsuzo encrypts it locally before upload and gives you a shareable link.
+3. Choose an expiry, try limit, or burn-after-reading so the handoff does not
+   become permanent storage.
+
+### What the server sees
+
+| Stored by the server | Kept on your device |
+| --- | --- |
+| Ciphertext and delivery metadata | Plaintext and password |
+| Expiry and access-limit state | Encryption keys |
+| Minimum data needed to serve the link | Browser/CLI decryption step |
 
 ## Highlights
 
@@ -30,6 +49,13 @@ minimum state needed to enforce expiry and access limits.
 - Encrypted paste delivery to another account
 - Browser UI, Rust CLI, Docker image, and English/Persian localization
 - BSD-3-Clause license and a documented self-hosting path
+
+## Good fits
+
+- Sharing a password or API token with a teammate
+- Sending a short-lived `.env`, config file, or recovery code
+- Moving a private note between devices without leaving it in chat history
+- Running an encrypted paste service on infrastructure you control
 
 ## Try it locally
 

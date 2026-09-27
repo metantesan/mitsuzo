@@ -1,12 +1,12 @@
 app-title = Mitsuzo
-home-tagline = Share secrets and files privately.
-home-intro = End-to-end encrypted in your browser. The server never sees your plaintext.
-feature-encrypted = Encrypted here
-feature-encrypted-detail = Client-side encryption
-feature-expiring = Expires automatically
-feature-expiring-detail = TTL and burn-after-reading
-feature-self-hosted = Self-hostable
-feature-self-hosted-detail = Run it with Docker
+home-tagline = Send it once. Keep the plaintext yours.
+home-intro = Encrypt in your browser or terminal before upload. No account required; the server stores ciphertext.
+feature-encrypted = Encrypted before upload
+feature-encrypted-detail = Browser + CLI
+feature-expiring = Built to disappear
+feature-expiring-detail = TTL, try limits, burn after read
+feature-self-hosted = Your server, your rules
+feature-self-hosted-detail = Open source + Docker
 demo-badge = Live demo
 demo-banner-text = This is a live demo. Pastes expire after a maximum of { $ttl } and are limited to { $size }.
 

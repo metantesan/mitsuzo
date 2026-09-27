@@ -1,12 +1,12 @@
 app-title = Mitsuzo
-home-tagline = اسرار و فایل‌ها را خصوصی به اشتراک بگذارید.
-home-intro = رمزگذاری سرتاسری در مرورگر شما انجام می‌شود؛ سرور هرگز متن اصلی را نمی‌بیند.
-feature-encrypted = رمزگذاری‌شده
-feature-encrypted-detail = رمزگذاری در سمت کاربر
-feature-expiring = انقضای خودکار
-feature-expiring-detail = زمان انقضا و حذف پس از مطالعه
-feature-self-hosted = قابل میزبانی شخصی
-feature-self-hosted-detail = اجرا با Docker
+home-tagline = یک‌بار بفرستید؛ متن اصلی برای خودتان بماند.
+home-intro = قبل از upload در مرورگر یا ترمینال رمزگذاری می‌شود. بدون نیاز به حساب؛ سرور فقط ciphertext را ذخیره می‌کند.
+feature-encrypted = قبل از upload رمزگذاری می‌شود
+feature-encrypted-detail = مرورگر و CLI
+feature-expiring = ساخته‌شده برای ناپدید شدن
+feature-expiring-detail = TTL، محدودیت تلاش، حذف پس از خواندن
+feature-self-hosted = سرور شما، قوانین شما
+feature-self-hosted-detail = متن‌باز و Docker
 demo-badge = دمو زنده
 demo-banner-text = این یک دموی زنده است. Pasteها پس از حداکثر { $ttl } منقضی می‌شوند و حداکثر { $size } هستند.
 
