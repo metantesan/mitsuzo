@@ -1,0 +1,3 @@
+[submodule "aur/mitsuzo-bin"]
+	path = aur/mitsuzo-bin
+	url = https://aur.archlinux.org/mitsuzo-bin.git
