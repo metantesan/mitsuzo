@@ -52,6 +52,7 @@ async fn normalized_entities_round_trip() {
         recipient_pub: Set(None),
         recipient_kid: Set(None),
         burn_receipt_hash: Set(vec![0; 32]),
+        upload_token_hash: Set(None),
         burned: Set(false),
     }
     .insert(&db)
@@ -153,6 +154,7 @@ async fn recipient_entities_store_normalized_inbox_data() {
         recipient_pub: Set(Some(vec![3; 32])),
         recipient_kid: Set(Some(vec![4; 32])),
         burn_receipt_hash: Set(vec![0; 32]),
+        upload_token_hash: Set(None),
         burned: Set(false),
     }
     .insert(&db)

@@ -18,6 +18,8 @@ pub struct Model {
     pub recipient_kid: Option<Vec<u8>>,
     pub burn_receipt_hash: Vec<u8>,
     pub burned: bool,
+    /// SHA-256 of the per-paste upload token. `None` for legacy rows.
+    pub upload_token_hash: Option<Vec<u8>>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

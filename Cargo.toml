@@ -67,7 +67,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 rand = "0.10"
 axum = "0.8"
 tower-http = { version = "0.7", features = ["cors", "fs"] }
-sled = "0.34.7"
 sea-orm = { version = "2", default-features = false, features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
 sea-orm-migration = { version = "2", default-features = false, features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 async-trait = "0.1"

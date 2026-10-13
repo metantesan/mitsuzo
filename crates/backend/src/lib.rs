@@ -1,4 +1,5 @@
 pub mod challenge;
+pub mod client;
 pub mod db;
 pub mod entities;
 pub mod handlers;
@@ -16,6 +17,14 @@ pub struct RuntimeConfig {
     pub demo_mode: bool,
     pub max_ttl_seconds: u32,
     pub max_file_size: u64,
+    /// Trust `X-Forwarded-For` / `X-Real-IP` from a reverse proxy when
+    /// resolving the client IP for rate limiting. Off by default because the
+    /// headers are otherwise attacker-controlled.
+    pub trust_proxy: bool,
+    /// Exact browser origins allowed to call the API cross-origin
+    /// (`MITSUZO_ALLOWED_ORIGINS`, comma-separated). Empty means same-origin
+    /// only and no CORS headers are emitted.
+    pub allowed_origins: Vec<String>,
 }
 
 impl RuntimeConfig {
@@ -23,6 +32,10 @@ impl RuntimeConfig {
     /// changes the defaults to a 60-second TTL and a 5 MiB upload limit.
     pub fn from_env() -> Self {
         let demo_mode = std::env::var("MITSUZO_DEMO_MODE")
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+
+        let trust_proxy = std::env::var("MITSUZO_TRUST_PROXY")
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
 
@@ -40,10 +53,21 @@ impl RuntimeConfig {
                 MAX_PASTE_SIZE as u64
             });
 
+        let allowed_origins = std::env::var("MITSUZO_ALLOWED_ORIGINS")
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Self {
             demo_mode,
             max_ttl_seconds,
             max_file_size,
+            trust_proxy,
+            allowed_origins,
         }
     }
 }

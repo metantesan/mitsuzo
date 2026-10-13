@@ -40,9 +40,15 @@ async fn main() -> eyre::Result<()> {
         .map_err(|e| eyre::eyre!("Failed to bind to port {}: {}", port, e))?;
     info!("listening on {}", listener.local_addr()?);
 
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| eyre::eyre!("Server error: {}", e))?;
+    // Graceful shutdown lets in-flight requests finish and the shutdown code
+    // below flush the database before the process exits on SIGINT/SIGTERM.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .map_err(|e| eyre::eyre!("Server error: {}", e))?;
 
     info!("server stopped, flushing database");
     cleanup_handle.abort();
@@ -53,14 +59,47 @@ async fn main() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Resolve when the process receives Ctrl-C or SIGTERM, then arm a bounded
+/// force-exit so a stuck keep-alive or streaming connection can never prevent
+/// the process from stopping.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    info!("shutdown signal received");
+
+    // Give in-flight requests a short grace window, then exit unconditionally
+    // so the process always stops (even if a connection never drains).
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        tracing::warn!("graceful shutdown timed out; forcing exit");
+        std::process::exit(0);
+    });
+}
+
 async fn cleanup_task(db: DataStore) {
     let mut interval = tokio::time::interval(Duration::from_secs(300));
     loop {
         interval.tick().await;
-        let db = db.clone();
-        let deleted = tokio::task::spawn_blocking(move || db.cleanup_expired())
-            .await
-            .unwrap_or(0);
+        let deleted = db.cleanup_expired().await;
         info!("Cleanup: removed {} expired pastes", deleted);
     }
 }

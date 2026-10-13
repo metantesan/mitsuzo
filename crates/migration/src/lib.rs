@@ -5,7 +5,10 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m20260927_000001_initial::Migration)]
+        vec![
+            Box::new(m20260927_000001_initial::Migration),
+            Box::new(m20261013_000002_upload_token::Migration),
+        ]
     }
 }
 
@@ -215,6 +218,45 @@ mod m20260927_000001_initial {
     }
 }
 
+mod m20261013_000002_upload_token {
+    use super::Pastes;
+    use sea_orm_migration::prelude::*;
+
+    pub struct Migration;
+
+    #[async_trait::async_trait]
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261013_000002_upload_token"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Pastes::Table)
+                        .add_column(ColumnDef::new(Pastes::UploadTokenHash).binary().null())
+                        .to_owned(),
+                )
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Pastes::Table)
+                        .drop_column(Pastes::UploadTokenHash)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+}
+
 #[derive(Iden)]
 enum Pastes {
     Table,
@@ -232,6 +274,7 @@ enum Pastes {
     RecipientKid,
     BurnReceiptHash,
     Burned,
+    UploadTokenHash,
 }
 #[derive(Iden)]
 enum PasteCredentials {

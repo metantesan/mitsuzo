@@ -1,4 +1,5 @@
 use crate::AppState;
+use crate::client::ClientIp;
 use axum::{
     body::{Body, Bytes},
     extract::{Path, State},
@@ -21,12 +22,21 @@ use mitsuzo_utils::{
 };
 use rand::RngExt;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
+use std::sync::{Mutex, OnceLock};
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
-fn index_html() -> Result<String, StatusCode> {
-    public_file("index.html")
+/// A static file plus its precomputed strong ETag.
+struct StaticAsset {
+    content: String,
+    etag: String,
+}
+
+fn static_cache() -> &'static Mutex<HashMap<String, StaticAsset>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, StaticAsset>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn etag(content: &str) -> String {
@@ -42,10 +52,49 @@ fn etag(content: &str) -> String {
     )
 }
 
-fn static_response(headers: &HeaderMap, content: String, content_type: &str) -> Response {
-    let tag = etag(&content);
+/// Read a file from the executable's `public/` directory, caching its content
+/// and ETag. Assets are immutable for the process lifetime, so this avoids
+/// re-reading and re-hashing them on every request.
+fn load_static(name: &str) -> Result<StaticAsset, StatusCode> {
+    if let Some(asset) = static_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(name)
+    {
+        return Ok(StaticAsset {
+            content: asset.content.clone(),
+            etag: asset.etag.clone(),
+        });
+    }
+
+    let exe = std::env::current_exe().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let parent = exe.parent().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let content = fs::read_to_string(parent.join("public").join(name))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let asset = StaticAsset {
+        etag: etag(&content),
+        content,
+    };
+    static_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            name.to_string(),
+            StaticAsset {
+                content: asset.content.clone(),
+                etag: asset.etag.clone(),
+            },
+        );
+    Ok(asset)
+}
+
+fn index_html() -> Result<StaticAsset, StatusCode> {
+    load_static("index.html")
+}
+
+fn static_response(headers: &HeaderMap, content: &str, tag: &str, content_type: &str) -> Response {
     let etag_value =
-        HeaderValue::from_str(&tag).unwrap_or_else(|_| HeaderValue::from_static("\"\""));
+        HeaderValue::from_str(tag).unwrap_or_else(|_| HeaderValue::from_static("\"\""));
     if headers.get(header::IF_NONE_MATCH).map(|v| v.as_bytes()) == Some(tag.as_bytes()) {
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
@@ -56,36 +105,58 @@ fn static_response(headers: &HeaderMap, content: String, content_type: &str) -> 
     Response::builder()
         .header(header::CONTENT_TYPE, content_type)
         .header(header::ETAG, etag_value)
-        .body(Body::from(content))
+        .body(Body::from(content.to_owned()))
         .expect("valid response")
 }
 
 pub async fn serve_index(headers: HeaderMap) -> Result<Response, StatusCode> {
-    Ok(static_response(&headers, index_html()?, "text/html"))
+    let asset = index_html()?;
+    Ok(static_response(
+        &headers,
+        &asset.content,
+        &asset.etag,
+        "text/html",
+    ))
 }
 
 pub async fn fallback_to_index(headers: HeaderMap) -> Result<Response, StatusCode> {
-    Ok(static_response(&headers, index_html()?, "text/html"))
+    let asset = index_html()?;
+    Ok(static_response(
+        &headers,
+        &asset.content,
+        &asset.etag,
+        "text/html",
+    ))
 }
 
 const DEFAULT_ROBOTS_TXT: &str = "User-agent: *\nDisallow: /api\nDisallow: /paste\nDisallow: /p\n";
 
-fn public_file(name: &str) -> Result<String, StatusCode> {
-    let exe = std::env::current_exe().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let parent = exe.parent().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let path = parent.join("public").join(name);
-    fs::read_to_string(path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
 pub async fn robots_txt(headers: HeaderMap) -> Result<Response, StatusCode> {
-    let content = public_file("robots.txt").unwrap_or_else(|_| DEFAULT_ROBOTS_TXT.to_string());
-    Ok(static_response(&headers, content, "text/plain"))
+    match load_static("robots.txt") {
+        Ok(asset) => Ok(static_response(
+            &headers,
+            &asset.content,
+            &asset.etag,
+            "text/plain",
+        )),
+        Err(_) => {
+            let tag = etag(DEFAULT_ROBOTS_TXT);
+            Ok(static_response(
+                &headers,
+                DEFAULT_ROBOTS_TXT,
+                &tag,
+                "text/plain",
+            ))
+        }
+    }
 }
 
 pub async fn install_script(headers: HeaderMap) -> Result<Response, StatusCode> {
+    let asset = load_static("install.sh")?;
     Ok(static_response(
         &headers,
-        public_file("install.sh")?,
+        &asset.content,
+        &asset.etag,
         "text/plain; charset=utf-8",
     ))
 }
@@ -108,10 +179,44 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     result == 0
 }
 
+fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
+/// Authenticate an in-progress upload: the caller must present the per-paste
+/// token issued by `POST /paste` in the `X-Upload-Token` header. Verified
+/// against the stored `SHA-256(token)` in constant time.
+async fn verify_upload_token(
+    db: &crate::db::DataStore,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<(), StatusCode> {
+    let Some(stored) = db.get_upload_token_hash(id).await else {
+        // Legacy paste with no token on record, or unknown/expired id.
+        return Err(StatusCode::FORBIDDEN);
+    };
+    let Some(provided) = headers
+        .get("X-Upload-Token")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let token = general_purpose::STANDARD
+        .decode(provided)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if constant_time_eq(&sha256(&token), &stored) {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
 /// Remaining try count and TTL in seconds, read after a failed attempt so the
 /// 401 response body can reflect the server's authoritative state.
-fn remaining_attempts(db: &crate::db::DataStore, id: &str) -> (u32, u64) {
-    let Some(meta) = db.get_meta(id) else {
+async fn remaining_attempts(db: &crate::db::DataStore, id: &str) -> (u32, u64) {
+    let Some(meta) = db.get_meta(id).await else {
         return (0, 0);
     };
     let now = std::time::SystemTime::now()
@@ -151,57 +256,51 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn verify_password(
+async fn verify_password(
     db: &crate::db::DataStore,
     id: &str,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
-    let Some(stored_hash) = db.get_password_hash(id) else {
+    let Some(stored_hash) = db.get_password_hash(id).await else {
         return Err(ApiError::Status(StatusCode::NOT_FOUND));
     };
     let Some(provided_hash_str) = headers
         .get("X-Password-Hash")
         .and_then(|value| value.to_str().ok())
     else {
-        db.decrement_try_count(id);
-        db.increment_fail();
-        let (try_count, ttl) = remaining_attempts(db, id);
+        db.decrement_try_count(id).await;
+        db.increment_fail().await;
+        let (try_count, ttl) = remaining_attempts(db, id).await;
         return Err(ApiError::Unauthorized { try_count, ttl });
     };
     let provided_hash = match general_purpose::STANDARD.decode(provided_hash_str) {
         Ok(h) => h,
         Err(_) => {
-            db.decrement_try_count(id);
-            db.increment_fail();
-            let (try_count, ttl) = remaining_attempts(db, id);
+            db.decrement_try_count(id).await;
+            db.increment_fail().await;
+            let (try_count, ttl) = remaining_attempts(db, id).await;
             return Err(ApiError::Unauthorized { try_count, ttl });
         }
     };
 
     if !constant_time_eq(&provided_hash, &stored_hash) {
-        db.decrement_try_count(id);
-        db.increment_fail();
-        let (try_count, ttl) = remaining_attempts(db, id);
+        db.decrement_try_count(id).await;
+        db.increment_fail().await;
+        let (try_count, ttl) = remaining_attempts(db, id).await;
         return Err(ApiError::Unauthorized { try_count, ttl });
     }
     Ok(())
 }
 
-fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("X-Forwarded-For")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
+// Client identity is resolved by the `ClientIp` extractor (see `crate::client`),
+// which honors forwarded headers only when `MITSUZO_TRUST_PROXY` is enabled.
 
 pub async fn init_paste(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    client_ip: ClientIp,
     body: Bytes,
 ) -> Result<Vec<u8>, StatusCode> {
-    let ip = client_ip(&headers);
+    let ip = client_ip.0;
     if !state.limiter.check(&format!("init:{}", ip), 10, 60).await {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
@@ -233,7 +332,7 @@ pub async fn init_paste(
         };
         // If the recipient account exists, its public key must match the one
         // the client sealed to — otherwise the envelope cannot be opened.
-        if let Some(account) = state.db.get_account_by_kid(&recipient.recipient_kid)
+        if let Some(account) = state.db.get_account_by_kid(&recipient.recipient_kid).await
             && account.pubkey != recipient_pub
         {
             return Err(StatusCode::BAD_REQUEST);
@@ -258,35 +357,47 @@ pub async fn init_paste(
         };
     }
 
-    let mut rng = rand::rng();
-    let mut id_str;
+    let id_str;
     let mut attempts = 0;
     loop {
-        let id: u32 = rng.random_range(100_000..1_000_000);
-        id_str = id.to_string();
-        if !state.db.id_available(&id_str) {
-            attempts += 1;
-            if attempts >= 100 {
-                return Err(StatusCode::SERVICE_UNAVAILABLE);
-            }
-            continue;
+        // Scope the (non-Send) thread rng so it is dropped before awaiting.
+        let candidate = {
+            let mut rng = rand::rng();
+            let id: u32 = rng.random_range(100_000..1_000_000);
+            id.to_string()
+        };
+        if state.db.id_available(&candidate).await {
+            id_str = candidate;
+            break;
         }
-        break;
+        attempts += 1;
+        if attempts >= 100 {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
     }
+
+    let mut upload_token = [0u8; 32];
+    getrandom::fill(&mut upload_token).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let upload_token_hash = sha256(&upload_token);
 
     state
         .db
-        .init_paste(&id_str, &header)
+        .init_paste(&id_str, &header, &upload_token_hash)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     info!(id = %id_str, "paste initialized");
 
-    Ok(encode(&InitPasteResponse { id: id_str }))
+    Ok(encode(&InitPasteResponse {
+        id: id_str,
+        upload_token,
+    }))
 }
 
 pub async fn upload_chunk(
     State(state): State<AppState>,
     Path((id, chunk_index)): Path<(String, u32)>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(), StatusCode> {
@@ -294,7 +405,7 @@ pub async fn upload_chunk(
     // Uploads are separately rate-limited because a client can otherwise
     // initialize a small number of pastes and use unlimited chunk requests
     // to consume bandwidth/storage on a public demo.
-    let ip = client_ip(&headers);
+    let ip = client_ip.0;
     if !state
         .limiter
         .check(&format!("upload:{}", ip), 180, 60)
@@ -302,6 +413,8 @@ pub async fn upload_chunk(
     {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
+    // Only the sender that initialized the paste may write its chunks.
+    verify_upload_token(&state.db, &id, &headers).await?;
     if body.len() > UPLOAD_CHUNK_SIZE {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
@@ -311,7 +424,7 @@ pub async fn upload_chunk(
     if write_end > max_cipher_len {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
-    if let Some(meta) = state.db.get_meta(&id) {
+    if let Some(meta) = state.db.get_meta(&id).await {
         // Reject uploads to pastes that have already expired; cleanup may
         // not have deleted the row yet.
         if meta.expiration_timestamp > 0 && meta.expiration_timestamp <= epoch_secs() {
@@ -323,6 +436,7 @@ pub async fn upload_chunk(
     state
         .db
         .append_chunk(&id, chunk_index, &body)
+        .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(())
 }
@@ -332,23 +446,30 @@ pub async fn get_chunk_info(
     Path(id): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
     validate_id(&id)?;
-    if state.db.get_meta(&id).is_none() {
+    if state.db.get_meta(&id).await.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let received = state.db.get_received_chunks(&id);
+    let received = state.db.get_received_chunks(&id).await;
     Ok(encode(&ChunkInfoResponse { received }))
 }
 
 pub async fn complete_paste(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Vec<u8>, StatusCode> {
+    headers: HeaderMap,
+) -> Result<StatusCode, StatusCode> {
     validate_id(&id)?;
-    if state.db.get_meta(&id).is_none() {
+    let Some(meta) = state.db.get_meta(&id).await else {
         return Err(StatusCode::NOT_FOUND);
+    };
+    verify_upload_token(&state.db, &id, &headers).await?;
+    // Every chunk must have arrived before the paste is considered complete;
+    // otherwise a partial upload would be served as if it were whole.
+    if state.db.get_received_chunks(&id).await != meta.total_chunks {
+        return Err(StatusCode::CONFLICT);
     }
     info!(id = %id, "paste completed");
-    Ok(encode(&InitPasteResponse { id }))
+    Ok(StatusCode::OK)
 }
 
 pub async fn get_salt(
@@ -363,22 +484,23 @@ pub async fn get_salt(
     let has_meta = state
         .db
         .get_meta(&id)
+        .await
         .is_some_and(|m| m.expiration_timestamp == 0 || m.expiration_timestamp > epoch_secs());
     if !has_meta {
         return Err(StatusCode::NOT_FOUND);
     }
-    let meta = state.db.get_meta(&id).ok_or(StatusCode::NOT_FOUND)?;
-    let raw_salt = state.db.get_salt(&id).unwrap_or_default();
+    let meta = state.db.get_meta(&id).await.ok_or(StatusCode::NOT_FOUND)?;
+    let raw_salt = state.db.get_salt(&id).await.unwrap_or_default();
     let recipient = if raw_salt.is_empty() {
         // Recipient/audience mode: say who can open it, pre-auth, so a client
         // can show "encrypted to <name> (0x…)" on page load.
         let recipient_kid = meta.recipient_kid.unwrap_or_default();
         let mut kid_prefix = [0u8; 20];
         kid_prefix.copy_from_slice(&recipient_kid[..20]);
-        let name = meta
-            .recipient_kid
-            .and_then(|kid| state.db.get_account_by_kid(&kid))
-            .map(|account| account.name);
+        let name = match meta.recipient_kid {
+            Some(kid) => state.db.get_account_by_kid(&kid).await.map(|a| a.name),
+            None => None,
+        };
         Some(PasteRecipientInfo {
             kid: recipient_kid,
             kid_prefix,
@@ -415,27 +537,28 @@ pub(crate) async fn get_paste(
     headers: HeaderMap,
 ) -> Result<Response<Body>, ApiError> {
     validate_id(&id)?;
-    verify_password(&state.db, &id, &headers)?;
+    verify_password(&state.db, &id, &headers).await?;
 
-    let nonce = state.db.get_nonce(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let nonce = state.db.get_nonce(&id).await.ok_or(StatusCode::NOT_FOUND)?;
     let file_path = state
         .db
         .get_content_path(&id)
+        .await
         .ok_or(StatusCode::NOT_FOUND)?;
-    let meta = state.db.get_meta(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let meta = state.db.get_meta(&id).await.ok_or(StatusCode::NOT_FOUND)?;
 
     let file_meta = tokio::fs::metadata(&file_path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
     let content_len = file_meta.len() as usize;
     let total_size = get_plaintext_size(meta.total_chunks, content_len).unwrap_or(0) as u64;
-    state.db.increment_success();
+    state.db.increment_success().await;
 
     let nonce_arr: [u8; 12] = nonce
         .try_into()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let key = state.db.get_key(&id);
-    let (try_count, ttl) = remaining_attempts(&state.db, &id);
+    let key = state.db.get_key(&id).await;
+    let (try_count, ttl) = remaining_attempts(&state.db, &id).await;
 
     let header = GetPasteHeader {
         id,
@@ -499,7 +622,7 @@ fn parse_kid_hex(s: &str) -> Result<Vec<u8>, ()> {
 }
 
 /// Resolve an account record from a URL kid (full hash or display prefix).
-fn resolve_account(
+async fn resolve_account(
     db: &crate::db::DataStore,
     kid_str: &str,
 ) -> Result<Option<AccountRecord>, StatusCode> {
@@ -508,12 +631,12 @@ fn resolve_account(
         32 => {
             let mut full = [0u8; 32];
             full.copy_from_slice(&kid);
-            Ok(db.get_account_by_kid(&full))
+            Ok(db.get_account_by_kid(&full).await)
         }
         20 => {
             let mut prefix = [0u8; 20];
             prefix.copy_from_slice(&kid);
-            Ok(db.get_account_by_prefix(&prefix))
+            Ok(db.get_account_by_prefix(&prefix).await)
         }
         _ => Err(StatusCode::BAD_REQUEST),
     }
@@ -578,6 +701,7 @@ pub async fn get_paste_challenge(
     let meta = state
         .db
         .get_meta(&id)
+        .await
         .filter(|m| m.expiration_timestamp == 0 || m.expiration_timestamp > epoch_secs())
         .ok_or(StatusCode::NOT_FOUND)?;
     let Some(recipient_pub) = meta.recipient_pub else {
@@ -585,6 +709,32 @@ pub async fn get_paste_challenge(
         return Err(StatusCode::NOT_FOUND);
     };
     make_recipient_challenge(&state, format!("paste:{}", id), &recipient_pub).await
+}
+
+/// Parse an `X-Account-Proof: <kid>:<b64-response>` header into `(kid,
+/// response)`. A missing header is `UNAUTHORIZED`; a malformed value is
+/// `BAD_REQUEST`.
+fn parse_account_proof(headers: &HeaderMap) -> Result<(Vec<u8>, Vec<u8>), StatusCode> {
+    let proof = headers
+        .get("X-Account-Proof")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let (kid_str, resp_b64) = proof.split_once(':').ok_or(StatusCode::BAD_REQUEST)?;
+    let kid = parse_kid_hex(kid_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let response = general_purpose::STANDARD
+        .decode(resp_b64)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok((kid, response))
+}
+
+/// Whether a presented proof kid (full 32-byte hash or 20-byte display prefix)
+/// matches the expected account kid.
+fn kid_matches(expected: &[u8], provided: &[u8]) -> bool {
+    match provided.len() {
+        20 => expected.len() >= 20 && &expected[..20] == provided,
+        32 => expected.len() == 32 && expected == provided,
+        _ => false,
+    }
 }
 
 /// Verify the `X-Account-Proof: <kid>:<b64-response>` header against the
@@ -598,24 +748,13 @@ async fn verify_recipient_proof(
     let Some(recipient_kid) = meta.recipient_kid else {
         return Ok(false);
     };
-    let Some(proof) = headers.get("X-Account-Proof").and_then(|v| v.to_str().ok()) else {
-        return Ok(false);
+    let (kid_bytes, response) = match parse_account_proof(headers) {
+        Ok(parsed) => parsed,
+        // No proof presented: fall through to issuing a challenge.
+        Err(StatusCode::UNAUTHORIZED) => return Ok(false),
+        Err(status) => return Err(ApiError::Status(status)),
     };
-    let (kid_str, resp_b64) = proof
-        .split_once(':')
-        .ok_or(ApiError::Status(StatusCode::BAD_REQUEST))?;
-    let kid_bytes =
-        parse_kid_hex(kid_str).map_err(|_| ApiError::Status(StatusCode::BAD_REQUEST))?;
-    let response = general_purpose::STANDARD
-        .decode(resp_b64)
-        .map_err(|_| ApiError::Status(StatusCode::BAD_REQUEST))?;
-
-    let audience_ok = match kid_bytes.len() {
-        20 => &recipient_kid[..20] == kid_bytes.as_slice(),
-        32 => recipient_kid.as_slice() == kid_bytes.as_slice(),
-        _ => false,
-    };
-    if !audience_ok {
+    if !kid_matches(&recipient_kid, &kid_bytes) {
         return Ok(false);
     }
     Ok(state
@@ -633,6 +772,7 @@ pub(crate) async fn get_paste_data(
     let meta = state
         .db
         .get_meta(&id)
+        .await
         .ok_or(ApiError::Status(StatusCode::NOT_FOUND))?;
     // Enforce expiration for both auth modes. Password mode also gets this
     // via `get_password_hash`, but recipient mode would otherwise keep
@@ -656,15 +796,17 @@ pub(crate) async fn get_paste_data(
             state
                 .db
                 .get_recipient_envelope(&id)
+                .await
                 .ok_or(ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR))?,
         );
     } else {
-        verify_password(&state.db, &id, &headers)?;
+        verify_password(&state.db, &id, &headers).await?;
     }
 
     let nonce = state
         .db
         .get_nonce(&id)
+        .await
         .ok_or(ApiError::Status(StatusCode::NOT_FOUND))?;
     let nonce_arr: [u8; 12] = nonce
         .try_into()
@@ -673,14 +815,15 @@ pub(crate) async fn get_paste_data(
     let file_path = state
         .db
         .get_content_path(&id)
+        .await
         .ok_or(ApiError::Status(StatusCode::NOT_FOUND))?;
     let file_meta = tokio::fs::metadata(&file_path)
         .await
         .map_err(|_| ApiError::Status(StatusCode::NOT_FOUND))?;
     let file_len = file_meta.len();
-    state.db.increment_success();
+    state.db.increment_success().await;
 
-    let (try_count, ttl) = remaining_attempts(&state.db, &id);
+    let (try_count, ttl) = remaining_attempts(&state.db, &id).await;
     let frame = GetPasteHeader {
         id: id.clone(),
         nonce: nonce_arr,
@@ -690,7 +833,7 @@ pub(crate) async fn get_paste_data(
         total_size: get_plaintext_size(meta.total_chunks, file_len as usize).unwrap_or(0) as u64,
         total_chunks: meta.total_chunks,
         allow_download: meta.allow_download,
-        key: state.db.get_key(&id),
+        key: state.db.get_key(&id).await,
         try_count,
         ttl,
         burn_after_read: meta.burn_after_read,
@@ -788,19 +931,20 @@ pub(crate) async fn get_paste_data(
 
 pub(crate) async fn change_password(
     State(state): State<AppState>,
+    client_ip: ClientIp,
     Path(id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(), ApiError> {
     validate_id(&id)?;
 
-    let ip = client_ip(&headers);
+    let ip = client_ip.0;
     if !state.limiter.check(&format!("passwd:{}", ip), 5, 60).await {
         return Err(ApiError::Status(StatusCode::TOO_MANY_REQUESTS));
     }
 
     // Reject like get_salt once the try-count is exhausted.
-    if let Some(meta) = state.db.get_meta(&id)
+    if let Some(meta) = state.db.get_meta(&id).await
         && meta.try_count == 0
     {
         return Err(ApiError::Status(StatusCode::NOT_FOUND));
@@ -808,13 +952,14 @@ pub(crate) async fn change_password(
 
     // Verifies the OLD password hash; on failure decrements try_count and
     // counts a failed request, same as the data endpoint.
-    verify_password(&state.db, &id, &headers)?;
+    verify_password(&state.db, &id, &headers).await?;
 
     let request: ChangePasswordRequest = decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     state
         .db
-        .set_password(&id, &request.salt, &request.password_hash, &request.key);
+        .set_password(&id, &request.salt, &request.password_hash, &request.key)
+        .await;
     info!(id = %id, "paste password changed");
     Ok(())
 }
@@ -833,18 +978,18 @@ fn parse_range(header: &str) -> Option<(u64, u64)> {
 
 pub async fn burn_paste(
     State(state): State<AppState>,
+    client_ip: ClientIp,
     Path(id): Path<String>,
-    headers: HeaderMap,
     body: Bytes,
 ) -> Result<(), StatusCode> {
     validate_id(&id)?;
 
-    let ip = client_ip(&headers);
+    let ip = client_ip.0;
     if !state.limiter.check(&format!("burn:{}", ip), 5, 60).await {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
-    let Some(stored_hash) = state.db.get_burn_receipt_hash(&id) else {
+    let Some(stored_hash) = state.db.get_burn_receipt_hash(&id).await else {
         return Err(StatusCode::NOT_FOUND);
     };
 
@@ -852,36 +997,37 @@ pub async fn burn_paste(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    if !state.db.mark_burned(&id) {
+    if !state.db.mark_burned(&id).await {
         return Err(StatusCode::GONE);
     }
 
-    state.db.delete_paste(&id);
+    state.db.delete_paste(&id).await;
     info!(id = %id, "paste burned after read");
     Ok(())
 }
 
-pub async fn get_stats(State(state): State<AppState>) -> Result<Vec<u8>, StatusCode> {
-    let stats = tokio::task::spawn_blocking(move || {
-        (
-            state.db.get_pastes_all_time(),
-            state.db.get_pastes_daily(),
-            state.db.get_success_all_time(),
-            state.db.get_success_daily(),
-            state.db.get_fail_all_time(),
-            state.db.get_fail_daily(),
-        )
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+/// Liveness probe: the process is up and serving.
+pub async fn healthz() -> StatusCode {
+    StatusCode::OK
+}
 
+/// Readiness probe: the process can reach its storage.
+pub async fn readyz(State(state): State<AppState>) -> StatusCode {
+    if state.db.is_healthy().await {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
+pub async fn get_stats(State(state): State<AppState>) -> Result<Vec<u8>, StatusCode> {
     Ok(encode(&GetStatsResponse {
-        pastes_all_time: stats.0,
-        pastes_daily: stats.1,
-        requests_success_all_time: stats.2,
-        requests_success_daily: stats.3,
-        requests_fail_all_time: stats.4,
-        requests_fail_daily: stats.5,
+        pastes_all_time: state.db.get_pastes_all_time().await,
+        pastes_daily: state.db.get_pastes_daily().await,
+        requests_success_all_time: state.db.get_success_all_time().await,
+        requests_success_daily: state.db.get_success_daily().await,
+        requests_fail_all_time: state.db.get_fail_all_time().await,
+        requests_fail_daily: state.db.get_fail_daily().await,
         demo_mode: state.config.demo_mode,
         max_ttl_seconds: state.config.max_ttl_seconds,
         max_file_size: state.config.max_file_size,
@@ -893,10 +1039,10 @@ pub async fn get_stats(State(state): State<AppState>) -> Result<Vec<u8>, StatusC
 /// different account's namespace); 409 if the kid is already registered.
 pub async fn register_account(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    client_ip: ClientIp,
     body: Bytes,
 ) -> Result<Vec<u8>, StatusCode> {
-    let ip = client_ip(&headers);
+    let ip = client_ip.0;
     if !state.limiter.check(&format!("acct:{}", ip), 10, 60).await {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
@@ -914,7 +1060,7 @@ pub async fn register_account(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    if let Some(existing) = state.db.get_account_by_kid(&request.kid) {
+    if let Some(existing) = state.db.get_account_by_kid(&request.kid).await {
         // Same key re-registered (e.g. restoring from a seed on another
         // machine): idempotent, return the existing profile unchanged.
         if constant_time_eq(&existing.pubkey, &request.pubkey) {
@@ -933,7 +1079,7 @@ pub async fn register_account(
         name: request.name,
         created_at,
     };
-    state.db.put_account(&record);
+    state.db.put_account(&record).await;
     info!(kid = %to_hex(&record.kid), "account registered");
     Ok(encode(&account_profile(&record)))
 }
@@ -943,7 +1089,7 @@ pub async fn get_account(
     State(state): State<AppState>,
     Path(kid_str): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
-    let Some(record) = resolve_account(&state.db, &kid_str)? else {
+    let Some(record) = resolve_account(&state.db, &kid_str).await? else {
         return Err(StatusCode::NOT_FOUND);
     };
     Ok(encode(&account_profile(&record)))
@@ -952,10 +1098,10 @@ pub async fn get_account(
 /// Issue a single-use login challenge sealed to the account's public key.
 pub async fn get_account_challenge(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    client_ip: ClientIp,
     Path(kid_str): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
-    let ip = client_ip(&headers);
+    let ip = client_ip.0;
     if !state
         .limiter
         .check(&format!("challenge:{}", ip), 30, 60)
@@ -964,7 +1110,7 @@ pub async fn get_account_challenge(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
-    let Some(record) = resolve_account(&state.db, &kid_str)? else {
+    let Some(record) = resolve_account(&state.db, &kid_str).await? else {
         return Err(StatusCode::NOT_FOUND);
     };
     let (eph_priv, eph_pub) =
@@ -989,16 +1135,16 @@ pub async fn get_account_challenge(
 /// challenge issued by `GET /api/account/{kid}/challenge`.
 pub async fn change_account_name(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    client_ip: ClientIp,
     Path(kid_str): Path<String>,
     body: Bytes,
 ) -> Result<Vec<u8>, StatusCode> {
-    let ip = client_ip(&headers);
+    let ip = client_ip.0;
     if !state.limiter.check(&format!("name:{}", ip), 20, 60).await {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
-    let Some(record) = resolve_account(&state.db, &kid_str)? else {
+    let Some(record) = resolve_account(&state.db, &kid_str).await? else {
         return Err(StatusCode::NOT_FOUND);
     };
     let request: ChangeNameRequest = decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -1020,7 +1166,7 @@ pub async fn change_account_name(
 
     let mut updated = record;
     updated.name = request.name;
-    state.db.put_account(&updated);
+    state.db.put_account(&updated).await;
     info!(kid = %to_hex(&updated.kid), "account name changed");
     Ok(encode(&account_profile(&updated)))
 }
@@ -1033,26 +1179,14 @@ pub async fn get_account_inbox(
     headers: HeaderMap,
     Path(kid_str): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
-    let Some(record) = resolve_account(&state.db, &kid_str)? else {
+    let Some(record) = resolve_account(&state.db, &kid_str).await? else {
         return Err(StatusCode::NOT_FOUND);
     };
 
-    let Some(proof) = headers.get("X-Account-Proof").and_then(|v| v.to_str().ok()) else {
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-    let (kid_str, resp_b64) = proof.split_once(':').ok_or(StatusCode::BAD_REQUEST)?;
-    let kid_bytes = parse_kid_hex(kid_str).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let audience_ok = match kid_bytes.len() {
-        20 => &record.kid[..20] == kid_bytes.as_slice(),
-        32 => record.kid.as_slice() == kid_bytes.as_slice(),
-        _ => false,
-    };
-    if !audience_ok {
+    let (kid_bytes, response) = parse_account_proof(&headers)?;
+    if !kid_matches(&record.kid, &kid_bytes) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    let response = general_purpose::STANDARD
-        .decode(resp_b64)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let challenge_key = format!("acct:{}", to_hex(&record.kid));
     if !state
@@ -1064,6 +1198,6 @@ pub async fn get_account_inbox(
     }
 
     Ok(encode(&InboxResponse {
-        pastes: state.db.list_recipient_pastes(&record.kid),
+        pastes: state.db.list_recipient_pastes(&record.kid).await,
     }))
 }

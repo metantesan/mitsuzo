@@ -81,6 +81,11 @@ pub struct CreatePasteHeader {
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
 pub struct InitPasteResponse {
     pub id: String,
+    /// Random per-paste secret proving the sender owns this paste. The server
+    /// stores only `SHA-256(upload_token)` and requires the token in the
+    /// `X-Upload-Token` header on chunk uploads and completion, so a third
+    /// party who guesses the (enumerable) paste id cannot inject chunks.
+    pub upload_token: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
@@ -210,20 +215,6 @@ pub struct PasteMeta {
     pub recipient_pub: Option<[u8; 32]>,
     /// Full 32-byte SHA-256 of the recipient's public key.
     pub recipient_kid: Option<[u8; 32]>,
-}
-
-/// Frozen snapshot of the pre-account `PasteMeta` wire format, used only to
-/// migrate existing sled rows to the version with `recipient_pub`/`recipient_kid`.
-#[derive(bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
-pub struct LegacyPasteMeta {
-    pub try_count: u32,
-    pub expiration_timestamp: u64,
-    pub data_type: DataType,
-    pub filename: Option<String>,
-    pub content_type: Option<String>,
-    pub total_chunks: u32,
-    pub allow_download: bool,
-    pub burn_after_read: bool,
 }
 
 pub struct PasteListing {
