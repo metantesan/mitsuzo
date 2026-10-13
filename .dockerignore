@@ -1,0 +1,8 @@
+target
+.github
+.git
+aur
+database
+*.md
+Dockerfile
+.dockerignore
