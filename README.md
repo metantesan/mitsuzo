@@ -151,6 +151,21 @@ cd mitsuzo
 cargo build --release -p backend -p cli
 ```
 
+### Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MITSUZO_DEMO_MODE` | off | Cap TTL at 60s and uploads at 5 MiB (1, true, yes, on) |
+| `MITSUZO_MAX_TTL_SECONDS` | 43200 | Maximum paste TTL |
+| `MITSUZO_MAX_FILE_SIZE_BYTES` | 1073741824 | Maximum paste/file size |
+| `MITSUZO_TRUST_PROXY` | off | Trust `X-Forwarded-For`/`X-Real-IP` when resolving the client IP for rate limiting. Enable only behind a proxy you control. |
+| `MITSUZO_ALLOWED_ORIGINS` | unset | Comma-separated browser origins allowed to call the API cross-origin. Empty means same-origin only. |
+
+Behind a reverse proxy, set `MITSUZO_TRUST_PROXY=1` so rate limiting keys on
+the real client address; otherwise every request is attributed to the proxy.
+The server never reflects arbitrary origins in CORS responses unless they are
+listed in `MITSUZO_ALLOWED_ORIGINS`.
+
 See the in-app self-hosting guide for configuration and the
 [contribution guide](CONTRIBUTING.md) for development checks.
 

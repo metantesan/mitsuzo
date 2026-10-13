@@ -20,6 +20,11 @@ Please allow time for investigation and a fix before public disclosure.
 
 - Serve the application over HTTPS.
 - Keep passwords and generated links out of logs, analytics, and screenshots.
+- Behind a reverse proxy, set `MITSUZO_TRUST_PROXY=1` so rate limiting keys on
+  the real client address. Only enable it when the proxy overwrites inbound
+  `X-Forwarded-For`/`X-Real-IP`; otherwise clients could spoof those headers.
+- Restrict cross-origin API access with `MITSUZO_ALLOWED_ORIGINS`. By default
+  the API is same-origin and emits no CORS headers.
 - A self-hosted deployment is responsible for backups, access control, TLS,
   storage permissions, and dependency updates.
 - Mitsuzo has not undergone an independent third-party security audit yet.

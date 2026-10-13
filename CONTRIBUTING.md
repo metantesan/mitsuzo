@@ -21,5 +21,19 @@ by the repository configuration.
 - Update the README or in-app docs when behavior or deployment changes.
 - Never include real secrets, private keys, or user data in examples.
 
+## Releasing
+
+Publishing is tag-driven: `.github/workflows/build.yml` (container image) and
+`.github/workflows/cli-build.yml` (CLI binaries) run on tags matching `v*.*.*`.
+Keep `[workspace.package].version` and the release tag in agreement.
+
+```bash
+# after bumping [workspace.package].version and merging to main
+git tag v0.12.11
+git push origin v0.12.11
+```
+
+## Security
+
 Please report vulnerabilities privately according to [SECURITY.md](SECURITY.md)
 instead of opening a public issue.
