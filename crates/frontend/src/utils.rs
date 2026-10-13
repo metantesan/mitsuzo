@@ -136,11 +136,20 @@ fn setup_upload_progress(xhr: &XmlHttpRequest) -> Result<mpsc::Receiver<XhrProgr
     Ok(progress_rx)
 }
 
-pub fn xhr_put(url: &str, body: Vec<u8>) -> Result<XhrRequest, String> {
+pub fn xhr_put_headers(
+    url: &str,
+    body: Vec<u8>,
+    headers: Vec<(String, String)>,
+) -> Result<XhrRequest, String> {
     let xhr = XmlHttpRequest::new().map_err(|e| format!("Failed to create XHR: {:?}", e))?;
 
     xhr.open("PUT", url)
         .map_err(|e| format!("Failed to open XHR: {:?}", e))?;
+
+    for (key, value) in headers {
+        xhr.set_request_header(&key, &value)
+            .map_err(|e| format!("Failed to set header {}: {:?}", key, e))?;
+    }
 
     xhr.set_response_type(web_sys::XmlHttpRequestResponseType::Arraybuffer);
 
@@ -227,9 +236,10 @@ where
     }
 }
 
-pub async fn do_xhr_put<F>(
+pub async fn do_xhr_put_headers<F>(
     url: &str,
     body: Vec<u8>,
+    headers: Vec<(String, String)>,
     mut on_progress: F,
 ) -> Result<XhrResponse, String>
 where
@@ -238,7 +248,7 @@ where
     let XhrRequest {
         mut response,
         mut progress,
-    } = xhr_put(url, body)?;
+    } = xhr_put_headers(url, body, headers)?;
     loop {
         futures::select! {
             result = response => {

@@ -5,7 +5,9 @@ use crate::account::{
 };
 use crate::components::{PopupContext, QrCode};
 use crate::sanitize_id;
-use crate::utils::{copy_to_clipboard, do_xhr_get, do_xhr_post, do_xhr_put};
+use crate::utils::{
+    copy_to_clipboard, do_xhr_get, do_xhr_post, do_xhr_post_headers, do_xhr_put_headers,
+};
 use base64::Engine as _;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
@@ -547,13 +549,16 @@ pub fn home_view() -> Element {
                 let init_result =
                     do_xhr_post(&format!("{}/api/paste", BASE_URL), header_bytes, |_, _| {}).await;
 
-                let paste_id = match init_result {
+                let (paste_id, upload_token) = match init_result {
                     Ok(response) if response.status >= 200 && response.status < 300 => {
                         match response
                             .body
                             .and_then(|b| bitcode::decode::<InitPasteResponse>(&b).ok())
                         {
-                            Some(r) => r.id,
+                            Some(r) => (
+                                r.id,
+                                base64::engine::general_purpose::STANDARD.encode(r.upload_token),
+                            ),
                             None => {
                                 popup_ctx.write().show_error(
                                     t!("error-parse-response-failed", error: "init response"),
@@ -607,9 +612,10 @@ pub fn home_view() -> Element {
                     let chunk_end = std::cmp::min(chunk_start + UPLOAD_CHUNK_SIZE, enc_body.len());
                     let chunk_data = enc_body[chunk_start..chunk_end].to_vec();
 
-                    let upload_result = do_xhr_put(
+                    let upload_result = do_xhr_put_headers(
                         &format!("{}/api/paste/{}/chunk/{}", BASE_URL, paste_id, i),
                         chunk_data,
+                        vec![("X-Upload-Token".to_string(), upload_token.clone())],
                         |loaded, total| {
                             if total > 0 {
                                 let chunk_pct = loaded as f32 / total as f32;
@@ -642,9 +648,10 @@ pub fn home_view() -> Element {
                     progress: 95.0,
                 }));
 
-                let complete_result = do_xhr_post(
+                let complete_result = do_xhr_post_headers(
                     &format!("{}/api/paste/{}/complete", BASE_URL, paste_id),
                     Vec::new(),
+                    vec![("X-Upload-Token".to_string(), upload_token.clone())],
                     |_, _| {},
                 )
                 .await;

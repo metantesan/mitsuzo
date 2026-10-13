@@ -62,8 +62,9 @@ pub fn sanitize_id(id: &str) -> String {
 fn main() {
     wasm_logger::init(wasm_logger::Config::default());
 
-    if let Some(storage) = web_sys::window().and_then(|w| w.session_storage().ok().flatten())
-        && let Ok(hash) = web_sys::window().unwrap().location().hash()
+    if let Some(window) = web_sys::window()
+        && let Some(storage) = window.session_storage().ok().flatten()
+        && let Ok(hash) = window.location().hash()
         && !hash.is_empty()
         && hash != "#"
     {

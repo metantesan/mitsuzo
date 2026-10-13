@@ -808,6 +808,8 @@ async fn main() -> eyre::Result<()> {
             let init_body = init_response.bytes().await?;
             let decoded: InitPasteResponse = bitcode::decode(&init_body)?;
             let paste_id = decoded.id;
+            let upload_token =
+                base64::engine::general_purpose::STANDARD.encode(decoded.upload_token);
 
             let chunk_info = client
                 .get(format!("{}/api/paste/{}/chunks", base_url, paste_id))
@@ -836,6 +838,7 @@ async fn main() -> eyre::Result<()> {
             let pb = Arc::new(pb);
             let url = format!("{}/api/paste/{}/chunk", base_url, paste_id);
             let ct = Arc::new(ciphertext);
+            let upload_token = Arc::new(upload_token);
 
             let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let mut handles = Vec::new();
@@ -846,6 +849,7 @@ async fn main() -> eyre::Result<()> {
                 let url = url.clone();
                 let ct = ct.clone();
                 let failed = failed.clone();
+                let upload_token = upload_token.clone();
 
                 handles.push(tokio::spawn(async move {
                     let cs = i as usize * UPLOAD_CHUNK_SIZE;
@@ -854,6 +858,7 @@ async fn main() -> eyre::Result<()> {
                     for retry in 0..3 {
                         let resp = client
                             .put(format!("{}/{}", url, i))
+                            .header("X-Upload-Token", upload_token.as_str())
                             .body(data.clone())
                             .send()
                             .await;
@@ -895,6 +900,7 @@ async fn main() -> eyre::Result<()> {
 
             let complete = client
                 .post(format!("{}/api/paste/{}/complete", base_url, paste_id))
+                .header("X-Upload-Token", upload_token.as_str())
                 .body(Vec::new())
                 .send()
                 .await?;

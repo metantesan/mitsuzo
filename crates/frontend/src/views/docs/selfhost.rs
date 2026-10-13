@@ -60,6 +60,19 @@ pub fn selfhost_section() -> Element {
                             td { class: "py-2 pr-4", "5242880 (5 MB)" }
                             td { class: "py-2", {t!("docs-env-size-desc")} }
                         }
+                        tr {
+                            class: "border-b border-border/50",
+                            td { class: "py-2 pr-4 font-mono text-xs", "MITSUZO_TRUST_PROXY" }
+                            td { class: "py-2 pr-4", "unset" }
+                            td { class: "py-2 pr-4", "unset" }
+                            td { class: "py-2", {t!("docs-env-proxy-desc")} }
+                        }
+                        tr {
+                            td { class: "py-2 pr-4 font-mono text-xs", "MITSUZO_ALLOWED_ORIGINS" }
+                            td { class: "py-2 pr-4", "unset" }
+                            td { class: "py-2 pr-4", "unset" }
+                            td { class: "py-2", {t!("docs-env-origins-desc")} }
+                        }
                     }
                 }
             }
