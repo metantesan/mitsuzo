@@ -14,6 +14,18 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.13.1",
+            date: "2026-10-14",
+            items_en: vec![
+                "Updated quinn-proto to 0.11.18 to resolve five RUSTSEC denial-of-service advisories (RUSTSEC-2026-0338 through RUSTSEC-2026-0342) in the HTTP/3 stack pulled in transitively by the CLI",
+                "This clears the failing Rust dependency audit (cargo-audit) in CI",
+            ],
+            items_fa: vec![
+                "به‌روزرسانی quinn-proto به ۰.۱۱.۱۸ برای رفع پنج advisory از نوع denial-of-service (RUSTSEC-2026-0338 تا RUSTSEC-2026-0342) در پشته HTTP/3 که به‌صورت غیرمستقیم توسط CLI کشیده می‌شود",
+                "این تغییر بررسی ناموفق audit وابستگی‌های Rust (cargo-audit) در CI را برطرف می‌کند",
+            ],
+        },
+        Change {
             version: "v0.13.0",
             date: "2026-10-14",
             items_en: vec![
