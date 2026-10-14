@@ -14,6 +14,32 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.13.0",
+            date: "2026-10-14",
+            items_en: vec![
+                "Replaced the Sled runtime store with SQLite via SeaORM: transactional writes, WAL mode, and one database for paste metadata, credentials, recipient envelopes, chunks, accounts, inbox listings, and statistics",
+                "Startup now refuses to run when it finds a legacy Sled database and explains how to migrate first, instead of silently starting with an empty store",
+                "Uploads are protected by a per-paste token (X-Upload-Token), and completion requires every chunk to have arrived, so a guessed paste id can no longer inject or corrupt chunks",
+                "The client IP used for rate limiting now comes from the socket peer; X-Forwarded-For and X-Real-IP are only trusted when MITSUZO_TRUST_PROXY is enabled",
+                "Replaced reflective CORS with an explicit MITSUZO_ALLOWED_ORIGINS allowlist that defaults to same-origin",
+                "The rate limiter caps its key set so spoofed identities can no longer grow memory without bound",
+                "Added /healthz and /readyz endpoints and graceful shutdown on SIGINT/SIGTERM with a bounded force-exit so the process always stops",
+                "Hardened the Docker image: pinned toolchain and CLI versions, a non-root user, and a container healthcheck",
+                "Cached static assets with ETags, moved chunk file writes to the blocking pool, and added HTTP integration tests plus cargo-deny to CI",
+            ],
+            items_fa: vec![
+                "جایگزینی ذخیره‌ساز Sled با SQLite به کمک SeaORM: نوشتن تراکنشی، حالت WAL و یک پایگاه‌داده برای متادیتای Paste، credentialها، envelopeهای گیرنده، chunkها، accountها، inbox و آمار",
+                "هنگام یافتن پایگاه‌داده قدیمی Sled، اجرای برنامه متوقف می‌شود و راهنمای مهاجرت نمایش داده می‌شود، به‌جای شروع بی‌صدا با ذخیره‌ساز خالی",
+                "آپلودها با یک توکن مخصوص هر Paste (X-Upload-Token) محافظت می‌شوند و تکمیل نیازمند رسیدن همه chunkهاست؛ بنابراین شناسه حدس‌زده‌شده نمی‌تواند chunk تزریق یا خراب کند",
+                "IP کلاینت برای محدودیت نرخ از peer سوکت گرفته می‌شود و X-Forwarded-For و X-Real-IP تنها با فعال‌بودن MITSUZO_TRUST_PROXY معتبرند",
+                "جایگزینی CORS بازتابی با فهرست مجاز صریح MITSUZO_ALLOWED_ORIGINS که به‌صورت پیش‌فرض same-origin است",
+                "محدودکننده نرخ مجموعه کلیدهایش را کران‌دار می‌کند تا هویت‌های جعلی نتوانند حافظه را بی‌حد افزایش دهند",
+                "افزودن endpointهای /healthz و /readyz و خاموش‌شدن تدریجی روی SIGINT/SIGTERM با خروج اجباری محدود تا فرایند همیشه متوقف شود",
+                "سخت‌سازی ایمیج Docker: پین‌کردن نسخه toolchain و CLI، کاربر غیر root و healthcheck کانتینر",
+                "کش‌کردن assetهای ایستا با ETag، انتقال نوشتن فایل chunk به blocking pool و افزودن تست‌های یکپارچه HTTP و cargo-deny به CI",
+            ],
+        },
+        Change {
             version: "v0.12.10",
             date: "2026-09-27",
             items_en: vec![
