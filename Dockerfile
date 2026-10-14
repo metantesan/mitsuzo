@@ -1,5 +1,8 @@
 # Stage 1: Builder
-FROM rust:1.97-bookworm AS builder
+FROM rust:1.97-trixie AS builder
+
+# trixie (glibc >= 2.39) is required: the prebuilt dioxus-cli `dx` binary is
+# linked against a newer glibc than bookworm provides (needs GLIBC_2.39).
 
 WORKDIR /app
 
@@ -30,7 +33,7 @@ RUN cd crates/frontend && dx build --release
 RUN cargo build --release --locked -p backend
 
 # Stage 2: Runner
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 WORKDIR /app
 
