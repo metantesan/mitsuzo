@@ -14,6 +14,16 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.13.4",
+            date: "2026-10-18",
+            items_en: vec![
+                "Routine dependency updates: async-trait 0.1.92, rand 0.10.3, sha2 0.11.1, log 0.4.34, and zeroize 1.9.1",
+            ],
+            items_fa: vec![
+                "به‌روزرسانی‌های معمول وابستگی‌ها: async-trait 0.1.92، rand 0.10.3، sha2 0.11.1، log 0.4.34 و zeroize 1.9.1",
+            ],
+        },
+        Change {
             version: "v0.13.3",
             date: "2026-10-18",
             items_en: vec![
