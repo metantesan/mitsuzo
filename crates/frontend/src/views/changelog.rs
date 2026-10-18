@@ -14,6 +14,20 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.13.2",
+            date: "2026-10-18",
+            items_en: vec![
+                "Restored automatic migration of legacy Sled data into SQLite on startup: existing deployments now import pastes, credentials, recipient envelopes, chunks, accounts, inbox listings, and statistics instead of refusing to start",
+                "After a successful, transactional, idempotent import the old Sled directory is archived as `db.sled-migrated`",
+                "Updated rustls to 0.23.46 to resolve RUSTSEC-2026-0346 through RUSTSEC-2026-0349",
+            ],
+            items_fa: vec![
+                "بازگرداندن مهاجرت خودکار داده‌های قدیمی Sled به SQLite هنگام راه‌اندازی: استقرارهای موجود اکنون Pasteها، credentialها، envelopeهای گیرنده، chunkها، accountها، inbox و آمار را منتقل می‌کنند و دیگر از راه‌اندازی امتناع نمی‌کنند",
+                "پس از مهاجرت موفق، تراکنشی و idempotent، پوشه قدیمی Sled با نام `db.sled-migrated` بایگانی می‌شود",
+                "به‌روزرسانی rustls به ۰.۲۳.۴۶ برای رفع RUSTSEC-2026-0346 تا RUSTSEC-2026-0349",
+            ],
+        },
+        Change {
             version: "v0.13.1",
             date: "2026-10-14",
             items_en: vec![
