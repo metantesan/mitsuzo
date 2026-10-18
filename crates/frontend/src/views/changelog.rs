@@ -14,6 +14,18 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.13.3",
+            date: "2026-10-18",
+            items_en: vec![
+                "Removed the bundled Sled storage backend and importer; everything is stored in SQLite only",
+                "If a legacy Sled database is found at startup, the server now stops with clear guidance: to migrate, first run v0.13.2 (which imports Sled data into SQLite), then upgrade to this version",
+            ],
+            items_fa: vec![
+                "حذف backend ذخیره‌سازی Sled و importer همراه؛ همه‌چیز فقط در SQLite ذخیره می‌شود",
+                "اگر هنگام راه‌اندازی پایگاه‌داده قدیمی Sled یافت شود، سرور با راهنمای روشن متوقف می‌شود: برای مهاجرت ابتدا نسخه v0.13.2 را اجرا کنید (که داده‌های Sled را به SQLite منتقل می‌کند) و سپس به این نسخه ارتقا دهید",
+            ],
+        },
+        Change {
             version: "v0.13.2",
             date: "2026-10-18",
             items_en: vec![

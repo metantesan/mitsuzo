@@ -217,20 +217,6 @@ pub struct PasteMeta {
     pub recipient_kid: Option<[u8; 32]>,
 }
 
-/// Frozen snapshot of the pre-account `PasteMeta` wire format, used only to
-/// migrate existing sled rows to the version with `recipient_pub`/`recipient_kid`.
-#[derive(bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
-pub struct LegacyPasteMeta {
-    pub try_count: u32,
-    pub expiration_timestamp: u64,
-    pub data_type: DataType,
-    pub filename: Option<String>,
-    pub content_type: Option<String>,
-    pub total_chunks: u32,
-    pub allow_download: bool,
-    pub burn_after_read: bool,
-}
-
 pub struct PasteListing {
     pub id: String,
     pub size: u64,

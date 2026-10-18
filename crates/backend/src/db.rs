@@ -1,8 +1,7 @@
 use bitcode::{decode, encode};
-use eyre::Context;
+use eyre::{Context, eyre};
 use mitsuzo_types::{
-    AccountRecord, DataType, KeyEnvelope, LegacyPasteMeta, PasteInboxListing, PasteMeta,
-    RecipientEnvelope,
+    AccountRecord, DataType, KeyEnvelope, PasteInboxListing, PasteMeta, RecipientEnvelope,
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
@@ -17,9 +16,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex;
-use tracing::info;
 
-use crate::entities::{account, chunk, credential, paste, recipient, recipient_inbox, stat, state};
+use crate::entities::{account, chunk, credential, paste, recipient, recipient_inbox, stat};
 
 #[derive(Clone)]
 pub struct DataStore {
@@ -111,230 +109,6 @@ fn account_from_model(m: &account::Model) -> Option<AccountRecord> {
     })
 }
 
-/// One-time import of the legacy Sled namespaces into the SQLite schema.
-///
-/// Idempotent: guarded by a `legacy_sled_migrated` marker in `app_state`, and
-/// transactional so a failed startup cannot leave a partially imported
-/// database. Returns `Ok(())` immediately when there is no Sled data.
-async fn migrate_legacy_sled(
-    connection: &DatabaseConnection,
-    database_dir: &Path,
-) -> eyre::Result<()> {
-    let sled_dir = database_dir.join("db");
-    let stats_dir = database_dir.join("stats");
-    if !sled_dir.exists() && !stats_dir.exists() {
-        return Ok(());
-    }
-    if state::Entity::find_by_id("legacy_sled_migrated")
-        .one(connection)
-        .await?
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    let db = if sled_dir.exists() {
-        Some(sled::open(&sled_dir).wrap_err("Failed to open legacy Sled database")?)
-    } else {
-        None
-    };
-    let stats = if stats_dir.exists() {
-        Some(sled::open(&stats_dir).wrap_err("Failed to open legacy Sled stats")?)
-    } else {
-        None
-    };
-
-    let txn = connection.begin().await?;
-
-    if let Some(db) = &db {
-        for item in db.scan_prefix(b"meta:") {
-            let (key, value) = item?;
-            let id = std::str::from_utf8(&key[5..])?.to_owned();
-            let meta = decode::<PasteMeta>(&value)
-                .or_else(|_| {
-                    decode::<LegacyPasteMeta>(&value).map(|legacy| PasteMeta {
-                        try_count: legacy.try_count,
-                        expiration_timestamp: legacy.expiration_timestamp,
-                        data_type: legacy.data_type,
-                        filename: legacy.filename,
-                        content_type: legacy.content_type,
-                        total_chunks: legacy.total_chunks,
-                        allow_download: legacy.allow_download,
-                        burn_after_read: legacy.burn_after_read,
-                        recipient_pub: None,
-                        recipient_kid: None,
-                    })
-                })
-                .wrap_err_with(|| format!("Invalid legacy metadata for paste {id}"))?;
-
-            let received_chunks = db
-                .get(format!("crecv:{id}"))?
-                .and_then(|v| v.as_ref().try_into().ok())
-                .map(u32::from_le_bytes)
-                .unwrap_or(0);
-            let burn_receipt_hash = db
-                .get(format!("burn:{id}"))?
-                .map(|v| v.to_vec())
-                .unwrap_or_default();
-            let burned = db.get(format!("burned:{id}"))?.is_some();
-
-            paste::ActiveModel {
-                id: Set(id.clone()),
-                try_count: Set(meta.try_count as i32),
-                expiration_timestamp: Set(meta.expiration_timestamp as i64),
-                data_type: Set(encode(&meta.data_type)),
-                filename: Set(meta.filename),
-                content_type: Set(meta.content_type),
-                total_chunks: Set(meta.total_chunks as i32),
-                received_chunks: Set(received_chunks as i32),
-                allow_download: Set(meta.allow_download),
-                burn_after_read: Set(meta.burn_after_read),
-                recipient_pub: Set(meta.recipient_pub.map(|v| v.to_vec())),
-                recipient_kid: Set(meta.recipient_kid.map(|v| v.to_vec())),
-                burn_receipt_hash: Set(burn_receipt_hash),
-                burned: Set(burned),
-                // Legacy pastes predate per-paste upload tokens.
-                upload_token_hash: Set(None),
-            }
-            .insert(&txn)
-            .await?;
-
-            let salt = db.get(format!("salt:{id}"))?.map(|v| v.to_vec());
-            let password_hash = db.get(format!("pass:{id}"))?.map(|v| v.to_vec());
-            let (wrap_nonce, wrapped_key) = db
-                .get(format!("key:{id}"))?
-                .map(|v| {
-                    let bytes = v.to_vec();
-                    if bytes.len() == 60 {
-                        (Some(bytes[..12].to_vec()), Some(bytes[12..].to_vec()))
-                    } else {
-                        (None, None)
-                    }
-                })
-                .unwrap_or((None, None));
-            if salt.is_some() || password_hash.is_some() || wrap_nonce.is_some() {
-                credential::ActiveModel {
-                    paste_id: Set(id.clone()),
-                    salt: Set(salt),
-                    password_hash: Set(password_hash),
-                    wrap_nonce: Set(wrap_nonce),
-                    wrapped_key: Set(wrapped_key),
-                }
-                .insert(&txn)
-                .await?;
-            }
-
-            if let Some(value) = db.get(format!("recp:{id}"))? {
-                let envelope: RecipientEnvelope = decode(&value)?;
-                recipient::ActiveModel {
-                    paste_id: Set(id.clone()),
-                    recipient_kid: Set(envelope.recipient_kid.to_vec()),
-                    ephemeral_pub: Set(envelope.ephemeral_pub.to_vec()),
-                    nonce: Set(envelope.nonce.to_vec()),
-                    sealed_cek: Set(envelope.sealed_cek.to_vec()),
-                }
-                .insert(&txn)
-                .await?;
-            }
-        }
-
-        for item in db.scan_prefix(b"chunk:") {
-            let (key, _) = item?;
-            let value = std::str::from_utf8(&key[6..])?;
-            let Some((paste_id, chunk_index)) = value.rsplit_once(':') else {
-                continue;
-            };
-            chunk::ActiveModel {
-                paste_id: Set(paste_id.to_owned()),
-                chunk_index: Set(chunk_index.parse::<i32>()?),
-            }
-            .insert(&txn)
-            .await?;
-        }
-
-        for item in db.scan_prefix(b"acct:") {
-            let (_, value) = item?;
-            let account_record: AccountRecord = decode(&value)?;
-            account::ActiveModel {
-                kid: Set(account_record.kid.to_vec()),
-                pubkey: Set(account_record.pubkey.to_vec()),
-                name: Set(account_record.name),
-                created_at: Set(account_record.created_at as i64),
-            }
-            .insert(&txn)
-            .await?;
-        }
-
-        for item in db.scan_prefix(b"recpix:") {
-            let (key, value) = item?;
-            let key = std::str::from_utf8(&key[7..])?;
-            let Some((kid_hex, paste_id)) = key.split_once(':') else {
-                continue;
-            };
-            let kid = (0..kid_hex.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&kid_hex[i..i + 2], 16))
-                .collect::<Result<Vec<_>, _>>()?;
-            let listing: PasteInboxListing = decode(&value)?;
-            recipient_inbox::ActiveModel {
-                recipient_kid: Set(kid),
-                paste_id: Set(paste_id.to_owned()),
-                listing: Set(encode(&listing)),
-            }
-            .insert(&txn)
-            .await?;
-        }
-    }
-
-    if let Some(stats) = &stats {
-        for item in stats.iter() {
-            let (key, value) = item?;
-            let key = std::str::from_utf8(&key)?.to_owned();
-            let value = value
-                .as_ref()
-                .try_into()
-                .map(u64::from_be_bytes)
-                .unwrap_or(0) as i64;
-            stat::ActiveModel {
-                key: Set(key),
-                value: Set(value),
-            }
-            .insert(&txn)
-            .await?;
-        }
-    }
-
-    state::ActiveModel {
-        key: Set("legacy_sled_migrated".to_owned()),
-        value: Set(b"1".to_vec()),
-    }
-    .insert(&txn)
-    .await?;
-
-    txn.commit().await?;
-    if let Some(db) = db {
-        db.flush()?;
-    }
-    if let Some(stats) = stats {
-        stats.flush()?;
-    }
-    info!("legacy Sled data imported into SQLite");
-    Ok(())
-}
-
-/// Move the legacy Sled trees aside after a successful import so they are not
-/// rescanned and it is obvious they have been migrated. Best-effort: the
-/// `legacy_sled_migrated` marker already makes the import idempotent.
-fn archive_legacy_sled(database_dir: &Path) {
-    for name in ["db", "stats"] {
-        let from = database_dir.join(name);
-        let to = database_dir.join(format!("{name}.sled-migrated"));
-        if from.exists() && !to.exists() {
-            let _ = std::fs::rename(&from, &to);
-        }
-    }
-}
-
 impl DataStore {
     pub async fn new() -> eyre::Result<Self> {
         Self::open(Path::new("database")).await
@@ -344,6 +118,26 @@ impl DataStore {
     /// with the default `database` directory and by tests with a temp dir.
     pub async fn open(database_dir: &Path) -> eyre::Result<Self> {
         std::fs::create_dir_all(database_dir).wrap_err("Failed to create database directory")?;
+
+        // This release stores everything in SQLite and no longer bundles the
+        // Sled importer. If an old Sled installation is still present, point
+        // the operator at the transitional release instead of silently
+        // starting with an empty database.
+        let legacy_sled = database_dir.join("db");
+        let legacy_stats = database_dir.join("stats");
+        if legacy_sled.exists() || legacy_stats.exists() {
+            return Err(eyre!(
+                "Found a legacy Sled database in '{}'. This version stores pastes \
+                 in SQLite and no longer supports Sled.\n\
+                 To migrate existing pastes, first run v0.13.2 (which imports \
+                 Sled data into SQLite), then upgrade to this version.\n\
+                 If you do not need the old data, move '{}' aside (for example, \
+                 rename it to 'database.old') and start this version with an \
+                 empty database.",
+                database_dir.display(),
+                database_dir.display(),
+            ));
+        }
 
         let sqlite_path = database_dir.join("mitsuzo.sqlite");
         let sqlite_url = format!("sqlite://{}?mode=rwc", sqlite_path.display());
@@ -360,16 +154,6 @@ impl DataStore {
         mitsuzo_migration::Migrator::up(&db, None)
             .await
             .wrap_err("Failed to apply SeaORM migrations")?;
-
-        // One-time import of a pre-cutover Sled installation, if present.
-        // Earlier releases stored paste metadata in `database/db` (and stats
-        // in `database/stats`); this version stores everything in SQLite.
-        // Import before serving so existing pastes keep working, then archive
-        // the Sled trees so later starts skip the import.
-        migrate_legacy_sled(&db, database_dir)
-            .await
-            .wrap_err("Failed to import legacy Sled data")?;
-        archive_legacy_sled(database_dir);
 
         let files_dir = database_dir.join("files");
         std::fs::create_dir_all(&files_dir)
@@ -956,65 +740,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrates_legacy_sled_data() {
-        let dir = std::env::temp_dir().join(format!("mitsuzo-db-migrate-{}", std::process::id()));
+    async fn refuses_legacy_sled_directory_with_guidance() {
+        let dir = std::env::temp_dir().join(format!("mitsuzo-db-legacy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create test dir");
+        std::fs::create_dir_all(dir.join("db")).expect("create fake sled dir");
 
-        // Build a minimal legacy Sled installation.
-        let id = "123456";
-        let sled_db = sled::open(dir.join("db")).expect("open legacy sled");
-        let meta = PasteMeta {
-            try_count: 5,
-            expiration_timestamp: 0,
-            data_type: DataType::Text,
-            filename: None,
-            content_type: None,
-            total_chunks: 1,
-            allow_download: true,
-            burn_after_read: false,
-            recipient_pub: None,
-            recipient_kid: None,
-        };
-        sled_db
-            .insert(format!("meta:{id}"), encode(&meta))
-            .expect("insert meta");
-        sled_db
-            .insert(format!("pass:{id}"), vec![7u8; 32])
-            .expect("insert pass");
-        sled_db
-            .insert(format!("salt:{id}"), vec![9u8; 16])
-            .expect("insert salt");
-        let mut key_blob = vec![0u8; 60];
-        key_blob[0] = 1;
-        sled_db
-            .insert(format!("key:{id}"), key_blob)
-            .expect("insert key");
-        sled_db
-            .insert(format!("crecv:{id}"), 1u32.to_le_bytes().to_vec())
-            .expect("insert crecv");
-        sled_db.flush().expect("flush legacy sled");
-        drop(sled_db);
-
-        // Opening the store imports the Sled data into SQLite.
-        let store = DataStore::open(&dir).await.expect("open migrates");
-        let migrated = store.get_meta(id).await.expect("paste migrated");
-        assert_eq!(migrated.try_count, 5);
-        assert_eq!(store.get_received_chunks(id).await, 1);
-        assert!(store.get_password_hash(id).await.is_some());
-        assert!(store.get_key(id).await.is_some());
-
-        // The Sled tree is archived and reopening is idempotent.
-        assert!(!dir.join("db").exists());
-        assert!(dir.join("db.sled-migrated").exists());
-        let reopened = DataStore::open(&dir).await.expect("reopen");
-        assert_eq!(
-            reopened
-                .get_meta(id)
-                .await
-                .expect("still migrated")
-                .try_count,
-            5
+        let err = DataStore::open(&dir)
+            .await
+            .err()
+            .expect("opening a legacy Sled directory should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("legacy Sled"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("v0.13.2"),
+            "should point at the migration release: {message}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
