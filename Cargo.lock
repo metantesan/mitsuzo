@@ -1659,9 +1659,9 @@ dependencies = [
 
 [[package]]
 name = "dioxus-i18n"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ceebf715471a986307cdfe422d645c0784602003758171102ba9225624be9f55"
+checksum = "6a14946b7d1d239d8f0430111574d820bb133989b14552503990cba3000c93d2"
 dependencies = [
  "dioxus",
  "fluent",
