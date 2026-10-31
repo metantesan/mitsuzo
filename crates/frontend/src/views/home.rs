@@ -16,10 +16,10 @@ use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{
     AccountProfileResponse, CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, DataType,
     GetStatsResponse, InitPasteResponse, KeyEnvelope, MAX_PASTE_SIZE, RecipientEnvelope,
-    UPLOAD_CHUNK_SIZE,
+    UPLOAD_CHUNK_SIZE, encode_xchacha_create,
 };
 use mitsuzo_utils::{
-    compute_burn_receipt, encrypt_chunk_into, encrypt_setup, generate_content_key,
+    ContentCipherKind, compute_burn_receipt, encrypt_setup, generate_content_key,
     generate_x25519_keypair, get_ciphertext_size, seal_content_key_for_recipient,
 };
 use wasm_bindgen::JsCast;
@@ -106,6 +106,7 @@ pub fn home_view() -> Element {
     let recipient = use_recipient_target();
     let recipient_ephemerals = use_recipient_ephemerals();
     let mut recipient_search = use_signal(String::new);
+    let mut use_xchacha = use_signal(|| true);
     let mut encrypt_mode = use_signal(move || {
         if recipient.read().is_some() {
             EncryptMode::Account
@@ -469,8 +470,23 @@ pub fn home_view() -> Element {
                     };
                 let encryption_key = content_key;
                 let nonce_bytes = header.nonce;
-
-                let header_bytes = bitcode::encode(&header);
+                let xnonce = if *use_xchacha.read() {
+                    let mut nonce = [0u8; 24];
+                    if let Err(e) = getrandom::fill(&mut nonce) {
+                        popup_ctx
+                            .write()
+                            .show_error(t!("error-encryption-failed", error: e.to_string()));
+                        progress.set(None);
+                        return;
+                    }
+                    Some(nonce)
+                } else {
+                    None
+                };
+                let header_bytes = match xnonce {
+                    Some(nonce) => encode_xchacha_create(&header, &nonce),
+                    None => bitcode::encode(&header),
+                };
 
                 progress.set(Some(ProgressState {
                     status: t!("progress-encrypting"),
@@ -484,18 +500,33 @@ pub fn home_view() -> Element {
                     (Some(text_bytes), _) => {
                         let chunk_size = get_ciphertext_size(text_bytes.len());
                         enc_body.reserve(chunk_size);
-                        if let Err(e) = encrypt_chunk_into(
-                            &text_bytes,
-                            &encryption_key,
-                            &nonce_bytes,
-                            0,
-                            &mut enc_body,
-                        ) {
-                            popup_ctx
-                                .write()
-                                .show_error(t!("error-encryption-failed", error: e.to_string()));
-                            progress.set(None);
-                            return;
+                        for i in 0..total_chunks {
+                            let start = i as usize * CHUNK_SIZE;
+                            let end = (start + CHUNK_SIZE).min(text_bytes.len());
+                            let chunk = &text_bytes[start..end];
+                            let result = match xnonce {
+                                Some(nonce) => ContentCipherKind::XChaCha20Poly1305.encrypt_chunk(
+                                    &encryption_key,
+                                    &nonce,
+                                    i,
+                                    chunk,
+                                    &mut enc_body,
+                                ),
+                                None => ContentCipherKind::ChaCha20Poly1305.encrypt_chunk(
+                                    &encryption_key,
+                                    &nonce_bytes,
+                                    i,
+                                    chunk,
+                                    &mut enc_body,
+                                ),
+                            };
+                            if let Err(e) = result {
+                                popup_ctx.write().show_error(
+                                    t!("error-encryption-failed", error: e.to_string()),
+                                );
+                                progress.set(None);
+                                return;
+                            }
                         }
                     }
                     (_, Some(file)) => {
@@ -523,13 +554,22 @@ pub fn home_view() -> Element {
                                 .await
                                 .map_err(|_| "read failed".to_string())
                                 .unwrap();
-                            if let Err(e) = encrypt_chunk_into(
-                                &chunk_bytes,
-                                &encryption_key,
-                                &nonce_bytes,
-                                i,
-                                &mut enc_body,
-                            ) {
+                            if let Err(e) = match xnonce {
+                                Some(nonce) => ContentCipherKind::XChaCha20Poly1305.encrypt_chunk(
+                                    &encryption_key,
+                                    &nonce,
+                                    i,
+                                    &chunk_bytes,
+                                    &mut enc_body,
+                                ),
+                                None => ContentCipherKind::ChaCha20Poly1305.encrypt_chunk(
+                                    &encryption_key,
+                                    &nonce_bytes,
+                                    i,
+                                    &chunk_bytes,
+                                    &mut enc_body,
+                                ),
+                            } {
                                 popup_ctx.write().show_error(
                                     t!("error-encryption-failed", error: e.to_string()),
                                 );
@@ -546,8 +586,17 @@ pub fn home_view() -> Element {
                     progress: 50.0,
                 }));
 
-                let init_result =
-                    do_xhr_post(&format!("{}/api/paste", BASE_URL), header_bytes, |_, _| {}).await;
+                let init_path = if xnonce.is_some() {
+                    "/api/paste/xchacha"
+                } else {
+                    "/api/paste"
+                };
+                let init_result = do_xhr_post(
+                    &format!("{}{}", BASE_URL, init_path),
+                    header_bytes,
+                    |_, _| {},
+                )
+                .await;
 
                 let (paste_id, upload_token) = match init_result {
                     Ok(response) if response.status >= 200 && response.status < 300 => {
@@ -663,6 +712,21 @@ pub fn home_view() -> Element {
                             status: t!("progress-upload-complete"),
                             progress: 100.0,
                         }));
+                    }
+                    Ok(response) if response.status == 409 => {
+                        let received = do_xhr_get(
+                            &format!("{}/api/paste/{}/chunks", BASE_URL, paste_id),
+                            vec![],
+                            |_, _| {},
+                        )
+                        .await
+                        .ok()
+                        .and_then(|response| response.body)
+                        .and_then(|body| bitcode::decode::<ChunkInfoResponse>(&body).ok())
+                        .map(|info| info.received)
+                        .unwrap_or(0);
+                        popup_ctx.write().show_error(t!("error-upload-incomplete", received: received, total: total_upload_chunks));
+                        progress.set(None);
                     }
                     _ => {
                         popup_ctx
@@ -909,6 +973,17 @@ pub fn home_view() -> Element {
                 }
             }
 
+            label {
+                    class: "w-full max-w-xl mb-3 text-muted text-sm",
+                    {t!("password-cipher")}
+                    select {
+                        class: "w-full mt-1 p-3 bg-surface text-text rounded-lg border border-border",
+                        value: if *use_xchacha.read() { "xchacha" } else { "chacha" },
+                        onchange: move |event| use_xchacha.set(event.value() == "xchacha"),
+                        option { value: "chacha", "ChaCha20-Poly1305" }
+                        option { value: "xchacha", "XChaCha20-Poly1305" }
+                    }
+                }
             if !account_mode {
                 input {
                     class: "w-full max-w-xl p-4 bg-surface text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",

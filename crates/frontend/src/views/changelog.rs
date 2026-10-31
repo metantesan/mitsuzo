@@ -14,6 +14,20 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.14.0",
+            date: "2026-10-31",
+            items_en: vec![
+                "Added XChaCha20-Poly1305 content encryption as the default for new password and recipient pastes; ChaCha20-Poly1305 remains selectable for compatibility",
+                "Versioned paste encryption formats so clients can identify and decrypt existing pastes with the correct algorithm",
+                "Fixed upload completion checks for chunked file pastes and added CLI cipher selection",
+            ],
+            items_fa: vec![
+                "افزودن رمزنگاری محتوای XChaCha20-Poly1305 به‌عنوان پیش‌فرض Pasteهای جدیدِ رمزعبوری و گیرنده؛ انتخاب ChaCha20-Poly1305 برای سازگاری همچنان ممکن است",
+                "نسخه‌گذاری قالب‌های رمزنگاری Paste تا کلاینت‌ها الگوریتم درست را برای رمزگشایی Pasteهای موجود تشخیص دهند",
+                "رفع بررسی تکمیل آپلود فایل‌های chunkشده و افزودن امکان انتخاب رمزنگاری در CLI",
+            ],
+        },
+        Change {
             version: "v0.13.4",
             date: "2026-10-18",
             items_en: vec![

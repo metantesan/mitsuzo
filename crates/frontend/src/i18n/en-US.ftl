@@ -90,6 +90,7 @@ error-encryption-failed = Failed to encrypt content: { $error }
 error-parse-response-failed = Failed to parse response: { $error }
 error-empty-response = Empty response body
 error-create-paste-failed = Failed to create paste: HTTP { $status }
+error-upload-incomplete = Upload incomplete: server received { $received } of { $total } upload chunks. Please retry.
 error-send-request-failed = Failed to send request: { $error }
 error-decode-salt-failed = Failed to decode salt response: { $error }
 error-empty-salt-response = Empty salt response
@@ -298,3 +299,5 @@ footer-created = Created by
 footer-author = hikari
 footer-github = GitHub
 footer-tagline = Built for one. Available to anyone who needs it.
+
+password-cipher = Encryption algorithm

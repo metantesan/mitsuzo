@@ -12,10 +12,10 @@ use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{
     ChangePasswordRequest, DataType, FailedAttempt, GetSaltResponse, KeyEnvelope, PasteAuthMode,
-    RecipientAuthChallenge, split_paste_frame,
+    RecipientAuthChallenge, split_paste_frame_with_nonce,
 };
 use mitsuzo_utils::{
-    compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_keys, encrypt_setup,
+    ContentCipherKind, compute_burn_receipt, compute_password_hash, derive_keys, encrypt_setup,
     get_chunk_bounds, get_plaintext_size, open_content_key_for_recipient, unwrap_content_key,
 };
 use wasm_bindgen::JsCast;
@@ -853,16 +853,17 @@ async fn do_decrypt(
                 if let Some(body) = response.body {
                     // The body is a length-prefixed metadata frame carrying the
                     // password-wrapped content key, followed by the ciphertext.
-                    let (frame_header, ciphertext) = match split_paste_frame(&body) {
-                        Ok(pair) => pair,
-                        Err(e) => {
-                            popup_ctx
-                                .write()
-                                .show_error(t!("error-decryption-failed", error: e));
-                            progress.set(None);
-                            return;
-                        }
-                    };
+                    let (frame_header, xchacha_nonce, ciphertext) =
+                        match split_paste_frame_with_nonce(&body) {
+                            Ok(pair) => pair,
+                            Err(e) => {
+                                popup_ctx
+                                    .write()
+                                    .show_error(t!("error-decryption-failed", error: e));
+                                progress.set(None);
+                                return;
+                            }
+                        };
                     // Envelope pastes: unwrap the CEK from the frame's metadata.
                     // Legacy pastes have no envelope: the derived KEK IS the key.
                     let encryption_key = match frame_header.key {
@@ -918,7 +919,7 @@ async fn do_decrypt(
                                 TimeoutFuture::new(0).await;
                             }
                             let (start, end) = get_chunk_bounds(paste_total_chunks, i, content.len());
-                            decrypt_chunk_into(&content[start..end], &encryption_key, &header_nonce, i, &mut plaintext)?;
+                            match xchacha_nonce { Some(nonce) => ContentCipherKind::XChaCha20Poly1305.decrypt_chunk(&encryption_key, &nonce, i, &content[start..end], &mut plaintext)?, None => ContentCipherKind::ChaCha20Poly1305.decrypt_chunk(&encryption_key, &header_nonce, i, &content[start..end], &mut plaintext)? };
                         }
                         Ok(())
                     }.await;
@@ -1091,16 +1092,17 @@ async fn do_recipient_decrypt(
                 progress.set(None);
                 return;
             };
-            let (frame_header, ciphertext) = match split_paste_frame(&body) {
-                Ok(pair) => pair,
-                Err(e) => {
-                    popup_ctx
-                        .write()
-                        .show_error(t!("error-decryption-failed", error: e));
-                    progress.set(None);
-                    return;
-                }
-            };
+            let (frame_header, xchacha_nonce, ciphertext) =
+                match split_paste_frame_with_nonce(&body) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        popup_ctx
+                            .write()
+                            .show_error(t!("error-decryption-failed", error: e));
+                        progress.set(None);
+                        return;
+                    }
+                };
             let Some(envelope) = frame_header.recipient.clone() else {
                 popup_ctx
                     .write()
@@ -1162,7 +1164,7 @@ async fn do_recipient_decrypt(
                         TimeoutFuture::new(0).await;
                     }
                     let (start, end) = get_chunk_bounds(paste_total_chunks, i, content.len());
-                    decrypt_chunk_into(&content[start..end], &encryption_key, &header_nonce, i, &mut plaintext)?;
+                    match xchacha_nonce { Some(nonce) => ContentCipherKind::XChaCha20Poly1305.decrypt_chunk(&encryption_key, &nonce, i, &content[start..end], &mut plaintext)?, None => ContentCipherKind::ChaCha20Poly1305.decrypt_chunk(&encryption_key, &header_nonce, i, &content[start..end], &mut plaintext)? };
                 }
                 Ok(())
             }

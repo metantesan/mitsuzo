@@ -90,6 +90,7 @@ error-encryption-failed = رمزگذاری محتوا ناموفق بود: { $er
 error-parse-response-failed = پردازش پاسخ ناموفق بود: { $error }
 error-empty-response = بدنه پاسخ خالی است
 error-create-paste-failed = ایجاد Paste ناموفق بود: HTTP { $status }
+error-upload-incomplete = بارگذاری کامل نشد: سرور { $received } از { $total } بخش را دریافت کرد. دوباره تلاش کنید.
 error-send-request-failed = ارسال درخواست ناموفق بود: { $error }
 error-decode-salt-failed = رمزگشایی پاسخ Salt ناموفق بود: { $error }
 error-empty-salt-response = پاسخ Salt خالی است
@@ -298,3 +299,5 @@ footer-created = ساخته شده توسط
 footer-author = هیکاری
 footer-github = گیت‌هاب
 footer-tagline = برای یک نفر ساخته شد. برای هر کسی که به آن نیاز دارد.
+
+password-cipher = الگوریتم رمزگذاری

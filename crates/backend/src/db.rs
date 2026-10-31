@@ -151,6 +151,7 @@ impl DataStore {
         let db = Database::connect(options)
             .await
             .wrap_err("Failed to connect to SQLite")?;
+
         mitsuzo_migration::Migrator::up(&db, None)
             .await
             .wrap_err("Failed to apply SeaORM migrations")?;
@@ -189,6 +190,7 @@ impl DataStore {
         &self,
         id: &str,
         header: &mitsuzo_types::CreatePasteHeader,
+        xchacha_nonce: Option<[u8; 24]>,
         upload_token_hash: &[u8; 32],
     ) -> eyre::Result<()> {
         // The PRNG hands out IDs that are otherwise available, which includes
@@ -199,8 +201,13 @@ impl DataStore {
         }
 
         let nonce_path = nonce_path(&self.files_dir, id);
-        std::fs::write(&nonce_path, header.nonce)
-            .wrap_err_with(|| format!("Failed to write nonce for paste {}", id))?;
+        std::fs::write(
+            &nonce_path,
+            xchacha_nonce
+                .as_ref()
+                .map_or(header.nonce.as_slice(), |n| n.as_slice()),
+        )
+        .wrap_err_with(|| format!("Failed to write nonce for paste {}", id))?;
 
         let expiration_timestamp = match header.ttl_seconds {
             Some(ttl) if ttl > 0 => (epoch_secs() + u64::from(ttl)) as i64,
@@ -214,7 +221,11 @@ impl DataStore {
             .wrap_err("Failed to begin transaction")?;
 
         paste::ActiveModel {
-            version: Set(if header.recipient.is_some() {
+            version: Set(if xchacha_nonce.is_some() && header.recipient.is_some() {
+                paste::PasteVersion::X25519HkdfSha256XChaCha20Poly1305
+            } else if xchacha_nonce.is_some() {
+                paste::PasteVersion::Argon2idHkdfSha256XChaCha20Poly1305
+            } else if header.recipient.is_some() {
                 paste::PasteVersion::X25519HkdfSha256ChaCha20Poly1305
             } else {
                 paste::PasteVersion::Argon2idHkdfSha256ChaCha20Poly1305
@@ -338,6 +349,53 @@ impl DataStore {
             .await
             .map(|m| m.received_chunks as u32)
             .unwrap_or(0)
+    }
+
+    /// Confirm the network upload is contiguous and its byte length is
+    /// compatible with the declared number of encrypted chunks.
+    pub async fn upload_is_complete(&self, id: &str, encrypted_chunks: u32) -> bool {
+        use mitsuzo_types::{CHUNK_SIZE, UPLOAD_CHUNK_SIZE};
+
+        if encrypted_chunks == 0 {
+            return false;
+        }
+        let Some(path) = self.get_content_path(id).await else {
+            return false;
+        };
+        let Ok(file_len) = std::fs::metadata(path).map(|m| m.len()) else {
+            return false;
+        };
+
+        let chunk_rows = match chunk::Entity::find()
+            .filter(chunk::Column::PasteId.eq(id))
+            .all(&self.db)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return false,
+        };
+        let mut indices: Vec<u32> = chunk_rows
+            .iter()
+            .map(|row| row.chunk_index as u32)
+            .collect();
+        indices.sort_unstable();
+        if indices
+            .iter()
+            .enumerate()
+            .any(|(i, index)| *index != i as u32)
+        {
+            return false;
+        }
+        let network_chunks = file_len.div_ceil(UPLOAD_CHUNK_SIZE as u64);
+        if network_chunks == 0 || network_chunks != indices.len() as u64 {
+            return false;
+        }
+
+        let tag_bytes = u64::from(encrypted_chunks) * 16;
+        let plaintext_capacity = u64::from(encrypted_chunks) * CHUNK_SIZE as u64;
+        let min_size = (u64::from(encrypted_chunks) - 1) * (CHUNK_SIZE as u64 + 16) + 16;
+        let max_size = plaintext_capacity + tag_bytes;
+        (min_size..=max_size).contains(&file_len)
     }
 
     pub async fn get_password_hash(&self, id: &str) -> Option<Vec<u8>> {

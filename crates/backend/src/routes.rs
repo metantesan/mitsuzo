@@ -50,6 +50,7 @@ pub fn api_router(state: AppState) -> Router {
 
     let router = Router::new()
         .route("/paste", post(handlers::init_paste))
+        .route("/paste/xchacha", post(handlers::init_paste))
         .route("/paste/{id}", get(handlers::get_paste))
         .route(
             "/paste/{id}/chunk/{chunk_index}",

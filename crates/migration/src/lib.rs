@@ -15,11 +15,16 @@ impl MigratorTrait for Migrator {
 
 mod m20261031_000003_paste_version {
     use super::Pastes;
-    use sea_orm::ConnectionTrait;
+    use sea_orm::sea_query::{Expr, Query};
     use sea_orm_migration::prelude::*;
 
-    #[derive(DeriveMigrationName)]
     pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261031_000003_paste_version"
+        }
+    }
 
     #[async_trait::async_trait]
     impl MigrationTrait for Migration {
@@ -37,9 +42,15 @@ mod m20261031_000003_paste_version {
                         .to_owned(),
                 )
                 .await?;
-            manager.get_connection().execute_unprepared(
-                "UPDATE pastes SET version = 'x25519-hkdf-sha256-chacha20poly1305' WHERE recipient_kid IS NOT NULL",
-            ).await?;
+            manager
+                .exec_stmt(
+                    Query::update()
+                        .table(Pastes::Table)
+                        .value(Pastes::Version, "x25519-hkdf-sha256-chacha20poly1305")
+                        .and_where(Expr::col(Pastes::RecipientKid).is_not_null())
+                        .to_owned(),
+                )
+                .await?;
             Ok(())
         }
 

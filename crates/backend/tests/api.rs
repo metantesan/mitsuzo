@@ -209,6 +209,208 @@ async fn upload_requires_token_and_completion_requires_all_chunks() {
 }
 
 #[tokio::test]
+async fn xchacha_password_paste_round_trip() {
+    use mitsuzo_types::{encode_xchacha_create, split_paste_frame_with_nonce};
+    use mitsuzo_utils::{decrypt_xchacha_chunk_into, encrypt_setup, encrypt_xchacha_chunk_into};
+    let (state, dir) = test_state(false).await;
+    let router = api_router(state);
+    let peer = "203.0.113.42";
+    let key = [42; 32];
+    let nonce = [23; 24];
+    let setup = encrypt_setup("a strong password", &key).unwrap();
+    let mut header = password_header();
+    header.salt = Some(setup.salt);
+    header.password_hash = Some(setup.password_hash);
+    header.key = Some(KeyEnvelope {
+        wrap_nonce: setup.wrap_nonce,
+        wrapped_key: setup.wrapped_key,
+    });
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/paste/xchacha",
+            peer,
+            &[],
+            encode_xchacha_create(&header, &nonce),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let init: InitPasteResponse = bitcode::decode(&body_bytes(response).await).unwrap();
+    let token = b64(&init.upload_token);
+    let mut ciphertext = Vec::new();
+    encrypt_xchacha_chunk_into(b"xchacha test", &key, &nonce, 0, &mut ciphertext).unwrap();
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::PUT,
+            &format!("/paste/{}/chunk/0", init.id),
+            peer,
+            &[("x-upload-token", &token)],
+            ciphertext,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/paste/{}/complete", init.id),
+            peer,
+            &[("x-upload-token", &token)],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let auth = b64(&setup.password_hash);
+    let response = router
+        .oneshot(request(
+            Method::GET,
+            &format!("/paste/{}/data", init.id),
+            peer,
+            &[("x-password-hash", &auth)],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_bytes(response).await;
+    let (meta, returned_nonce, encrypted) = split_paste_frame_with_nonce(&body).unwrap();
+    assert_eq!(returned_nonce, Some(nonce));
+    assert_eq!(meta.key.unwrap().wrapped_key, setup.wrapped_key);
+    let mut plaintext = Vec::new();
+    decrypt_xchacha_chunk_into(encrypted, &key, &nonce, 0, &mut plaintext).unwrap();
+    assert_eq!(plaintext, b"xchacha test");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn xchacha_recipient_paste_round_trip() {
+    use mitsuzo_types::{
+        RecipientAuthChallenge, RecipientEnvelope, encode_xchacha_create,
+        split_paste_frame_with_nonce,
+    };
+    use mitsuzo_utils::{
+        decrypt_xchacha_chunk_into, encrypt_xchacha_chunk_into, generate_x25519_keypair,
+        kid_from_pubkey, open_challenge, open_content_key_for_recipient,
+        seal_content_key_for_recipient,
+    };
+    let (state, dir) = test_state(false).await;
+    let router = api_router(state);
+    let peer = "203.0.113.43";
+    let (recipient_secret, recipient_pub) = generate_x25519_keypair().unwrap();
+    let (sender_secret, sender_pub) = generate_x25519_keypair().unwrap();
+    let kid = kid_from_pubkey(&recipient_pub);
+    let key = [54; 32];
+    let nonce = [32; 24];
+    let (wrap_nonce, sealed_cek) =
+        seal_content_key_for_recipient(&sender_secret, &recipient_pub, &key).unwrap();
+    let mut header = password_header();
+    header.salt = None;
+    header.password_hash = None;
+    header.key = None;
+    header.try_count = None;
+    header.recipient_pub = Some(recipient_pub);
+    header.recipient = Some(RecipientEnvelope {
+        recipient_kid: kid,
+        ephemeral_pub: sender_pub,
+        nonce: wrap_nonce,
+        sealed_cek,
+    });
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/paste/xchacha",
+            peer,
+            &[],
+            encode_xchacha_create(&header, &nonce),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let init: InitPasteResponse = bitcode::decode(&body_bytes(response).await).unwrap();
+    let token = b64(&init.upload_token);
+    let mut ciphertext = Vec::new();
+    encrypt_xchacha_chunk_into(b"recipient secret", &key, &nonce, 0, &mut ciphertext).unwrap();
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::PUT,
+            &format!("/paste/{}/chunk/0", init.id),
+            peer,
+            &[("x-upload-token", &token)],
+            ciphertext,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/paste/{}/complete", init.id),
+            peer,
+            &[("x-upload-token", &token)],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/paste/{}/challenge", init.id),
+            peer,
+            &[],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let challenge: RecipientAuthChallenge = bitcode::decode(&body_bytes(response).await).unwrap();
+    let answer = open_challenge(
+        &recipient_secret,
+        &challenge.challenge.ephemeral_pub,
+        &challenge.challenge.nonce,
+        &challenge.challenge.sealed,
+    )
+    .unwrap();
+    let kid_hex: String = kid.iter().map(|b| format!("{b:02x}")).collect();
+    let proof = format!("{}:{}", kid_hex, b64(&answer));
+    let response = router
+        .oneshot(request(
+            Method::GET,
+            &format!("/paste/{}/data", init.id),
+            peer,
+            &[("x-account-proof", &proof)],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_bytes(response).await;
+    let (meta, returned_nonce, encrypted) = split_paste_frame_with_nonce(&body).unwrap();
+    assert_eq!(returned_nonce, Some(nonce));
+    let envelope = meta.recipient.unwrap();
+    let unwrapped = open_content_key_for_recipient(
+        &recipient_secret,
+        &envelope.ephemeral_pub,
+        &envelope.nonce,
+        &envelope.sealed_cek,
+    )
+    .unwrap();
+    let mut plaintext = Vec::new();
+    decrypt_xchacha_chunk_into(encrypted, &unwrapped, &nonce, 0, &mut plaintext).unwrap();
+    assert_eq!(plaintext, b"recipient secret");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn untrusted_forwarded_for_does_not_bypass_rate_limit() {
     let (state, dir) = test_state(false).await;
     let router = api_router(state);

@@ -1,17 +1,17 @@
 use base64::Engine;
 use bip39::Mnemonic;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use colored::*;
 use mitsuzo_types::{
     AccountKeyBlob, AccountProfileResponse, CHUNK_SIZE, ChangePasswordRequest, ChunkInfoResponse,
     CreatePasteHeader, DataType, GetSaltResponse, InitPasteResponse, KeyEnvelope, PasteAuthMode,
     PasteRecipientInfo, RecipientAuthChallenge, RecipientEnvelope, RegisterAccountRequest,
-    UPLOAD_CHUNK_SIZE, split_paste_frame,
+    UPLOAD_CHUNK_SIZE, encode_xchacha_create, split_paste_frame_with_nonce,
 };
 use mitsuzo_utils::{
-    compute_burn_receipt, compute_password_hash, decrypt_chunk_into, derive_account_scalar,
-    derive_keys, encrypt_chunk_into, encrypt_setup, generate_content_key, generate_x25519_keypair,
-    get_chunk_bounds, get_ciphertext_size, kid_from_pubkey, lock_account_key, open_challenge,
+    ContentCipherKind, compute_burn_receipt, compute_password_hash, derive_account_scalar,
+    derive_keys, encrypt_setup, generate_content_key, generate_x25519_keypair, get_chunk_bounds,
+    get_ciphertext_size, kid_from_pubkey, lock_account_key, open_challenge,
     open_content_key_for_recipient, pubkey_from_scalar, seal_content_key_for_recipient,
     unlock_account_key, unwrap_content_key,
 };
@@ -43,9 +43,18 @@ struct Cli {
     base_url: Option<String>,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum ContentCipher {
+    Chacha,
+    Xchacha,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     Create {
+        /// Content encryption algorithm.
+        #[arg(long, value_enum, default_value = "xchacha")]
+        cipher: ContentCipher,
         #[arg(short, long)]
         file: Option<String>,
         #[arg(short = 'c', long, default_value = "5")]
@@ -396,8 +405,8 @@ async fn account_paste_get(
         return Ok(());
     }
     let body = data_resp.bytes().await?;
-    let (frame_header, ciphertext) =
-        split_paste_frame(&body).map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
+    let (frame_header, xnonce, ciphertext) = split_paste_frame_with_nonce(&body)
+        .map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
     let Some(recipient) = frame_header.recipient.clone() else {
         eprintln!("{} Missing recipient envelope.", "Error:".red().bold());
         return Ok(());
@@ -431,7 +440,7 @@ async fn account_paste_get(
         client,
         base_url,
         id,
-        &frame_header,
+        (&frame_header, xnonce),
         ek,
         ciphertext.to_vec(),
         output,
@@ -445,28 +454,15 @@ async fn finish_decrypt(
     client: &Client,
     base_url: &str,
     id: &str,
-    meta: &mitsuzo_types::GetPasteHeader,
+    (meta, xnonce): (&mitsuzo_types::GetPasteHeader, Option<[u8; 24]>),
     mut ek: [u8; 32],
     encrypted: Vec<u8>,
     output: &Option<String>,
 ) -> eyre::Result<()> {
-    if meta.burn_after_read {
-        let receipt = compute_burn_receipt(&ek);
-        let burn_resp = client
-            .post(format!("{}/api/paste/{}/burn", base_url, id))
-            .body(receipt.to_vec())
-            .send()
-            .await?;
-        match burn_resp.status() {
-            s if s.is_success() => {
-                eprintln!("{} Paste burned after reading", "✓".green().bold());
-            }
-            s if s == reqwest::StatusCode::GONE => {}
-            _ => {}
-        }
-    }
+    let receipt = meta.burn_after_read.then(|| compute_burn_receipt(&ek));
 
     let done = Arc::new(AtomicU32::new(0));
+    let failed = std::sync::atomic::AtomicBool::new(false);
     let total = meta.total_chunks;
     let pb = make_pb(total as u64, "magenta/yellow", "");
 
@@ -492,6 +488,7 @@ async fn finish_decrypt(
             let k = ek;
             let nonce = meta.nonce;
             let enc = &encrypted;
+            let failed = &failed;
             let results = &results;
             let done = &done;
             let pb = &pb;
@@ -500,7 +497,26 @@ async fn finish_decrypt(
                 let mut local = Vec::new();
                 for i in sc..ec {
                     let (a, b) = get_chunk_bounds(total, i as u32, enc.len());
-                    let _ = decrypt_chunk_into(&enc[a..b], &k, &nonce, i as u32, &mut local);
+                    let result = match xnonce {
+                        Some(nonce) => ContentCipherKind::XChaCha20Poly1305.decrypt_chunk(
+                            &k,
+                            &nonce,
+                            i as u32,
+                            &enc[a..b],
+                            &mut local,
+                        ),
+                        None => ContentCipherKind::ChaCha20Poly1305.decrypt_chunk(
+                            &k,
+                            &nonce,
+                            i as u32,
+                            &enc[a..b],
+                            &mut local,
+                        ),
+                    };
+                    if result.is_err() {
+                        failed.store(true, Ordering::Relaxed);
+                        return;
+                    }
                     let prev = done.fetch_add(1, Ordering::Relaxed) as u64;
                     if prev.is_multiple_of(4) || prev + 1 == total as u64 {
                         pb.set_position(prev + 1);
@@ -517,6 +533,25 @@ async fn finish_decrypt(
 
     ek.zeroize();
     pb.finish_and_clear();
+    if failed.load(Ordering::Relaxed) {
+        eyre::bail!("Failed to authenticate paste content");
+    }
+
+    if meta.burn_after_read {
+        let receipt = receipt.expect("burn receipt");
+        let burn_resp = client
+            .post(format!("{}/api/paste/{}/burn", base_url, id))
+            .body(receipt.to_vec())
+            .send()
+            .await?;
+        match burn_resp.status() {
+            s if s.is_success() => {
+                eprintln!("{} Paste burned after reading", "✓".green().bold());
+            }
+            s if s == reqwest::StatusCode::GONE => {}
+            _ => {}
+        }
+    }
 
     let mut results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
     results.sort_by_key(|(t, _)| *t);
@@ -578,6 +613,7 @@ async fn main() -> eyre::Result<()> {
 
     match &cli.command {
         Commands::Create {
+            cipher,
             file,
             try_count,
             ttl,
@@ -738,11 +774,22 @@ async fn main() -> eyre::Result<()> {
                 header.burn_receipt_hash = compute_burn_receipt(&content_key);
             }
 
-            let header_bytes = bitcode::encode(&header);
+            let xnonce = if matches!(cipher, ContentCipher::Xchacha) {
+                let mut nonce = [0; 24];
+                getrandom::fill(&mut nonce)?;
+                Some(nonce)
+            } else {
+                None
+            };
+            let header_bytes = match xnonce {
+                Some(nonce) => encode_xchacha_create(&header, &nonce),
+                None => bitcode::encode(&header),
+            };
 
             let pb = make_pb(total_enc_chunks as u64, "blue", "");
             let done = Arc::new(std::sync::atomic::AtomicU32::new(0));
             let results = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let encrypt_failed = std::sync::atomic::AtomicBool::new(false);
 
             std::thread::scope(|s| {
                 let n = std::thread::available_parallelism()
@@ -762,19 +809,33 @@ async fn main() -> eyre::Result<()> {
                     let done = &done;
                     let pb = &pb;
                     let results = &results;
+                    let encrypt_failed = &encrypt_failed;
 
                     s.spawn(move || {
                         let mut local = Vec::new();
                         for i in sc..ec {
                             let start = i * CHUNK_SIZE;
                             let end = std::cmp::min(start + CHUNK_SIZE, data.len());
-                            let _ = encrypt_chunk_into(
-                                &data[start..end],
-                                &k,
-                                &nce,
-                                i as u32,
-                                &mut local,
-                            );
+                            let result = match xnonce {
+                                Some(nonce) => ContentCipherKind::XChaCha20Poly1305.encrypt_chunk(
+                                    &k,
+                                    &nonce,
+                                    i as u32,
+                                    &data[start..end],
+                                    &mut local,
+                                ),
+                                None => ContentCipherKind::ChaCha20Poly1305.encrypt_chunk(
+                                    &k,
+                                    &nce,
+                                    i as u32,
+                                    &data[start..end],
+                                    &mut local,
+                                ),
+                            };
+                            if result.is_err() {
+                                encrypt_failed.store(true, Ordering::Relaxed);
+                                return;
+                            }
                             let prev = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             pb.set_position(prev as u64 + 1);
                             pb.set_message(indicatif::HumanBytes(local.len() as u64).to_string());
@@ -784,6 +845,9 @@ async fn main() -> eyre::Result<()> {
                 }
             });
 
+            if encrypt_failed.load(Ordering::Relaxed) {
+                eyre::bail!("Failed to encrypt paste content");
+            }
             let mut results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
             results.sort_by_key(|(t, _)| *t);
             let ciphertext: Vec<u8> = results.into_iter().flat_map(|(_, buf)| buf).collect();
@@ -791,7 +855,15 @@ async fn main() -> eyre::Result<()> {
             pb.finish_and_clear();
 
             let init_response = client
-                .post(format!("{}/api/paste", base_url))
+                .post(format!(
+                    "{}{}",
+                    base_url,
+                    if xnonce.is_some() {
+                        "/api/paste/xchacha"
+                    } else {
+                        "/api/paste"
+                    }
+                ))
                 .body(header_bytes)
                 .send()
                 .await?;
@@ -805,8 +877,20 @@ async fn main() -> eyre::Result<()> {
                 return Ok(());
             }
 
+            let init_status = init_response.status();
+            let init_content_type = init_response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("unknown")
+                .to_string();
             let init_body = init_response.bytes().await?;
-            let decoded: InitPasteResponse = bitcode::decode(&init_body)?;
+            let decoded: InitPasteResponse = bitcode::decode(&init_body).map_err(|e| {
+                let preview = String::from_utf8_lossy(&init_body[..init_body.len().min(160)]);
+                eyre::eyre!(
+                    "Server returned an invalid paste-init response (HTTP {init_status}, content-type {init_content_type}); expected Mitsuzo's bitcode InitPasteResponse. Server/client protocol mismatch is likely. Response preview: {preview:?}. Decode error: {e}"
+                )
+            })?;
             let paste_id = decoded.id;
             let upload_token =
                 base64::engine::general_purpose::STANDARD.encode(decoded.upload_token);
@@ -990,7 +1074,7 @@ async fn main() -> eyre::Result<()> {
                 return Ok(());
             }
             let meta_body = meta_resp.bytes().await?;
-            let (meta, _) = split_paste_frame(&meta_body)
+            let (meta, xnonce, _) = split_paste_frame_with_nonce(&meta_body)
                 .map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
 
             let enc_bytes = get_ciphertext_size(meta.total_size as usize);
@@ -1045,7 +1129,7 @@ async fn main() -> eyre::Result<()> {
                             .send()
                             .await
                             && let Ok(data) = resp.bytes().await
-                            && let Ok((_, slice)) = split_paste_frame(&data)
+                            && let Ok((_, _, slice)) = split_paste_frame_with_nonce(&data)
                         {
                             let mut b = buf.lock().unwrap();
                             b[s as usize..][..slice.len()].copy_from_slice(slice);
@@ -1087,7 +1171,16 @@ async fn main() -> eyre::Result<()> {
                 None => derived_key,
             };
 
-            finish_decrypt(&client, &base_url, id, &meta, ek, encrypted, output).await?;
+            finish_decrypt(
+                &client,
+                &base_url,
+                id,
+                (&meta, xnonce),
+                ek,
+                encrypted,
+                output,
+            )
+            .await?;
         }
         Commands::Account { action } => match action {
             AccountCommand::Register { name } => {
@@ -1179,8 +1272,8 @@ async fn main() -> eyre::Result<()> {
                 return Ok(());
             }
             let key_body = key_resp.bytes().await?;
-            let envelope = match split_paste_frame(&key_body) {
-                Ok((hdr, _)) => hdr.key,
+            let envelope = match split_paste_frame_with_nonce(&key_body) {
+                Ok((hdr, _, _)) => hdr.key,
                 Err(e) => return Err(eyre::eyre!("Invalid paste frame: {}", e)),
             };
 

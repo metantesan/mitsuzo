@@ -52,6 +52,7 @@ Mitsuzo.
 ## Highlights
 
 - Client-side ChaCha20Poly1305 encryption with Argon2id key derivation
+- XChaCha20-Poly1305 content encryption by default for password and recipient pastes
 - Envelope encryption, so changing a password does not re-encrypt the content
 - Chunked encryption and upload for files up to 1 GB
 - TTL expiry, try-count limits, and cryptographic burn-after-reading receipts
@@ -90,6 +91,12 @@ Demo mode caps the TTL at one minute and the upload size at 5 MB.
 Release binaries are published for Linux, macOS, and Windows on the
 [Releases page](https://github.com/metantesan/mitsuzo/releases).
 
+New pastes use XChaCha20-Poly1305 by default. The web app and CLI also let you
+choose ChaCha20-Poly1305 for compatibility. The XChaCha format requires an updated server and client;
+older clients cannot open these pastes. Existing ChaCha pastes remain readable.
+Recipient pastes still use X25519 for key wrapping, including when XChaCha is
+selected; XChaCha does not provide post-quantum recipient key protection.
+
 ### Install a pre-built binary
 
 For Linux, macOS, and other Unix-like systems, use the installer:
@@ -108,6 +115,7 @@ macOS Apple Silicon, Windows x86_64, and Windows ARM64. Every release includes
 
 ```bash
 echo "secret message" | mitsuzo create
+echo "secret message" | mitsuzo create --cipher chacha
 mitsuzo create --file document.pdf
 mitsuzo get 123456 --output decrypted.pdf
 mitsuzo passwd 123456

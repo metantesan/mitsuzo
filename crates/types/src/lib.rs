@@ -4,6 +4,19 @@ pub const CHUNK_SIZE: usize = 65536;
 pub const UPLOAD_CHUNK_SIZE: usize = 16_777_216;
 pub const MAX_PASTE_SIZE: usize = 1_073_741_824;
 
+/// Prefix for the extended paste wire format. Legacy frames never use it.
+pub const XCHACHA_FORMAT_MARKER: &[u8; 8] = b"MITSUXC1";
+
+/// Encode an XChaCha create request while keeping the legacy header unchanged.
+pub fn encode_xchacha_create(header: &CreatePasteHeader, nonce: &[u8; 24]) -> Vec<u8> {
+    let encoded = bitcode::encode(header);
+    let mut result = Vec::with_capacity(32 + encoded.len());
+    result.extend_from_slice(XCHACHA_FORMAT_MARKER);
+    result.extend_from_slice(nonce);
+    result.extend_from_slice(&encoded);
+    result
+}
+
 /// Serde support for 48-byte arrays (serde only implements arrays up to 32).
 mod serde_bytes_48 {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -125,6 +138,43 @@ impl GetPasteHeader {
         out.extend_from_slice(&header_bytes);
         out
     }
+
+    pub fn encode_xchacha_frame(&self, nonce: &[u8; 24]) -> Vec<u8> {
+        let encoded = bitcode::encode(self);
+        let mut out = Vec::with_capacity(36 + encoded.len());
+        out.extend_from_slice(&((32 + encoded.len()) as u32).to_le_bytes());
+        out.extend_from_slice(XCHACHA_FORMAT_MARKER);
+        out.extend_from_slice(nonce);
+        out.extend_from_slice(&encoded);
+        out
+    }
+}
+
+/// Decode either frame format, borrowing the ciphertext from the response.
+pub type DecodedPasteFrame<'a> = (GetPasteHeader, Option<[u8; 24]>, &'a [u8]);
+
+pub fn split_paste_frame_with_nonce(data: &[u8]) -> Result<DecodedPasteFrame<'_>, String> {
+    if data.len() < 4 {
+        return Err("truncated paste frame".to_string());
+    }
+    let len = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
+    let end = 4usize
+        .checked_add(len)
+        .ok_or("invalid paste frame length")?;
+    if end > data.len() {
+        return Err("truncated paste frame".to_string());
+    }
+    let header = &data[4..end];
+    let (encoded, nonce) = if header.starts_with(XCHACHA_FORMAT_MARKER) {
+        if header.len() < 32 {
+            return Err("truncated XChaCha frame".to_string());
+        }
+        (&header[32..], Some(header[8..32].try_into().unwrap()))
+    } else {
+        (header, None)
+    };
+    let parsed = bitcode::decode(encoded).map_err(|e| e.to_string())?;
+    Ok((parsed, nonce, &data[end..]))
 }
 
 /// Split a framed paste body into its metadata header and the trailing
@@ -139,6 +189,45 @@ pub fn split_paste_frame(data: &[u8]) -> Result<(GetPasteHeader, &[u8]), String>
     }
     let header: GetPasteHeader = bitcode::decode(&data[4..4 + len]).map_err(|e| e.to_string())?;
     Ok((header, &data[4 + len..]))
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    #[test]
+    fn extended_frames_are_distinct_and_legacy_frames_still_decode() {
+        let header = GetPasteHeader {
+            id: "123456".into(),
+            nonce: [1; 12],
+            data_type: DataType::Text,
+            filename: None,
+            content_type: None,
+            total_size: 5,
+            total_chunks: 1,
+            allow_download: true,
+            key: None,
+            try_count: 5,
+            ttl: 60,
+            burn_after_read: false,
+            recipient: None,
+        };
+        let mut legacy = header.encode_frame();
+        legacy.extend_from_slice(b"body");
+        let (parsed, nonce, body) = split_paste_frame_with_nonce(&legacy).unwrap();
+        assert_eq!(parsed, header);
+        assert_eq!(nonce, None);
+        assert_eq!(body, b"body");
+        assert_eq!(split_paste_frame(&legacy).unwrap().0, header);
+        let mut extended = header.encode_xchacha_frame(&[9; 24]);
+        extended.extend_from_slice(b"body");
+        let (parsed, nonce, body) = split_paste_frame_with_nonce(&extended).unwrap();
+        assert_eq!(parsed, header);
+        assert_eq!(nonce, Some([9; 24]));
+        assert_eq!(body, b"body");
+        assert!(split_paste_frame(&extended).is_err());
+        assert!(split_paste_frame_with_nonce(&extended[..20]).is_err());
+    }
 }
 
 /// The recipient account a paste is encrypted to, served pre-auth so the

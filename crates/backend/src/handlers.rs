@@ -305,7 +305,22 @@ pub async fn init_paste(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
-    let mut header: CreatePasteHeader = decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let (header_body, xchacha_nonce) = if body.starts_with(mitsuzo_types::XCHACHA_FORMAT_MARKER) {
+        if body.len() < 32 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        (
+            &body[32..],
+            Some(
+                body[8..32]
+                    .try_into()
+                    .map_err(|_| StatusCode::BAD_REQUEST)?,
+            ),
+        )
+    } else {
+        (&body[..], None)
+    };
+    let mut header: CreatePasteHeader = decode(header_body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     if header.total_chunks == 0 {
         return Err(StatusCode::BAD_REQUEST);
@@ -382,7 +397,7 @@ pub async fn init_paste(
 
     state
         .db
-        .init_paste(&id_str, &header, &upload_token_hash)
+        .init_paste(&id_str, &header, xchacha_nonce, &upload_token_hash)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -465,7 +480,7 @@ pub async fn complete_paste(
     verify_upload_token(&state.db, &id, &headers).await?;
     // Every chunk must have arrived before the paste is considered complete;
     // otherwise a partial upload would be served as if it were whole.
-    if state.db.get_received_chunks(&id).await != meta.total_chunks {
+    if !state.db.upload_is_complete(&id, meta.total_chunks).await {
         return Err(StatusCode::CONFLICT);
     }
     info!(id = %id, "paste completed");
@@ -554,9 +569,19 @@ pub(crate) async fn get_paste(
     let total_size = get_plaintext_size(meta.total_chunks, content_len).unwrap_or(0) as u64;
     state.db.increment_success().await;
 
+    let xchacha_nonce: Option<[u8; 24]> = if nonce.len() == 24 {
+        Some(nonce.as_slice().try_into().unwrap())
+    } else {
+        None
+    };
     let nonce_arr: [u8; 12] = nonce
+        .get(..12)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
         .try_into()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .unwrap();
+    if nonce.len() != 12 && xchacha_nonce.is_none() {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+    }
     let key = state.db.get_key(&id).await;
     let (try_count, ttl) = remaining_attempts(&state.db, &id).await;
 
@@ -576,10 +601,10 @@ pub(crate) async fn get_paste(
         recipient: None,
     };
 
-    let header_bytes = encode(&header);
-    let mut head = Vec::with_capacity(4 + header_bytes.len());
-    head.extend_from_slice(&(header_bytes.len() as u32).to_le_bytes());
-    head.extend_from_slice(&header_bytes);
+    let head = match xchacha_nonce {
+        Some(nonce) => header.encode_xchacha_frame(&nonce),
+        None => header.encode_frame(),
+    };
 
     let file = tokio::fs::File::open(&file_path)
         .await
@@ -808,9 +833,19 @@ pub(crate) async fn get_paste_data(
         .get_nonce(&id)
         .await
         .ok_or(ApiError::Status(StatusCode::NOT_FOUND))?;
+    let xchacha_nonce: Option<[u8; 24]> = if nonce.len() == 24 {
+        Some(nonce.as_slice().try_into().unwrap())
+    } else {
+        None
+    };
     let nonce_arr: [u8; 12] = nonce
+        .get(..12)
+        .ok_or(ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR))?
         .try_into()
-        .map_err(|_| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .unwrap();
+    if nonce.len() != 12 && xchacha_nonce.is_none() {
+        return Err(ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR));
+    }
 
     let file_path = state
         .db
@@ -824,7 +859,7 @@ pub(crate) async fn get_paste_data(
     state.db.increment_success().await;
 
     let (try_count, ttl) = remaining_attempts(&state.db, &id).await;
-    let frame = GetPasteHeader {
+    let frame_header = GetPasteHeader {
         id: id.clone(),
         nonce: nonce_arr,
         data_type: meta.data_type.clone(),
@@ -838,8 +873,11 @@ pub(crate) async fn get_paste_data(
         ttl,
         burn_after_read: meta.burn_after_read,
         recipient: recipient_envelope,
-    }
-    .encode_frame();
+    };
+    let frame = match xchacha_nonce {
+        Some(nonce) => frame_header.encode_xchacha_frame(&nonce),
+        None => frame_header.encode_frame(),
+    };
     let frame_len = frame.len() as u64;
 
     let range = headers
