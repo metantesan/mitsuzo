@@ -11,6 +11,15 @@ struct CipherResult {
     decrypt_mib_s: f64,
 }
 
+#[derive(Clone, PartialEq)]
+struct BenchmarkProgress {
+    step: usize,
+    phase: &'static str,
+    cipher: String,
+    completed_chunks: usize,
+    total_chunks: usize,
+}
+
 fn now_ms() -> Result<f64, String> {
     web_sys::window()
         .and_then(|window| window.performance())
@@ -21,7 +30,7 @@ fn now_ms() -> Result<f64, String> {
 async fn benchmark_cipher(
     cipher: ContentCipherKind,
     bytes: usize,
-    mut progress: impl FnMut(usize) + 'static,
+    mut progress: impl FnMut(&'static str, usize, usize) + 'static,
 ) -> Result<CipherResult, String> {
     let mut key = [0u8; 32];
     let mut nonce = vec![0u8; cipher.nonce_len()];
@@ -29,52 +38,97 @@ async fn benchmark_cipher(
     getrandom::fill(&mut nonce)
         .map_err(|error| format!("Random nonce generation failed: {error}"))?;
 
-    // The deterministic input keeps setup out of the timed section. The key and
-    // base nonce are fresh for each run, just as they are for a new paste.
-    let plaintext: Vec<u8> = (0..bytes)
+    // Reuse one 64 KiB buffer so large runs measure cipher throughput without
+    // allocating the entire file and ciphertext in browser memory.
+    let plaintext: Vec<u8> = (0..CHUNK_SIZE)
         .map(|i| ((i * 31 + i / 251) & 0xff) as u8)
         .collect();
-    let chunk_count = plaintext.len().div_ceil(CHUNK_SIZE);
-    let mut encrypted = Vec::with_capacity(bytes + chunk_count * 16);
+    let chunk_count = bytes.div_ceil(CHUNK_SIZE);
+    let mut encrypted = Vec::with_capacity(CHUNK_SIZE + 16);
+    let mut paused_ms = 0.0;
+    progress("Encrypting", 0, chunk_count);
+    gloo_timers::future::TimeoutFuture::new(0).await;
     let encrypt_start = now_ms()?;
-    for (index, chunk) in plaintext.chunks(CHUNK_SIZE).enumerate() {
-        cipher.encrypt_chunk(&key, &nonce, index as u32, chunk, &mut encrypted)?;
-        if (index + 1) % 64 == 0 && index + 1 < chunk_count {
-            progress(((index + 1) * CHUNK_SIZE).min(bytes));
-            gloo_timers::future::TimeoutFuture::new(0).await;
-        }
-    }
-    let encrypt_seconds = ((now_ms()? - encrypt_start) / 1000.0).max(0.000_001);
-
-    let mut decrypted_chunk = Vec::with_capacity(CHUNK_SIZE);
-    let decrypt_start = now_ms()?;
-    let mut offset = 0;
-    for (index, chunk) in plaintext.chunks(CHUNK_SIZE).enumerate() {
-        let end = offset + chunk.len() + 16;
-        let encrypted_chunk = encrypted
-            .get(offset..end)
-            .ok_or_else(|| "Cipher produced an invalid chunk length".to_string())?;
-        cipher.decrypt_chunk(
+    for index in 0..chunk_count {
+        let offset = index * CHUNK_SIZE;
+        let chunk_len = (bytes - offset).min(CHUNK_SIZE);
+        encrypted.clear();
+        cipher.encrypt_chunk(
             &key,
             &nonce,
             index as u32,
-            encrypted_chunk,
+            &plaintext[..chunk_len],
+            &mut encrypted,
+        )?;
+        if (index + 1) % 64 == 0 && index + 1 < chunk_count {
+            let pause_start = now_ms()?;
+            progress("Encrypting", index + 1, chunk_count);
+            gloo_timers::future::TimeoutFuture::new(0).await;
+            paused_ms += now_ms()? - pause_start;
+        }
+    }
+    progress("Encrypting", chunk_count, chunk_count);
+    let encrypt_seconds = ((now_ms()? - encrypt_start - paused_ms) / 1000.0).max(0.000_001);
+
+    // Precompute a bounded pool of ciphertexts outside the timed section.
+    // Cycling through distinct chunk indexes exercises nonce derivation while
+    // avoiding hundreds of MiB of retained ciphertext at the 1 GiB setting.
+    let decrypt_pool_len = chunk_count.min(256);
+    let mut encrypted_pool = Vec::with_capacity(decrypt_pool_len);
+    progress("Preparing decryption samples", 0, decrypt_pool_len);
+    gloo_timers::future::TimeoutFuture::new(0).await;
+    for index in 0..decrypt_pool_len {
+        let mut chunk_ciphertext = Vec::with_capacity(CHUNK_SIZE + 16);
+        cipher.encrypt_chunk(
+            &key,
+            &nonce,
+            index as u32,
+            &plaintext,
+            &mut chunk_ciphertext,
+        )?;
+        encrypted_pool.push(chunk_ciphertext);
+        if (index + 1) % 64 == 0 && index + 1 < decrypt_pool_len {
+            progress("Preparing decryption samples", index + 1, decrypt_pool_len);
+            gloo_timers::future::TimeoutFuture::new(0).await;
+        }
+    }
+    progress(
+        "Preparing decryption samples",
+        decrypt_pool_len,
+        decrypt_pool_len,
+    );
+
+    let mut decrypted_chunk = Vec::with_capacity(CHUNK_SIZE);
+    let mut decrypt_paused_ms = 0.0;
+    progress("Decrypting", 0, chunk_count);
+    gloo_timers::future::TimeoutFuture::new(0).await;
+    let decrypt_start = now_ms()?;
+    for index in 0..chunk_count {
+        let pool_index = index % decrypt_pool_len;
+        let chunk_ciphertext = &encrypted_pool[pool_index];
+        cipher.decrypt_chunk(
+            &key,
+            &nonce,
+            pool_index as u32,
+            chunk_ciphertext,
             &mut decrypted_chunk,
         )?;
-        if decrypted_chunk != chunk {
+        if decrypted_chunk != plaintext {
             return Err(format!(
                 "{} decryption did not match the input",
                 cipher_name(cipher)
             ));
         }
-        offset = end;
         decrypted_chunk.clear();
         if (index + 1) % 64 == 0 && index + 1 < chunk_count {
-            progress(((index + 1) * CHUNK_SIZE).min(bytes));
+            let pause_start = now_ms()?;
+            progress("Decrypting", index + 1, chunk_count);
             gloo_timers::future::TimeoutFuture::new(0).await;
+            decrypt_paused_ms += now_ms()? - pause_start;
         }
     }
-    let decrypt_seconds = ((now_ms()? - decrypt_start) / 1000.0).max(0.000_001);
+    progress("Decrypting", chunk_count, chunk_count);
+    let decrypt_seconds = ((now_ms()? - decrypt_start - decrypt_paused_ms) / 1000.0).max(0.000_001);
     let mib = bytes as f64 / MIB as f64;
 
     Ok(CipherResult {
@@ -95,7 +149,7 @@ fn cipher_name(cipher: ContentCipherKind) -> &'static str {
 pub fn benchmark_view() -> Element {
     let mut size_mib = use_signal(|| 8usize);
     let mut running = use_signal(|| false);
-    let mut progress = use_signal(String::new);
+    let mut progress = use_signal(|| None::<BenchmarkProgress>);
     let mut results = use_signal(|| None::<Vec<CipherResult>>);
     let mut error = use_signal(|| None::<String>);
 
@@ -107,37 +161,56 @@ pub fn benchmark_view() -> Element {
         running.set(true);
         results.set(None);
         error.set(None);
-        progress.set("Preparing benchmark…".to_string());
+        progress.set(Some(BenchmarkProgress {
+            step: 0,
+            phase: "Preparing benchmark",
+            cipher: "Both ciphers".to_string(),
+            completed_chunks: 0,
+            total_chunks: 1,
+        }));
         spawn(async move {
             let mut measured = Vec::with_capacity(2);
-            for cipher in [
+            for (cipher_index, cipher) in [
                 ContentCipherKind::ChaCha20Poly1305,
                 ContentCipherKind::XChaCha20Poly1305,
-            ] {
-                progress.set(format!("Measuring {}…", cipher_name(cipher)));
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let label = cipher_name(cipher).to_string();
-                let progress_label = label.clone();
                 let mut progress_signal = progress;
-                match benchmark_cipher(cipher, bytes, move |completed| {
-                    progress_signal.set(format!("{progress_label}: processed {completed} bytes"));
+                match benchmark_cipher(cipher, bytes, move |phase, completed, total| {
+                    let step = if phase == "Encrypting" {
+                        cipher_index * 2 + 1
+                    } else {
+                        cipher_index * 2 + 2
+                    };
+                    progress_signal.set(Some(BenchmarkProgress {
+                        step,
+                        phase,
+                        cipher: label.clone(),
+                        completed_chunks: completed,
+                        total_chunks: total,
+                    }));
                 })
                 .await
                 {
                     Ok(result) => measured.push(result),
                     Err(reason) => {
-                        error.set(Some(format!("{label}: {reason}")));
+                        error.set(Some(format!("{}: {reason}", cipher_name(cipher))));
+                        progress.set(None);
                         running.set(false);
                         return;
                     }
                 }
             }
             results.set(Some(measured));
-            progress.set(String::new());
+            progress.set(None);
             running.set(false);
         });
     };
 
-    let size_buttons = [1usize, 8, 32, 64];
+    let size_buttons = [1usize, 8, 64, 256, 1024];
     let raw_results = results.read().clone().unwrap_or_default();
     let max_rate = raw_results
         .iter()
@@ -154,6 +227,7 @@ pub fn benchmark_view() -> Element {
             (row, width)
         })
         .collect();
+    let current_progress = progress.read().clone();
 
     rsx! {
         main {
@@ -162,7 +236,7 @@ pub fn benchmark_view() -> Element {
                 class: "mb-10",
                 p { class: "text-sm text-accent mb-3", "Browser performance lab" }
                 h1 { class: "text-4xl sm:text-5xl font-bold tracking-tight mb-4", "How fast is encryption here?" }
-                p { class: "max-w-2xl text-text-secondary leading-relaxed", "Measure the same Rust/WebAssembly content ciphers Mitsuzo uses for paste data. The benchmark runs on this device, in this browser, on one thread." }
+                p { class: "max-w-2xl text-text-secondary leading-relaxed", "Measure the Rust/WebAssembly content ciphers Mitsuzo uses for paste data. It runs locally in this browser on one thread." }
             }
 
             section {
@@ -177,7 +251,7 @@ pub fn benchmark_view() -> Element {
                                     disabled: *running.read(),
                                     aria_pressed: (*size_mib.read() == size).to_string(),
                                     onclick: move |_| size_mib.set(size),
-                                    "{size} MiB"
+                                    if size == 1024 { "1 GiB" } else { "{size} MiB" }
                                 }
                             }
                         }
@@ -189,11 +263,48 @@ pub fn benchmark_view() -> Element {
                         if *running.read() { "Running…" } else { "Run benchmark" }
                     }
                 }
-                p { class: "mt-5 text-xs leading-relaxed text-text-secondary", "Runs encrypt and decrypt over 64 KiB chunks, verifies decrypted bytes, and reports MiB/s. Key setup and random generation are excluded from the timings. Larger runs need more memory." }
+                p { class: "mt-5 text-xs leading-relaxed text-text-secondary", "Runs encrypt and decrypt over 64 KiB chunks, verifies decrypted bytes, and reports MiB/s. A single reusable chunk is used, so large sizes do not need a matching amount of memory. Timer pauses for UI updates are excluded. This measures cipher throughput; browser file reads, full-paste buffering, and network upload are not included." }
             }
 
-            if *running.read() {
-                p { class: "mb-6 text-sm text-accent", role: "status", aria_live: "polite", "{progress}" }
+            if let Some(current) = current_progress.as_ref() {
+                {
+                    let percent = if current.total_chunks == 0 {
+                        0.0
+                    } else {
+                        current.completed_chunks as f64 / current.total_chunks as f64 * 100.0
+                    };
+                    let completed_mib = current.completed_chunks * CHUNK_SIZE / MIB;
+                    let total_mib = (current.total_chunks * CHUNK_SIZE).min(*size_mib.read() * MIB) / MIB;
+                    rsx! {
+                        div {
+                            class: "fixed bottom-4 right-4 z-50 w-[calc(100vw-2rem)] max-w-sm rounded-xl border border-border bg-surface p-4 shadow-2xl",
+                            role: "status",
+                            aria_live: "polite",
+                            div { class: "flex items-start justify-between gap-4",
+                                div {
+                                    p { class: "text-xs font-semibold uppercase tracking-wide text-accent",
+                                        if current.step == 0 { "Setup" } else { "Step {current.step} of 4" }
+                                    }
+                                    p { class: "mt-1 font-semibold text-text", "{current.cipher}" }
+                                    p { class: "text-sm text-text-secondary", "{current.phase}" }
+                                }
+                                span { class: "shrink-0 font-mono text-sm text-text", "{percent:.0}%" }
+                            }
+                            div { class: "mt-4 h-2 overflow-hidden rounded-full bg-elevated",
+                                div {
+                                    class: "h-full rounded-full bg-accent transition-[width] duration-200",
+                                    style: "width: {percent}%"
+                                }
+                            }
+                            p { class: "mt-2 text-xs text-text-secondary",
+                                "{current.completed_chunks} / {current.total_chunks} chunks · {completed_mib} / {total_mib} MiB"
+                            }
+                            if current.phase == "Preparing decryption samples" {
+                                p { class: "mt-1 text-xs text-text-secondary", "Preparing a bounded sample set for the decrypt pass." }
+                            }
+                        }
+                    }
+                }
             }
             if let Some(message) = error.read().as_ref() {
                 p { class: "mb-6 p-4 rounded-lg border border-error/40 text-error bg-error/10", role: "alert", "Benchmark failed: {message}" }

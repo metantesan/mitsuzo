@@ -475,19 +475,27 @@ impl DataStore {
         }
     }
 
-    pub async fn decrement_try_count(&self, id: &str) {
-        let Some(model) = self.paste_model(id).await else {
-            return;
-        };
-        if model.try_count == 0 {
-            return;
-        }
-        let new_count = model.try_count - 1;
-        let mut am: paste::ActiveModel = model.into();
-        am.try_count = Set(new_count);
-        if am.update(&self.db).await.is_ok() && new_count == 0 {
+    pub async fn decrement_try_count(&self, id: &str) -> eyre::Result<()> {
+        let result = paste::Entity::update_many()
+            .col_expr(
+                paste::Column::TryCount,
+                Expr::col(paste::Column::TryCount).sub(1),
+            )
+            .filter(paste::Column::Id.eq(id))
+            .filter(paste::Column::TryCount.gt(0))
+            .exec(&self.db)
+            .await
+            .wrap_err("Failed to decrement paste try count")?;
+
+        if result.rows_affected > 0
+            && self
+                .paste_model(id)
+                .await
+                .is_some_and(|model| model.try_count == 0)
+        {
             self.delete_paste(id).await;
         }
+        Ok(())
     }
 
     pub async fn delete_paste(&self, id: &str) {
@@ -777,10 +785,70 @@ impl DataStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mitsuzo_types::{CreatePasteHeader, DataType, KeyEnvelope};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 
     async fn test_store(dir: &Path) -> DataStore {
         std::fs::create_dir_all(dir).expect("create test dir");
         DataStore::open(dir).await.expect("open store")
+    }
+
+    #[tokio::test]
+    async fn concurrent_failed_attempts_decrement_atomically_and_burn_once() {
+        let id_num = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "mitsuzo-db-attempts-{}-{id_num}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = test_store(&dir).await;
+        let header = CreatePasteHeader {
+            nonce: [1; 12],
+            salt: Some([2; 16]),
+            password_hash: Some([3; 32]),
+            key: Some(KeyEnvelope {
+                wrap_nonce: [4; 12],
+                wrapped_key: [5; 48],
+            }),
+            try_count: Some(5),
+            ttl_seconds: None,
+            data_type: DataType::Text,
+            filename: None,
+            content_type: None,
+            total_chunks: 1,
+            allow_download: true,
+            burn_after_read: false,
+            burn_receipt_hash: [6; 32],
+            recipient: None,
+            recipient_pub: None,
+        };
+        store
+            .init_paste("atomic-attempts", &header, None, None, &[7; 32])
+            .await
+            .expect("insert test paste");
+
+        let calls = 24;
+        let barrier = Arc::new(tokio::sync::Barrier::new(calls));
+        let mut tasks = Vec::with_capacity(calls);
+        for _ in 0..calls {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store.decrement_try_count("atomic-attempts").await
+            }));
+        }
+        for task in tasks {
+            task.await
+                .expect("attempt task")
+                .expect("decrement succeeds");
+        }
+        assert!(store.get_meta("atomic-attempts").await.is_none());
+        assert!(store.get_password_hash("atomic-attempts").await.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

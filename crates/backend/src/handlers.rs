@@ -257,38 +257,61 @@ impl IntoResponse for ApiError {
 }
 
 async fn verify_password(
-    db: &crate::db::DataStore,
+    state: &AppState,
     id: &str,
     headers: &HeaderMap,
+    client_ip: &str,
 ) -> Result<(), ApiError> {
-    let Some(stored_hash) = db.get_password_hash(id).await else {
+    let Some(stored_hash) = state.db.get_password_hash(id).await else {
         return Err(ApiError::Status(StatusCode::NOT_FOUND));
     };
     let Some(provided_hash_str) = headers
         .get("X-Password-Hash")
         .and_then(|value| value.to_str().ok())
     else {
-        db.decrement_try_count(id).await;
-        db.increment_fail().await;
-        let (try_count, ttl) = remaining_attempts(db, id).await;
+        record_password_failure(state, id, client_ip).await?;
+        let (try_count, ttl) = remaining_attempts(&state.db, id).await;
         return Err(ApiError::Unauthorized { try_count, ttl });
     };
     let provided_hash = match general_purpose::STANDARD.decode(provided_hash_str) {
         Ok(h) => h,
         Err(_) => {
-            db.decrement_try_count(id).await;
-            db.increment_fail().await;
-            let (try_count, ttl) = remaining_attempts(db, id).await;
+            record_password_failure(state, id, client_ip).await?;
+            let (try_count, ttl) = remaining_attempts(&state.db, id).await;
             return Err(ApiError::Unauthorized { try_count, ttl });
         }
     };
 
     if !constant_time_eq(&provided_hash, &stored_hash) {
-        db.decrement_try_count(id).await;
-        db.increment_fail().await;
-        let (try_count, ttl) = remaining_attempts(db, id).await;
+        record_password_failure(state, id, client_ip).await?;
+        let (try_count, ttl) = remaining_attempts(&state.db, id).await;
         return Err(ApiError::Unauthorized { try_count, ttl });
     }
+    Ok(())
+}
+
+async fn record_password_failure(
+    state: &AppState,
+    id: &str,
+    client_ip: &str,
+) -> Result<(), ApiError> {
+    let ip_allowed = state
+        .limiter
+        .check(&format!("password-fail:ip:{client_ip}"), 30, 60)
+        .await;
+    let paste_allowed = state
+        .limiter
+        .check(&format!("password-fail:paste:{client_ip}:{id}"), 10, 60)
+        .await;
+    if !ip_allowed || !paste_allowed {
+        return Err(ApiError::Status(StatusCode::TOO_MANY_REQUESTS));
+    }
+    state
+        .db
+        .decrement_try_count(id)
+        .await
+        .map_err(|_| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
+    state.db.increment_fail().await;
     Ok(())
 }
 
@@ -522,6 +545,19 @@ pub async fn complete_paste(
     Ok(StatusCode::OK)
 }
 
+/// Delete an in-progress paste when its creator cancels the upload. The
+/// creator must present the per-paste upload token.
+pub async fn cancel_paste(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    validate_id(&id)?;
+    verify_upload_token(&state.db, &id, &headers).await?;
+    state.db.delete_paste(&id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn get_salt(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -583,11 +619,12 @@ fn epoch_secs() -> u64 {
 
 pub(crate) async fn get_paste(
     State(state): State<AppState>,
+    client_ip: ClientIp,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response<Body>, ApiError> {
     validate_id(&id)?;
-    verify_password(&state.db, &id, &headers).await?;
+    verify_password(&state, &id, &headers, &client_ip.0).await?;
 
     let nonce = state.db.get_nonce(&id).await.ok_or(StatusCode::NOT_FOUND)?;
     let file_path = state
@@ -825,6 +862,7 @@ async fn verify_recipient_proof(
 
 pub(crate) async fn get_paste_data(
     State(state): State<AppState>,
+    client_ip: ClientIp,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response<Body>, ApiError> {
@@ -860,7 +898,7 @@ pub(crate) async fn get_paste_data(
                 .ok_or(ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR))?,
         );
     } else {
-        verify_password(&state.db, &id, &headers).await?;
+        verify_password(&state, &id, &headers, &client_ip.0).await?;
     }
 
     let nonce = state
@@ -1029,7 +1067,7 @@ pub(crate) async fn change_password(
 
     // Verifies the OLD password hash; on failure decrements try_count and
     // counts a failed request, same as the data endpoint.
-    verify_password(&state.db, &id, &headers).await?;
+    verify_password(&state, &id, &headers, &ip).await?;
 
     let request: ChangePasswordRequest = decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 

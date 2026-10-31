@@ -209,6 +209,52 @@ async fn upload_requires_token_and_completion_requires_all_chunks() {
 }
 
 #[tokio::test]
+async fn cancelled_upload_requires_token_and_deletes_partial_paste() {
+    let (state, dir) = test_state(false).await;
+    let router = api_router(state);
+    let peer = "203.0.113.45";
+    let (status, paste) = init_paste(&router, peer, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let paste = paste.expect("init response");
+    let paste_url = format!("/paste/{}/cancel", paste.id);
+
+    let unauthorized = router
+        .clone()
+        .oneshot(request(Method::POST, &paste_url, peer, &[], vec![]))
+        .await
+        .expect("cancel without token");
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let token = b64(&paste.upload_token);
+    let cancelled = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &paste_url,
+            peer,
+            &[("x-upload-token", token.as_str())],
+            vec![],
+        ))
+        .await
+        .expect("cancel with token");
+    assert_eq!(cancelled.status(), StatusCode::NO_CONTENT);
+
+    let chunks = router
+        .oneshot(request(
+            Method::GET,
+            &format!("/paste/{}/chunks", paste.id),
+            peer,
+            &[],
+            vec![],
+        ))
+        .await
+        .expect("query cancelled paste");
+    assert_eq!(chunks.status(), StatusCode::NOT_FOUND);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn xchacha_password_paste_round_trip() {
     use mitsuzo_types::{encode_xchacha_create, split_paste_frame_with_nonce};
     use mitsuzo_utils::{decrypt_xchacha_chunk_into, encrypt_setup, encrypt_xchacha_chunk_into};
@@ -284,6 +330,54 @@ async fn xchacha_password_paste_round_trip() {
     let mut plaintext = Vec::new();
     decrypt_xchacha_chunk_into(encrypted, &key, &nonce, 0, &mut plaintext).unwrap();
     assert_eq!(plaintext, b"xchacha test");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn failed_password_checks_are_rate_limited_per_ip_and_paste() {
+    let (state, dir) = test_state(false).await;
+    let router = api_router(state);
+    let peer = "203.0.113.44";
+    let mut header = password_header();
+    header.try_count = Some(100);
+    let response = router
+        .clone()
+        .oneshot(request(Method::POST, "/paste", peer, &[], encode(&header)))
+        .await
+        .expect("init request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let paste: InitPasteResponse = bitcode::decode(&body_bytes(response).await).unwrap();
+
+    for attempt in 0..10 {
+        let response = router
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/paste/{}", paste.id),
+                peer,
+                &[("x-password-hash", &b64(&[0; 32]))],
+                vec![],
+            ))
+            .await
+            .expect("password check");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "attempt {attempt}"
+        );
+    }
+    let blocked = router
+        .oneshot(request(
+            Method::GET,
+            &format!("/paste/{}", paste.id),
+            peer,
+            &[("x-password-hash", &b64(&[0; 32]))],
+            vec![],
+        ))
+        .await
+        .expect("rate-limited password check");
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -731,6 +825,20 @@ async fn health_and_readiness_endpoints_report_ok() {
         .await
         .expect("health request");
     assert_eq!(health.status(), StatusCode::OK);
+    assert_eq!(
+        health.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        health.headers().get("referrer-policy").unwrap(),
+        "no-referrer"
+    );
+    assert_eq!(health.headers().get("x-frame-options").unwrap(), "DENY");
+    assert!(
+        health
+            .headers()
+            .contains_key("content-security-policy-report-only")
+    );
 
     let ready = router
         .clone()

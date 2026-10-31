@@ -363,16 +363,17 @@ pub fn paste_view(id: String) -> Element {
 
             if let Some(prog) = progress.read().as_ref() {
                 div {
-                    class: "w-full max-w-md mx-auto mb-4 p-4 bg-surface rounded-lg",
-                    div {
-                        class: "text-sm font-semibold mb-2 text-text text-center",
-                        "{prog.status}"
+                    class: "fixed bottom-4 right-4 z-50 w-[calc(100vw-2rem)] max-w-md p-4 bg-surface border border-border rounded-xl shadow-2xl",
+                    role: "status",
+                    aria_live: "polite",
+                    div { class: "flex items-start justify-between gap-4",
+                        div { class: "text-sm font-semibold text-text", "{prog.status}" }
+                        span { class: "shrink-0 text-sm font-mono text-accent", "{prog.progress:.0}%" }
                     }
-                    div {
-                        class: "w-full bg-surface rounded-full h-3",
+                    div { class: "mt-3 w-full bg-elevated rounded-full h-2 overflow-hidden", role: "progressbar", aria_label: "Current paste step progress", aria_valuemin: "0", aria_valuemax: "100", aria_valuenow: format!("{:.0}", prog.progress),
                         div {
-                            class: "bg-accent h-3 rounded-full transition-all duration-150",
-                            style: "width: {prog.progress}%"
+                            class: "bg-accent h-full rounded-full transition-all duration-150",
+                            style: "width: {prog.progress.clamp(0.0, 100.0)}%"
                         }
                     }
                 }
@@ -664,7 +665,7 @@ async fn do_decrypt(
 ) {
     progress.set(Some(ProgressState {
         status: t!("progress-downloading-metadata"),
-        progress: 10.0,
+        progress: 0.0,
     }));
     can_change_password.set(false);
     needs_account_password.set(false);
@@ -674,11 +675,16 @@ async fn do_decrypt(
         vec![],
         |loaded, total| {
             if total > 0 {
-                let percent = (loaded as f32 / total as f32) * 20.0;
-                let status_text = t!("progress-downloading-percent", percent: format!("{:.0}", (percent / 20.0) * 100.0));
+                let percent = (loaded as f32 / total as f32) * 100.0;
+                let status_text = format!(
+                    "{} · {:.1} / {:.1} MiB",
+                    t!("progress-downloading-percent", percent: format!("{percent:.0}")),
+                    loaded as f32 / 1_048_576.0,
+                    total as f32 / 1_048_576.0
+                );
                 progress.set(Some(ProgressState {
                     status: status_text,
-                    progress: 10.0 + percent,
+                    progress: percent,
                 }));
             }
         },
@@ -805,8 +811,9 @@ async fn do_decrypt(
 
     progress.set(Some(ProgressState {
         status: t!("progress-deriving-key"),
-        progress: 40.0,
+        progress: 0.0,
     }));
+    TimeoutFuture::new(0).await;
 
     // Derive the KEK and validation key from the password. The KEK later
     // unwraps the content key that arrives with the ciphertext; the
@@ -821,13 +828,18 @@ async fn do_decrypt(
             return;
         }
     };
+    progress.set(Some(ProgressState {
+        status: t!("progress-deriving-key"),
+        progress: 100.0,
+    }));
+    TimeoutFuture::new(0).await;
 
     let password_hash = compute_password_hash(&validation_key, &salt_bytes);
     let encoded_hash = general_purpose::STANDARD.encode(password_hash);
 
     progress.set(Some(ProgressState {
         status: t!("progress-downloading-content"),
-        progress: 50.0,
+        progress: 0.0,
     }));
 
     let content_result = do_xhr_get(
@@ -835,17 +847,23 @@ async fn do_decrypt(
         vec![("X-Password-Hash".to_string(), encoded_hash)],
         |loaded, total| {
             if total > 0 {
-                let percent = (loaded as f32 / total as f32) * 40.0;
-                let status_text = t!("progress-downloading-percent", percent: format!("{:.0}", (percent / 40.0) * 100.0));
+                let percent = (loaded as f32 / total as f32) * 100.0;
+                let status_text = format!(
+                    "{} · {:.1} / {:.1} MiB",
+                    t!("progress-downloading-percent", percent: format!("{percent:.0}")),
+                    loaded as f32 / 1_048_576.0,
+                    total as f32 / 1_048_576.0
+                );
                 progress.set(Some(ProgressState {
                     status: status_text,
-                    progress: 50.0 + percent,
+                    progress: percent,
                 }));
             } else if loaded > 0 {
-                let status_text = t!("progress-downloading-kb", kb: format!("{:.1}", loaded as f32 / 1024.0));
+                let status_text =
+                    t!("progress-downloading-kb", kb: format!("{:.1}", loaded as f32 / 1024.0));
                 progress.set(Some(ProgressState {
                     status: status_text,
-                    progress: 90.0,
+                    progress: 0.0,
                 }));
             }
         },
@@ -913,18 +931,32 @@ async fn do_decrypt(
                     };
 
                     let mut plaintext = Vec::with_capacity(plaintext_size);
+                    progress.set(Some(ProgressState {
+                        status: format!(
+                            "{} · 0 / {paste_total_chunks} chunks",
+                            t!("progress-decrypting-percent", percent: "0")
+                        ),
+                        progress: 0.0,
+                    }));
+                    TimeoutFuture::new(0).await;
                     let result: Result<(), String> = async {
                         for i in 0..paste_total_chunks {
-                            if i % 8 == 0 {
-                                let pct = 90.0 + (i as f32 / paste_total_chunks as f32) * 10.0;
+                            let (start, end) = get_chunk_bounds(paste_total_chunks, i, content.len());
+                            match xchacha_nonce { Some(nonce) => ContentCipherKind::XChaCha20Poly1305.decrypt_chunk(&encryption_key, &nonce, i, &content[start..end], &mut plaintext)?, None => ContentCipherKind::ChaCha20Poly1305.decrypt_chunk(&encryption_key, &header_nonce, i, &content[start..end], &mut plaintext)? };
+                            if (i + 1) % 8 == 0 || i + 1 == paste_total_chunks {
+                                let percent = ((i + 1) as f32 / paste_total_chunks as f32) * 100.0;
                                 progress.set(Some(ProgressState {
-                                    status: t!("progress-decrypting-percent", percent: format!("{:.0}", (i as f32 / paste_total_chunks as f32) * 100.0)),
-                                    progress: pct,
+                                    status: format!(
+                                        "{} · chunk {}/{} · {:.1} MiB",
+                                        t!("progress-decrypting-percent", percent: format!("{percent:.0}")),
+                                        i + 1,
+                                        paste_total_chunks,
+                                        plaintext.len() as f32 / 1_048_576.0
+                                    ),
+                                    progress: percent,
                                 }));
                                 TimeoutFuture::new(0).await;
                             }
-                            let (start, end) = get_chunk_bounds(paste_total_chunks, i, content.len());
-                            match xchacha_nonce { Some(nonce) => ContentCipherKind::XChaCha20Poly1305.decrypt_chunk(&encryption_key, &nonce, i, &content[start..end], &mut plaintext)?, None => ContentCipherKind::ChaCha20Poly1305.decrypt_chunk(&encryption_key, &header_nonce, i, &content[start..end], &mut plaintext)? };
                         }
                         Ok(())
                     }.await;
@@ -934,7 +966,7 @@ async fn do_decrypt(
                             if header_burn_after_read {
                                 progress.set(Some(ProgressState {
                                     status: t!("burn-progress"),
-                                    progress: 95.0,
+                                    progress: 0.0,
                                 }));
                                 let receipt = compute_burn_receipt(&encryption_key);
                                 let burn_result = do_xhr_post(
@@ -1018,7 +1050,7 @@ async fn do_recipient_decrypt(
 ) {
     progress.set(Some(ProgressState {
         status: t!("recipient-authenticating"),
-        progress: 30.0,
+        progress: 0.0,
     }));
 
     let data_url = format!("{}/api/paste/{}/data", BASE_URL, current_id);
@@ -1064,8 +1096,14 @@ async fn do_recipient_decrypt(
     );
 
     progress.set(Some(ProgressState {
+        status: t!("recipient-authenticating"),
+        progress: 100.0,
+    }));
+    TimeoutFuture::new(0).await;
+
+    progress.set(Some(ProgressState {
         status: t!("progress-downloading-content"),
-        progress: 50.0,
+        progress: 0.0,
     }));
 
     let content_result = do_xhr_get(
@@ -1073,17 +1111,23 @@ async fn do_recipient_decrypt(
         vec![("X-Account-Proof".to_string(), proof)],
         |loaded, total| {
             if total > 0 {
-                let percent = (loaded as f32 / total as f32) * 40.0;
-                let status_text = t!("progress-downloading-percent", percent: format!("{:.0}", (percent / 40.0) * 100.0));
+                let percent = (loaded as f32 / total as f32) * 100.0;
+                let status_text = format!(
+                    "{} · {:.1} / {:.1} MiB",
+                    t!("progress-downloading-percent", percent: format!("{percent:.0}")),
+                    loaded as f32 / 1_048_576.0,
+                    total as f32 / 1_048_576.0
+                );
                 progress.set(Some(ProgressState {
                     status: status_text,
-                    progress: 50.0 + percent,
+                    progress: percent,
                 }));
             } else if loaded > 0 {
-                let status_text = t!("progress-downloading-kb", kb: format!("{:.1}", loaded as f32 / 1024.0));
+                let status_text =
+                    t!("progress-downloading-kb", kb: format!("{:.1}", loaded as f32 / 1024.0));
                 progress.set(Some(ProgressState {
                     status: status_text,
-                    progress: 90.0,
+                    progress: 0.0,
                 }));
             }
         },
@@ -1175,18 +1219,47 @@ async fn do_recipient_decrypt(
             };
 
             let mut plaintext = Vec::with_capacity(plaintext_size);
+            progress.set(Some(ProgressState {
+                status: format!(
+                    "{} · 0 / {paste_total_chunks} chunks",
+                    t!("progress-decrypting-percent", percent: "0")
+                ),
+                progress: 0.0,
+            }));
+            TimeoutFuture::new(0).await;
             let result: Result<(), String> = async {
                 for i in 0..paste_total_chunks {
-                    if i % 8 == 0 {
-                        let pct = 90.0 + (i as f32 / paste_total_chunks as f32) * 10.0;
+                    let (start, end) = get_chunk_bounds(paste_total_chunks, i, content.len());
+                    match xchacha_nonce {
+                        Some(nonce) => ContentCipherKind::XChaCha20Poly1305.decrypt_chunk(
+                            &encryption_key,
+                            &nonce,
+                            i,
+                            &content[start..end],
+                            &mut plaintext,
+                        )?,
+                        None => ContentCipherKind::ChaCha20Poly1305.decrypt_chunk(
+                            &encryption_key,
+                            &header_nonce,
+                            i,
+                            &content[start..end],
+                            &mut plaintext,
+                        )?,
+                    };
+                    if (i + 1) % 8 == 0 || i + 1 == paste_total_chunks {
+                        let percent = ((i + 1) as f32 / paste_total_chunks as f32) * 100.0;
                         progress.set(Some(ProgressState {
-                            status: t!("progress-decrypting-percent", percent: format!("{:.0}", (i as f32 / paste_total_chunks as f32) * 100.0)),
-                            progress: pct,
+                            status: format!(
+                                "{} · chunk {}/{} · {:.1} MiB",
+                                t!("progress-decrypting-percent", percent: format!("{percent:.0}")),
+                                i + 1,
+                                paste_total_chunks,
+                                plaintext.len() as f32 / 1_048_576.0
+                            ),
+                            progress: percent,
                         }));
                         TimeoutFuture::new(0).await;
                     }
-                    let (start, end) = get_chunk_bounds(paste_total_chunks, i, content.len());
-                    match xchacha_nonce { Some(nonce) => ContentCipherKind::XChaCha20Poly1305.decrypt_chunk(&encryption_key, &nonce, i, &content[start..end], &mut plaintext)?, None => ContentCipherKind::ChaCha20Poly1305.decrypt_chunk(&encryption_key, &header_nonce, i, &content[start..end], &mut plaintext)? };
                 }
                 Ok(())
             }

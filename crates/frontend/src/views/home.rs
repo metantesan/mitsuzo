@@ -23,6 +23,10 @@ use mitsuzo_utils::{
     ContentCipherKind, compute_burn_receipt, encrypt_setup, generate_content_key,
     get_ciphertext_size, seal_content_key_for_xwing,
 };
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use wasm_bindgen::JsCast;
 use web_sys;
 
@@ -57,6 +61,43 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{} bytes", bytes)
     }
+}
+
+fn now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map(|performance| performance.now())
+        .unwrap_or(0.0)
+}
+
+async fn cancel_remote_paste(id: &str, upload_token: &str) {
+    let _ = do_xhr_post_headers(
+        &format!("{}/api/paste/{id}/cancel", BASE_URL),
+        Vec::new(),
+        vec![("X-Upload-Token".to_string(), upload_token.to_string())],
+        |_, _| {},
+    )
+    .await;
+}
+
+fn request_create_cancel(
+    mut progress: Signal<Option<ProgressState>>,
+    create_cancel: Signal<Option<Arc<AtomicBool>>>,
+) -> bool {
+    let Some(cancel_flag) = create_cancel.read().as_ref().cloned() else {
+        return false;
+    };
+    cancel_flag.store(true, Ordering::Relaxed);
+    let current_progress = progress
+        .read()
+        .as_ref()
+        .map(|state| state.progress)
+        .unwrap_or(0.0);
+    progress.set(Some(ProgressState {
+        status: t!("progress-cancelling"),
+        progress: current_progress,
+    }));
+    true
 }
 
 fn format_duration(seconds: u32) -> String {
@@ -97,6 +138,7 @@ pub fn home_view() -> Element {
     let mut file_name: Signal<Option<String>> = use_signal(|| None);
     let mut file_content_type: Signal<Option<String>> = use_signal(|| None);
     let mut progress: Signal<Option<ProgressState>> = use_signal(|| None);
+    let create_cancel: Signal<Option<Arc<AtomicBool>>> = use_signal(|| None);
     let mut popup_ctx = use_context::<Signal<PopupContext>>();
     let stats = use_context::<Signal<Option<GetStatsResponse>>>();
     let auto_generated = use_signal(|| false);
@@ -245,6 +287,7 @@ pub fn home_view() -> Element {
         let mut auto_generated = auto_generated;
         let disable_download = disable_download;
         let mut recipient_ephemerals = recipient_ephemerals;
+        let mut create_cancel = create_cancel;
         move |_| {
             spawn(async move {
                 let mode = *encrypt_mode.read();
@@ -269,9 +312,12 @@ pub fn home_view() -> Element {
                     return;
                 }
 
+                let cancel_flag = Arc::new(AtomicBool::new(false));
+                create_cancel.set(Some(cancel_flag.clone()));
+
                 progress.set(Some(ProgressState {
                     status: t!("progress-validating"),
-                    progress: 10.0,
+                    progress: 0.0,
                 }));
 
                 let try_count_value = if try_count_preset.read().as_str() == "custom" {
@@ -297,6 +343,7 @@ pub fn home_view() -> Element {
                     }
                 } else {
                     popup_ctx.write().show_error(t!("error-ttl-invalid"));
+                    create_cancel.set(None);
                     progress.set(None);
                     return;
                 }
@@ -315,12 +362,13 @@ pub fn home_view() -> Element {
                             "error-file-too-large",
                             size: format_size(max_size)
                         ));
+                        create_cancel.set(None);
                         progress.set(None);
                         return;
                     }
                     progress.set(Some(ProgressState {
                         status: t!("progress-processing-file"),
-                        progress: 20.0,
+                        progress: 100.0,
                     }));
                     file_size_for_chunks = f.size() as u64;
                     data_type = DataType::File;
@@ -328,6 +376,7 @@ pub fn home_view() -> Element {
                     let text_content = content.read().clone();
                     if text_content.is_empty() {
                         popup_ctx.write().show_error(t!("error-content-empty"));
+                        create_cancel.set(None);
                         progress.set(None);
                         return;
                     }
@@ -336,12 +385,13 @@ pub fn home_view() -> Element {
                             "error-file-too-large",
                             size: format_size(max_size)
                         ));
+                        create_cancel.set(None);
                         progress.set(None);
                         return;
                     }
                     progress.set(Some(ProgressState {
                         status: t!("progress-processing-text"),
-                        progress: 20.0,
+                        progress: 100.0,
                     }));
                     file_size_for_chunks = text_content.len() as u64;
                     data_type = DataType::Text;
@@ -354,6 +404,7 @@ pub fn home_view() -> Element {
                         popup_ctx
                             .write()
                             .show_error(t!("error-encryption-failed", error: e.to_string()));
+                        create_cancel.set(None);
                         progress.set(None);
                         return;
                     }
@@ -387,6 +438,7 @@ pub fn home_view() -> Element {
                                     "error-encryption-failed",
                                     error: e.to_string()
                                 ));
+                                create_cancel.set(None);
                                 progress.set(None);
                                 return;
                             }
@@ -435,6 +487,7 @@ pub fn home_view() -> Element {
                                 "error-encryption-failed",
                                 error: e.to_string()
                             ));
+                            create_cancel.set(None);
                             progress.set(None);
                             return;
                         }
@@ -476,6 +529,7 @@ pub fn home_view() -> Element {
                         popup_ctx
                             .write()
                             .show_error(t!("error-encryption-failed", error: e.to_string()));
+                        create_cancel.set(None);
                         progress.set(None);
                         return;
                     }
@@ -497,17 +551,23 @@ pub fn home_view() -> Element {
 
                 progress.set(Some(ProgressState {
                     status: t!("progress-encrypting"),
-                    progress: 30.0,
+                    progress: 0.0,
                 }));
 
                 let mut enc_body = Vec::new();
                 let js_file = file_data.read().as_ref().cloned();
+                let encryption_started_ms = now_ms();
 
                 match (text_fallback, js_file) {
                     (Some(text_bytes), _) => {
                         let chunk_size = get_ciphertext_size(text_bytes.len());
                         enc_body.reserve(chunk_size);
                         for i in 0..total_chunks {
+                            if cancel_flag.load(Ordering::Relaxed) {
+                                create_cancel.set(None);
+                                progress.set(None);
+                                return;
+                            }
                             let start = i as usize * CHUNK_SIZE;
                             let end = (start + CHUNK_SIZE).min(text_bytes.len());
                             let chunk = &text_bytes[start..end];
@@ -531,8 +591,28 @@ pub fn home_view() -> Element {
                                 popup_ctx.write().show_error(
                                     t!("error-encryption-failed", error: e.to_string()),
                                 );
+                                create_cancel.set(None);
                                 progress.set(None);
                                 return;
+                            }
+                            if (i + 1) % 8 == 0 || i + 1 == total_chunks {
+                                let percent = ((i + 1) as f32 / total_chunks as f32) * 100.0;
+                                let processed = end as u64;
+                                let elapsed_seconds =
+                                    ((now_ms() - encryption_started_ms) / 1000.0).max(0.001);
+                                let speed_mbps = processed as f64 / 1_000_000.0 / elapsed_seconds;
+                                progress.set(Some(ProgressState {
+                                    status: format!(
+                                        "{} · chunk {}/{} · {} / {} · {speed_mbps:.1} MB/s",
+                                        t!("progress-encrypting-percent", percent: format!("{percent:.0}")),
+                                        i + 1,
+                                        total_chunks,
+                                        format_size(processed),
+                                        format_size(text_bytes.len() as u64)
+                                    ),
+                                    progress: percent,
+                                }));
+                                TimeoutFuture::new(0).await;
                             }
                         }
                     }
@@ -540,15 +620,11 @@ pub fn home_view() -> Element {
                         let total_cipher_size = get_ciphertext_size(file_size_for_chunks as usize);
                         enc_body.reserve(total_cipher_size);
                         for i in 0..total_chunks {
-                            if i % 8 == 0 {
-                                TimeoutFuture::new(0).await;
-                                let pct = 30.0 + (i as f32 / total_chunks as f32) * 20.0;
-                                progress.set(Some(ProgressState {
-                                    status: t!("progress-encrypting-percent", percent: format!("{:.0}", pct)),
-                                    progress: pct,
-                                }));
+                            if cancel_flag.load(Ordering::Relaxed) {
+                                create_cancel.set(None);
+                                progress.set(None);
+                                return;
                             }
-
                             let start = i as u64 * CHUNK_SIZE as u64;
                             let end =
                                 std::cmp::min(start + CHUNK_SIZE as u64, file_size_for_chunks);
@@ -561,6 +637,11 @@ pub fn home_view() -> Element {
                                 .await
                                 .map_err(|_| "read failed".to_string())
                                 .unwrap();
+                            if cancel_flag.load(Ordering::Relaxed) {
+                                create_cancel.set(None);
+                                progress.set(None);
+                                return;
+                            }
                             if let Err(e) = match xnonce {
                                 Some(nonce) => ContentCipherKind::XChaCha20Poly1305.encrypt_chunk(
                                     &encryption_key,
@@ -580,17 +661,43 @@ pub fn home_view() -> Element {
                                 popup_ctx.write().show_error(
                                     t!("error-encryption-failed", error: e.to_string()),
                                 );
+                                create_cancel.set(None);
                                 progress.set(None);
                                 return;
+                            }
+                            if (i + 1) % 8 == 0 || i + 1 == total_chunks {
+                                let pct = ((i + 1) as f32 / total_chunks as f32) * 100.0;
+                                let processed = end;
+                                let elapsed_seconds =
+                                    ((now_ms() - encryption_started_ms) / 1000.0).max(0.001);
+                                let speed_mbps = processed as f64 / 1_000_000.0 / elapsed_seconds;
+                                progress.set(Some(ProgressState {
+                                    status: format!(
+                                        "{} · chunk {}/{} · {} / {} · {speed_mbps:.1} MB/s",
+                                        t!("progress-encrypting-percent", percent: format!("{pct:.0}")),
+                                        i + 1,
+                                        total_chunks,
+                                        format_size(end),
+                                        format_size(file_size_for_chunks)
+                                    ),
+                                    progress: pct,
+                                }));
+                                TimeoutFuture::new(0).await;
                             }
                         }
                     }
                     _ => {}
                 }
 
+                if cancel_flag.load(Ordering::Relaxed) {
+                    create_cancel.set(None);
+                    progress.set(None);
+                    return;
+                }
+
                 progress.set(Some(ProgressState {
                     status: t!("progress-initiating-upload"),
-                    progress: 50.0,
+                    progress: 0.0,
                 }));
 
                 let init_path = if xnonce.is_some() {
@@ -619,6 +726,7 @@ pub fn home_view() -> Element {
                                 popup_ctx.write().show_error(
                                     t!("error-parse-response-failed", error: "init response"),
                                 );
+                                create_cancel.set(None);
                                 progress.set(None);
                                 return;
                             }
@@ -628,10 +736,18 @@ pub fn home_view() -> Element {
                         popup_ctx
                             .write()
                             .show_error(t!("error-create-paste-failed", status: "init"));
+                        create_cancel.set(None);
                         progress.set(None);
                         return;
                     }
                 };
+
+                if cancel_flag.load(Ordering::Relaxed) {
+                    cancel_remote_paste(&paste_id, &upload_token).await;
+                    create_cancel.set(None);
+                    progress.set(None);
+                    return;
+                }
 
                 let total_upload_chunks = enc_body.len().div_ceil(UPLOAD_CHUNK_SIZE);
 
@@ -653,6 +769,12 @@ pub fn home_view() -> Element {
                     |_, _| {},
                 )
                 .await;
+                if cancel_flag.load(Ordering::Relaxed) {
+                    cancel_remote_paste(&paste_id, &upload_token).await;
+                    create_cancel.set(None);
+                    progress.set(None);
+                    return;
+                }
                 let start_chunk = match chunk_info {
                     Ok(r) if r.status >= 200 && r.status < 300 => r
                         .body
@@ -663,37 +785,96 @@ pub fn home_view() -> Element {
                     _ => 0,
                 };
 
-                let mut last_update = 0.0;
+                let mut completed_bytes =
+                    (start_chunk as usize * UPLOAD_CHUNK_SIZE).min(enc_body.len());
+                let upload_start_pct =
+                    completed_bytes as f32 / enc_body.len().max(1) as f32 * 100.0;
+                progress.set(Some(ProgressState {
+                    status: format!(
+                        "Uploading · chunks {}/{} already present · {} / {} · 0.0 MB/s",
+                        start_chunk,
+                        total_upload_chunks,
+                        format_size(completed_bytes as u64),
+                        format_size(enc_body.len() as u64)
+                    ),
+                    progress: upload_start_pct,
+                }));
+
+                let upload_started_ms = now_ms();
+                let mut uploaded_this_run = 0usize;
                 for i in start_chunk..total_upload_chunks as u32 {
                     let chunk_start = i as usize * UPLOAD_CHUNK_SIZE;
                     let chunk_end = std::cmp::min(chunk_start + UPLOAD_CHUNK_SIZE, enc_body.len());
                     let chunk_data = enc_body[chunk_start..chunk_end].to_vec();
+                    let uploaded_chunk_len = chunk_data.len();
 
                     let upload_result = do_xhr_put_headers(
                         &format!("{}/api/paste/{}/chunk/{}", BASE_URL, paste_id, i),
                         chunk_data,
                         vec![("X-Upload-Token".to_string(), upload_token.clone())],
                         |loaded, total| {
-                            if total > 0 {
-                                let chunk_pct = loaded as f32 / total as f32;
-                                let overall = 50.0 + ((i as f32 + chunk_pct) / total_upload_chunks as f32) * 40.0;
-                                if overall - last_update > 1.0 {
-                                    last_update = overall;
-                                    progress.set(Some(ProgressState {
-                                        status: t!("progress-upload-percent", percent: format!("{:.0}", (overall - 50.0) / 40.0 * 100.0)),
-                                        progress: overall,
-                                    }));
-                                }
+                            if cancel_flag.load(Ordering::Relaxed) {
+                                return;
                             }
+                            let current_chunk_bytes = (loaded as usize).min(uploaded_chunk_len);
+                            let bytes_transferred = completed_bytes + current_chunk_bytes;
+                            let overall_pct =
+                                bytes_transferred as f32 / enc_body.len().max(1) as f32 * 100.0;
+                            let elapsed_seconds = ((now_ms() - upload_started_ms) / 1000.0).max(0.001);
+                            let speed_mbps =
+                                (uploaded_this_run + current_chunk_bytes) as f64
+                                    / 1_000_000.0
+                                    / elapsed_seconds;
+                            progress.set(Some(ProgressState {
+                                status: format!(
+                                    "{} · chunk {}/{}: {} / {} · total {} / {} · {speed_mbps:.1} MB/s",
+                                    t!("progress-upload-percent", percent: format!("{overall_pct:.0}")),
+                                    i + 1,
+                                    total_upload_chunks,
+                                    format_size(current_chunk_bytes as u64),
+                                    format_size(total.max(uploaded_chunk_len as u64)),
+                                    format_size(bytes_transferred as u64),
+                                    format_size(enc_body.len() as u64)
+                                ),
+                                progress: overall_pct,
+                            }));
                         },
-                    ).await;
+                    )
+                    .await;
+
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        cancel_remote_paste(&paste_id, &upload_token).await;
+                        create_cancel.set(None);
+                        progress.set(None);
+                        return;
+                    }
 
                     match upload_result {
-                        Ok(r) if r.status >= 200 && r.status < 300 => {}
+                        Ok(r) if r.status >= 200 && r.status < 300 => {
+                            completed_bytes += uploaded_chunk_len;
+                            uploaded_this_run += uploaded_chunk_len;
+                            let completed_chunks = i + 1;
+                            let percent =
+                                completed_bytes as f32 / enc_body.len().max(1) as f32 * 100.0;
+                            let elapsed_seconds =
+                                ((now_ms() - upload_started_ms) / 1000.0).max(0.001);
+                            let speed_mbps =
+                                uploaded_this_run as f64 / 1_000_000.0 / elapsed_seconds;
+                            progress.set(Some(ProgressState {
+                                status: format!(
+                                    "{} · chunks {completed_chunks}/{total_upload_chunks} complete · {} / {} · {speed_mbps:.1} MB/s",
+                                    t!("progress-upload-percent", percent: format!("{percent:.0}")),
+                                    format_size(completed_bytes as u64),
+                                    format_size(enc_body.len() as u64)
+                                ),
+                                progress: percent,
+                            }));
+                        }
                         _ => {
                             popup_ctx.write().show_error(
                                 t!("error-create-paste-failed", status: format!("chunk {}", i)),
                             );
+                            create_cancel.set(None);
                             progress.set(None);
                             return;
                         }
@@ -702,7 +883,7 @@ pub fn home_view() -> Element {
 
                 progress.set(Some(ProgressState {
                     status: t!("progress-finalizing"),
-                    progress: 95.0,
+                    progress: 0.0,
                 }));
 
                 let complete_result = do_xhr_post_headers(
@@ -713,13 +894,33 @@ pub fn home_view() -> Element {
                 )
                 .await;
 
+                if cancel_flag.load(Ordering::Relaxed) {
+                    cancel_remote_paste(&paste_id, &upload_token).await;
+                    create_cancel.set(None);
+                    progress.set(None);
+                    return;
+                }
+
                 match complete_result {
                     Ok(response) if response.status >= 200 && response.status < 300 => {
                         generated_id.set(Some(paste_id));
+                        create_cancel.set(None);
+                        let complete_status = t!("progress-upload-complete");
                         progress.set(Some(ProgressState {
-                            status: t!("progress-upload-complete"),
+                            status: complete_status.clone(),
                             progress: 100.0,
                         }));
+                        let mut completion_progress = progress;
+                        spawn(async move {
+                            TimeoutFuture::new(1800).await;
+                            if completion_progress
+                                .read()
+                                .as_ref()
+                                .is_some_and(|current| current.status == complete_status)
+                            {
+                                completion_progress.set(None);
+                            }
+                        });
                     }
                     Ok(response) if response.status == 409 => {
                         let received = do_xhr_get(
@@ -734,12 +935,14 @@ pub fn home_view() -> Element {
                         .map(|info| info.received)
                         .unwrap_or(0);
                         popup_ctx.write().show_error(t!("error-upload-incomplete", received: received, total: total_upload_chunks));
+                        create_cancel.set(None);
                         progress.set(None);
                     }
                     _ => {
                         popup_ctx
                             .write()
                             .show_error(t!("error-create-paste-failed", status: "complete"));
+                        create_cancel.set(None);
                         progress.set(None);
                     }
                 }
@@ -781,7 +984,6 @@ pub fn home_view() -> Element {
                 if let Some(file) = files.into_iter().next()
                     && let Some(web_file) = file.inner().downcast_ref::<web_sys::File>().cloned()
                 {
-                    progress.set(Some(ProgressState { status: t!("progress-file-loaded"), progress: 100.0 }));
                     file_data.set(Some(web_file));
                     file_name.set(Some(file.name()));
                     file_content_type.set(file.content_type());
@@ -831,16 +1033,26 @@ pub fn home_view() -> Element {
 
             if let Some(prog) = progress.read().as_ref() {
                 div {
-                    class: "w-full max-w-xl mb-4 p-4 bg-surface rounded-lg",
-                    div {
-                        class: "text-sm font-semibold mb-2 text-text text-center",
-                        "{prog.status}"
+                    class: "fixed bottom-4 right-4 z-50 w-[calc(100vw-2rem)] max-w-xl p-4 bg-surface border border-border rounded-xl shadow-2xl",
+                    role: "status",
+                    aria_live: "polite",
+                    div { class: "flex items-start justify-between gap-4",
+                        div { class: "text-sm font-semibold text-text", "{prog.status}" }
+                        div { class: "flex shrink-0 items-center gap-3",
+                            span { class: "text-sm font-mono text-accent", "{prog.progress:.0}%" }
+                            if create_cancel.read().is_some() {
+                                button {
+                                    class: "text-sm text-danger hover:text-danger-hover",
+                                    onclick: move |_| { request_create_cancel(progress, create_cancel); },
+                                    {t!("recipient-cancel")}
+                                }
+                            }
+                        }
                     }
-                    div {
-                        class: "w-full bg-surface rounded-full h-3",
+                    div { class: "mt-3 w-full bg-elevated rounded-full h-2 overflow-hidden", role: "progressbar", aria_label: "Current paste step progress", aria_valuemin: "0", aria_valuemax: "100", aria_valuenow: format!("{:.0}", prog.progress),
                         div {
-                            class: "bg-accent h-3 rounded-full transition-all duration-150",
-                            style: "width: {prog.progress}%"
+                            class: "bg-accent h-full rounded-full transition-all duration-150",
+                            style: "width: {prog.progress.clamp(0.0, 100.0)}%"
                         }
                     }
                 }
@@ -874,10 +1086,19 @@ pub fn home_view() -> Element {
                     button {
                         class: "text-danger hover:text-danger-hover",
                         onclick: move |_| {
+                            if !request_create_cancel(progress, create_cancel) {
+                                progress.set(None);
+                            }
                             file_name.set(None);
                             file_data.set(None);
                             file_content_type.set(None);
-                            progress.set(None);
+                            if let Some(input) = web_sys::window()
+                                .and_then(|window| window.document())
+                                .and_then(|document| document.get_element_by_id("file-upload"))
+                                .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
+                            {
+                                input.set_value("");
+                            }
                         },
                         {t!("clear")}
                     }
@@ -914,10 +1135,10 @@ pub fn home_view() -> Element {
                                 if let Some(input) = input
                                     && let Some(files) = input.files()
                                         && let Some(file) = files.get(0) {
-                                            progress.set(Some(ProgressState { status: "File loaded".to_string(), progress: 100.0 }));
                                             file_data.set(Some(file));
                                             file_name.set(Some(files.get(0).unwrap().name()));
                                             file_content_type.set(Some(files.get(0).unwrap().type_()));
+                                            input.set_value("");
                                         }
                             }
                         }

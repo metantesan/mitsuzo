@@ -2,8 +2,11 @@ use crate::AppState;
 use crate::handlers;
 use axum::{
     Router,
+    body::Body,
     extract::DefaultBodyLimit,
-    http::{HeaderName, HeaderValue, Method},
+    http::{HeaderName, HeaderValue, Method, Request, header},
+    middleware::{Next, from_fn},
+    response::Response,
     routing::{get, post, put},
 };
 use mitsuzo_types::UPLOAD_CHUNK_SIZE;
@@ -58,6 +61,7 @@ pub fn api_router(state: AppState) -> Router {
         )
         .route("/paste/{id}/chunks", get(handlers::get_chunk_info))
         .route("/paste/{id}/complete", post(handlers::complete_paste))
+        .route("/paste/{id}/cancel", post(handlers::cancel_paste))
         .route("/paste/{id}/salt", get(handlers::get_salt))
         .route("/paste/{id}/data", get(handlers::get_paste_data))
         .route("/paste/{id}/challenge", get(handlers::get_paste_challenge))
@@ -85,6 +89,30 @@ pub fn api_router(state: AppState) -> Router {
     }
 }
 
+async fn security_headers(request: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    // Start in report-only mode while the browser application is exercised
+    // across its supported flows; this surfaces compatibility issues without
+    // blocking the app.
+    headers.insert(
+        "content-security-policy-report-only",
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        ),
+    );
+    response
+}
+
 pub fn app_router(state: AppState) -> Router {
     let assets_path = std::env::current_exe()
         .ok()
@@ -105,4 +133,5 @@ pub fn app_router(state: AppState) -> Router {
         .fallback(get(handlers::fallback_to_index))
         .with_state(state)
         .nest("/api", api)
+        .layer(from_fn(security_headers))
 }

@@ -14,6 +14,24 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.15.3",
+            date: "2026-11-01",
+            items_en: vec![
+                "Made failed-password try-count updates atomic and added per-IP and per-paste throttling",
+                "Added report-only content security policy and baseline security headers; pinned GitHub Actions and cached Cargo dependencies in CI",
+                "Added stage-specific paste progress with byte counts and throughput, plus cancellation that removes partial uploads",
+                "Expanded the browser cipher benchmark to 1 GiB while keeping memory bounded and excluding UI pauses from timings",
+                "Moved the Karla and JetBrains Mono font stylesheet links into the document head",
+            ],
+            items_fa: vec![
+                "به‌روزرسانی شمارندهٔ تلاش رمزعبور به‌صورت اتمی و افزودن محدودسازی تلاش ناموفق بر اساس IP و Paste",
+                "افزودن سیاست امنیت محتوای گزارش‌محور و سرآیندهای امنیتی پایه؛ تثبیت نسخهٔ GitHub Actions و ذخیرهٔ وابستگی‌های Cargo در CI",
+                "افزودن پیشرفت مرحله‌ای Paste همراه با شمارش بایت و سرعت، و امکان لغو که آپلودهای ناقص را حذف می‌کند",
+                "گسترش سنجش کارایی رمزهای مرورگر تا ۱ GiB با حافظهٔ محدود و حذف مکث‌های رابط کاربری از زمان‌سنجی",
+                "انتقال پیوندهای stylesheet فونت‌های Karla و JetBrains Mono به بخش head سند",
+            ],
+        },
+        Change {
             version: "v0.15.2",
             date: "2026-11-01",
             items_en: vec![
