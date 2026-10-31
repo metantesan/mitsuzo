@@ -109,6 +109,7 @@ pub fn home_view() -> Element {
     let recipient_ephemerals = use_recipient_ephemerals();
     let mut recipient_search = use_signal(String::new);
     let mut use_xchacha = use_signal(|| true);
+    let mut cipher_menu_open = use_signal(|| false);
     let mut encrypt_mode = use_signal(move || {
         if recipient.read().is_some() {
             EncryptMode::Account
@@ -980,17 +981,66 @@ pub fn home_view() -> Element {
                 }
             }
 
-            label {
-                    class: "w-full max-w-xl mb-3 text-muted text-sm",
-                    {t!("password-cipher")}
-                    select {
-                        class: "w-full mt-1 p-3 bg-surface text-text rounded-lg border border-border",
-                        value: if *use_xchacha.read() { "xchacha" } else { "chacha" },
-                        onchange: move |event| use_xchacha.set(event.value() == "xchacha"),
-                        option { value: "chacha", "ChaCha20-Poly1305" }
-                        option { value: "xchacha", "XChaCha20-Poly1305" }
+            div {
+                class: "w-full max-w-xl mb-3 relative",
+                label {
+                    class: "block text-muted text-sm mb-1",
+                    {t!("content-cipher")}
+                }
+                button {
+                    r#type: "button",
+                    class: "w-full p-3 bg-surface text-text rounded-lg border border-border flex items-center justify-between hover:border-accent focus:outline-none focus:ring-2 focus:ring-accent",
+                    "aria-haspopup": "listbox",
+                    "aria-expanded": *cipher_menu_open.read(),
+                    onclick: move |_| {
+                        let is_open = *cipher_menu_open.read();
+                        cipher_menu_open.set(!is_open);
+                    },
+                    span {
+                        if *use_xchacha.read() { "XChaCha20-Poly1305" } else { "ChaCha20-Poly1305" }
+                    }
+                    svg {
+                        class: if *cipher_menu_open.read() { "w-4 h-4 rotate-180 transition-transform" } else { "w-4 h-4 transition-transform" },
+                        style: "margin-inline-start: 0.5rem",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        "aria-hidden": "true",
+                        path { d: "m6 9 6 6 6-6" }
                     }
                 }
+                if *cipher_menu_open.read() {
+                    div {
+                        class: "absolute z-20 w-full mt-1 p-1 bg-surface text-text rounded-lg border border-border shadow-lg",
+                        role: "listbox",
+                        button {
+                            r#type: "button",
+                            role: "option",
+                            "aria-selected": !*use_xchacha.read(),
+                            class: if !*use_xchacha.read() { "w-full p-3 rounded-md text-left bg-accent/15 text-accent" } else { "w-full p-3 rounded-md text-left hover:bg-elevated" },
+                            onclick: move |_| {
+                                use_xchacha.set(false);
+                                cipher_menu_open.set(false);
+                            },
+                            "ChaCha20-Poly1305"
+                        }
+                        button {
+                            r#type: "button",
+                            role: "option",
+                            "aria-selected": *use_xchacha.read(),
+                            class: if *use_xchacha.read() { "w-full p-3 rounded-md text-left bg-accent/15 text-accent" } else { "w-full p-3 rounded-md text-left hover:bg-elevated" },
+                            onclick: move |_| {
+                                use_xchacha.set(true);
+                                cipher_menu_open.set(false);
+                            },
+                            "XChaCha20-Poly1305"
+                        }
+                    }
+                }
+            }
             if !account_mode {
                 input {
                     class: "w-full max-w-xl p-4 bg-surface text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",

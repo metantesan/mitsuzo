@@ -303,4 +303,4 @@ footer-author = hikari
 footer-github = GitHub
 footer-tagline = Built for one. Available to anyone who needs it.
 
-password-cipher = Encryption algorithm
+content-cipher = Content cipher

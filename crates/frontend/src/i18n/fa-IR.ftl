@@ -303,4 +303,4 @@ footer-author = هیکاری
 footer-github = گیت‌هاب
 footer-tagline = برای یک نفر ساخته شد. برای هر کسی که به آن نیاز دارد.
 
-password-cipher = الگوریتم رمزگذاری
+content-cipher = الگوریتم رمزگذاری محتوا
