@@ -12,9 +12,10 @@ use mitsuzo_types::{
 };
 use mitsuzo_utils::{
     ContentCipherKind, compute_burn_receipt, compute_password_hash, derive_account_scalar,
-    derive_keys, derive_xwing_public_key, encrypt_setup, generate_content_key, get_chunk_bounds,
-    get_ciphertext_size, kid_from_pubkey, lock_account_key, open_challenge,
-    open_content_key_for_recipient, open_content_key_for_xwing, pubkey_from_scalar,
+    derive_keys, derive_xwing_account_public_key, encrypt_setup, generate_content_key,
+    get_chunk_bounds, get_ciphertext_size, kid_from_pubkey, kid_from_xwing_pubkey,
+    lock_account_key, open_challenge, open_content_key_for_legacy_xwing,
+    open_content_key_for_recipient, open_content_key_for_xwing_account, pubkey_from_scalar,
     seal_content_key_for_xwing, unlock_account_key, unwrap_content_key,
 };
 use reqwest::Client;
@@ -246,14 +247,20 @@ fn write_account_blob(blob: &AccountKeyBlob) -> eyre::Result<()> {
     Ok(())
 }
 
+type UnlockedAccount = ([u8; 32], [u8; 32], [u8; 32], [u8; 32]);
+
 /// Unlock the local account blob with the account password, returning
-/// `(scalar, pubkey, kid)`.
-fn unlock_account(password: &str) -> eyre::Result<([u8; 32], [u8; 32], [u8; 32])> {
+/// `(scalar, pubkey, legacy_kid, xwing_kid)`.
+fn unlock_account(password: &str) -> eyre::Result<UnlockedAccount> {
     let blob = read_account_blob()?;
     let scalar = unlock_account_key(&blob, password).map_err(|e| eyre::eyre!("{}", e))?;
     let pubkey = pubkey_from_scalar(&scalar);
-    let kid = kid_from_pubkey(&pubkey);
-    Ok((scalar, pubkey, kid))
+    let legacy_kid = kid_from_pubkey(&pubkey);
+    let xwing_kid = kid_from_xwing_pubkey(
+        &derive_xwing_account_public_key(&scalar)
+            .map_err(|e| eyre::eyre!("Failed to derive X-Wing public key: {e}"))?,
+    );
+    Ok((scalar, pubkey, legacy_kid, xwing_kid))
 }
 
 fn generate_mnemonic() -> eyre::Result<String> {
@@ -270,7 +277,9 @@ fn mnemonic_to_scalar(phrase: &str) -> eyre::Result<KeyMaterial> {
     let seed = mnemonic.to_seed("");
     let scalar = derive_account_scalar(&seed);
     let pubkey = pubkey_from_scalar(&scalar);
-    let kid = kid_from_pubkey(&pubkey);
+    let xwing_pubkey = derive_xwing_account_public_key(&scalar)
+        .map_err(|e| eyre::eyre!("Failed to derive X-Wing public key: {e}"))?;
+    let kid = kid_from_xwing_pubkey(&xwing_pubkey);
     Ok((mnemonic.to_string(), scalar, pubkey, kid))
 }
 
@@ -362,6 +371,8 @@ async fn register_account(
     let request = RegisterAccountRequest {
         kid,
         pubkey,
+        xwing_pubkey: derive_xwing_account_public_key(&scalar)
+            .map_err(|e| eyre::eyre!("Failed to derive X-Wing public key: {e}"))?,
         name: name.to_string(),
     };
     let resp = client
@@ -411,7 +422,7 @@ async fn register_xwing_key(
     )
     .map_err(|e| eyre::eyre!("Failed to solve account challenge: {}", e))?;
     let request = AccountXWingKeyRequest {
-        public_key: derive_xwing_public_key(scalar)
+        public_key: derive_xwing_account_public_key(scalar)
             .map_err(|e| eyre::eyre!("Failed to derive X-Wing key: {}", e))?,
         challenge_response,
     };
@@ -430,7 +441,14 @@ async fn fetch_xwing_key(client: &Client, base_url: &str, kid: &[u8; 32]) -> eyr
         .get(format!("{}/api/account/{}/xwing", base_url, hex(kid)))
         .send()
         .await?
-        .error_for_status()?;
+        .error_for_status()
+        .map_err(|error| {
+            if error.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+                eyre::eyre!("This recipient has a legacy account id. Ask them to sign in and create an X-Wing account before sending them a paste.")
+            } else {
+                eyre::Report::from(error)
+            }
+        })?;
     let decoded: AccountXWingKeyResponse = bitcode::decode(&response.bytes().await?)?;
     Ok(decoded.public_key)
 }
@@ -441,23 +459,87 @@ async fn login_account(client: &Client, base_url: &str) -> eyre::Result<()> {
         "{} ",
         "Account password:".cyan().bold()
     ))?);
-    let (scalar, _pubkey, kid) =
+    let (scalar, pubkey, legacy_kid, xwing_kid) =
         unlock_account(&password).map_err(|e| eyre::eyre!("{} {}", "Error:".red().bold(), e))?;
     let resp = client
-        .get(format!("{}/api/account/{}", base_url, hex(&kid)))
+        .get(format!("{}/api/account/{}", base_url, hex(&xwing_kid)))
         .send()
         .await?;
     if resp.status().is_success() {
         let profile: AccountProfileResponse = bitcode::decode(&resp.bytes().await?)?;
-        register_xwing_key(client, base_url, &scalar, &kid).await?;
+        register_xwing_key(client, base_url, &scalar, &xwing_kid).await?;
         print_profile("Logged in as:", &profile);
     } else {
+        let legacy = client
+            .get(format!("{}/api/account/{}", base_url, hex(&legacy_kid)))
+            .send()
+            .await?;
+        if !legacy.status().is_success() {
+            eprintln!(
+                "{} No X-Wing or legacy account found (HTTP {}).",
+                "Error:".red().bold(),
+                legacy.status()
+            );
+            return Ok(());
+        }
+        let profile: AccountProfileResponse = bitcode::decode(&legacy.bytes().await?)?;
+        if profile.pubkey != pubkey {
+            eyre::bail!("The legacy account public key does not match the local key.");
+        }
+        prove_account_login(client, base_url, &scalar, &legacy_kid).await?;
         eprintln!(
-            "{} Failed to fetch account profile: {}",
-            "Error:".red().bold(),
-            resp.status()
+            "{} Legacy account authenticated. Its X25519 id cannot receive new recipient pastes. Enter its seed phrase to create the X-Wing account with a new X-Wing id; leave it blank to keep using the legacy account.",
+            "Migration required:".yellow().bold()
         );
+        if let Some(phrase) = prompt_mnemonic()? {
+            let (_, _, recovered_pubkey, _) = mnemonic_to_scalar(&phrase)?;
+            if recovered_pubkey != pubkey {
+                eyre::bail!("That seed phrase does not belong to this legacy account.");
+            }
+            register_account(client, base_url, &profile.name, Some(phrase)).await?;
+        } else {
+            eprintln!(
+                "Create a separate X-Wing account with `mitsuzo account register --name <name>`, or recover this account later with `mitsuzo account import --name {}`.",
+                profile.name
+            );
+        }
     }
+    Ok(())
+}
+
+async fn prove_account_login(
+    client: &Client,
+    base_url: &str,
+    scalar: &[u8; 32],
+    kid: &[u8; 32],
+) -> eyre::Result<()> {
+    let challenge: ChallengeResponse = bitcode::decode(
+        &client
+            .get(format!("{}/api/account/{}/challenge", base_url, hex(kid)))
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?,
+    )?;
+    let response = open_challenge(
+        scalar,
+        &challenge.ephemeral_pub,
+        &challenge.nonce,
+        &challenge.sealed,
+    )
+    .map_err(|e| eyre::eyre!("Failed to solve account challenge: {e}"))?;
+    let proof = format!(
+        "{}:{}",
+        hex(kid),
+        base64::engine::general_purpose::STANDARD.encode(response)
+    );
+    client
+        .get(format!("{}/api/account/{}/inbox", base_url, hex(kid)))
+        .header("X-Account-Proof", proof)
+        .send()
+        .await?
+        .error_for_status()?;
     Ok(())
 }
 
@@ -473,17 +555,19 @@ async fn account_paste_get(
     output: &Option<String>,
     recipient: Option<&PasteRecipientInfo>,
 ) -> eyre::Result<()> {
+    let recipient_kid = recipient.map(|info| info.kid);
     let password = Zeroizing::new(rpassword::prompt_password(format!(
         "{} ",
         "Account password:".cyan().bold()
     ))?);
-    let (scalar, _pubkey, kid) = unlock_account(&password)?;
+    let (scalar, _pubkey, legacy_kid, xwing_kid) = unlock_account(&password)?;
 
     // The salt probe already told us who this paste belongs to — check it
     // before issuing any challenge, so a wrong account produces a clear
     // message instead of an opaque AEAD failure.
     if let Some(info) = recipient
-        && info.kid != kid
+        && info.kid != legacy_kid
+        && info.kid != xwing_kid
     {
         let name = info.name.as_deref().unwrap_or("an unknown account");
         eprintln!(
@@ -491,7 +575,7 @@ async fn account_paste_get(
             "Error:".red().bold(),
             name,
             hex(&info.kid_prefix),
-            hex(&kid[..20]),
+            hex(&xwing_kid[..20]),
         );
         return Ok(());
     }
@@ -537,9 +621,10 @@ async fn account_paste_get(
             return Ok(());
         }
     };
+    let proof_kid = recipient_kid.unwrap_or(xwing_kid);
     let proof = format!(
         "{}:{}",
-        hex(&kid[..20]),
+        hex(&proof_kid[..20]),
         base64::engine::general_purpose::STANDARD.encode(response_nonce)
     );
 
@@ -560,23 +645,32 @@ async fn account_paste_get(
     let body = data_resp.bytes().await?;
     let (frame_header, xnonce, xwing_ciphertext, ciphertext) = split_paste_frame_with_nonce(&body)
         .map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
-    let Some(recipient) = frame_header.recipient.clone() else {
+    let Some(envelope) = frame_header.recipient.clone() else {
         eprintln!("{} Missing recipient envelope.", "Error:".red().bold());
         return Ok(());
     };
     let ek_result = if let Some(kem_ciphertext) = xwing_ciphertext {
-        open_content_key_for_xwing(
-            &scalar,
-            &kem_ciphertext,
-            &recipient.nonce,
-            &recipient.sealed_cek,
-        )
+        if recipient_kid == Some(xwing_kid) {
+            open_content_key_for_xwing_account(
+                &scalar,
+                &kem_ciphertext,
+                &envelope.nonce,
+                &envelope.sealed_cek,
+            )
+        } else {
+            open_content_key_for_legacy_xwing(
+                &scalar,
+                &kem_ciphertext,
+                &envelope.nonce,
+                &envelope.sealed_cek,
+            )
+        }
     } else {
         open_content_key_for_recipient(
             &scalar,
-            &recipient.ephemeral_pub,
-            &recipient.nonce,
-            &recipient.sealed_cek,
+            &envelope.ephemeral_pub,
+            &envelope.nonce,
+            &envelope.sealed_cek,
         )
     };
     let ek = match ek_result {

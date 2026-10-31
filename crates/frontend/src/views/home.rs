@@ -30,6 +30,8 @@ use std::sync::{
 use wasm_bindgen::JsCast;
 use web_sys;
 
+const PROGRESS_DEBOUNCE_MS: f64 = 100.0;
+
 /// Sender-held recipient key material kept for the session so the creator can
 /// reopen their own recipient-mode paste.
 struct SenderEphemeralKey {
@@ -557,6 +559,7 @@ pub fn home_view() -> Element {
                 let mut enc_body = Vec::new();
                 let js_file = file_data.read().as_ref().cloned();
                 let encryption_started_ms = now_ms();
+                let mut last_encryption_progress_ms = encryption_started_ms;
 
                 match (text_fallback, js_file) {
                     (Some(text_bytes), _) => {
@@ -595,7 +598,11 @@ pub fn home_view() -> Element {
                                 progress.set(None);
                                 return;
                             }
-                            if (i + 1) % 8 == 0 || i + 1 == total_chunks {
+                            let current_ms = now_ms();
+                            if current_ms - last_encryption_progress_ms >= PROGRESS_DEBOUNCE_MS
+                                || i + 1 == total_chunks
+                            {
+                                last_encryption_progress_ms = current_ms;
                                 let percent = ((i + 1) as f32 / total_chunks as f32) * 100.0;
                                 let processed = end as u64;
                                 let elapsed_seconds =
@@ -603,10 +610,8 @@ pub fn home_view() -> Element {
                                 let speed_mbps = processed as f64 / 1_000_000.0 / elapsed_seconds;
                                 progress.set(Some(ProgressState {
                                     status: format!(
-                                        "{} · chunk {}/{} · {} / {} · {speed_mbps:.1} MB/s",
+                                        "{} · {} / {} · {speed_mbps:.1} MB/s",
                                         t!("progress-encrypting-percent", percent: format!("{percent:.0}")),
-                                        i + 1,
-                                        total_chunks,
                                         format_size(processed),
                                         format_size(text_bytes.len() as u64)
                                     ),
@@ -665,7 +670,11 @@ pub fn home_view() -> Element {
                                 progress.set(None);
                                 return;
                             }
-                            if (i + 1) % 8 == 0 || i + 1 == total_chunks {
+                            let current_ms = now_ms();
+                            if current_ms - last_encryption_progress_ms >= PROGRESS_DEBOUNCE_MS
+                                || i + 1 == total_chunks
+                            {
+                                last_encryption_progress_ms = current_ms;
                                 let pct = ((i + 1) as f32 / total_chunks as f32) * 100.0;
                                 let processed = end;
                                 let elapsed_seconds =
@@ -673,10 +682,8 @@ pub fn home_view() -> Element {
                                 let speed_mbps = processed as f64 / 1_000_000.0 / elapsed_seconds;
                                 progress.set(Some(ProgressState {
                                     status: format!(
-                                        "{} · chunk {}/{} · {} / {} · {speed_mbps:.1} MB/s",
+                                        "{} · {} / {} · {speed_mbps:.1} MB/s",
                                         t!("progress-encrypting-percent", percent: format!("{pct:.0}")),
-                                        i + 1,
-                                        total_chunks,
                                         format_size(end),
                                         format_size(file_size_for_chunks)
                                     ),
@@ -791,9 +798,7 @@ pub fn home_view() -> Element {
                     completed_bytes as f32 / enc_body.len().max(1) as f32 * 100.0;
                 progress.set(Some(ProgressState {
                     status: format!(
-                        "Uploading · chunks {}/{} already present · {} / {} · 0.0 MB/s",
-                        start_chunk,
-                        total_upload_chunks,
+                        "Uploading · {} / {} · 0.0 MB/s",
                         format_size(completed_bytes as u64),
                         format_size(enc_body.len() as u64)
                     ),
@@ -801,6 +806,7 @@ pub fn home_view() -> Element {
                 }));
 
                 let upload_started_ms = now_ms();
+                let mut last_upload_progress_ms = upload_started_ms;
                 let mut uploaded_this_run = 0usize;
                 for i in start_chunk..total_upload_chunks as u32 {
                     let chunk_start = i as usize * UPLOAD_CHUNK_SIZE;
@@ -816,6 +822,13 @@ pub fn home_view() -> Element {
                             if cancel_flag.load(Ordering::Relaxed) {
                                 return;
                             }
+                            let current_ms = now_ms();
+                            if current_ms - last_upload_progress_ms < PROGRESS_DEBOUNCE_MS
+                                && loaded < total
+                            {
+                                return;
+                            }
+                            last_upload_progress_ms = current_ms;
                             let current_chunk_bytes = (loaded as usize).min(uploaded_chunk_len);
                             let bytes_transferred = completed_bytes + current_chunk_bytes;
                             let overall_pct =
@@ -827,10 +840,8 @@ pub fn home_view() -> Element {
                                     / elapsed_seconds;
                             progress.set(Some(ProgressState {
                                 status: format!(
-                                    "{} · chunk {}/{}: {} / {} · total {} / {} · {speed_mbps:.1} MB/s",
+                                    "{} · this upload {} / {} · total {} / {} · {speed_mbps:.1} MB/s",
                                     t!("progress-upload-percent", percent: format!("{overall_pct:.0}")),
-                                    i + 1,
-                                    total_upload_chunks,
                                     format_size(current_chunk_bytes as u64),
                                     format_size(total.max(uploaded_chunk_len as u64)),
                                     format_size(bytes_transferred as u64),
@@ -853,7 +864,6 @@ pub fn home_view() -> Element {
                         Ok(r) if r.status >= 200 && r.status < 300 => {
                             completed_bytes += uploaded_chunk_len;
                             uploaded_this_run += uploaded_chunk_len;
-                            let completed_chunks = i + 1;
                             let percent =
                                 completed_bytes as f32 / enc_body.len().max(1) as f32 * 100.0;
                             let elapsed_seconds =
@@ -862,7 +872,7 @@ pub fn home_view() -> Element {
                                 uploaded_this_run as f64 / 1_000_000.0 / elapsed_seconds;
                             progress.set(Some(ProgressState {
                                 status: format!(
-                                    "{} · chunks {completed_chunks}/{total_upload_chunks} complete · {} / {} · {speed_mbps:.1} MB/s",
+                                    "{} · {} / {} · {speed_mbps:.1} MB/s",
                                     t!("progress-upload-percent", percent: format!("{percent:.0}")),
                                     format_size(completed_bytes as u64),
                                     format_size(enc_body.len() as u64)

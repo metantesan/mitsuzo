@@ -56,6 +56,13 @@ pub fn kid_from_pubkey(pubkey: &[u8; 32]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// X-Wing account id: SHA-256 of the X-Wing public key.
+pub fn kid_from_xwing_pubkey(pubkey: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(pubkey);
+    hasher.finalize().into()
+}
+
 /// 20-byte display prefix used in profile URLs (`0x` + 40 hex chars).
 pub fn kid_prefix_from_pubkey(pubkey: &[u8; 32]) -> [u8; 20] {
     let full = kid_from_pubkey(pubkey);

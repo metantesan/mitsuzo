@@ -1,6 +1,6 @@
 use crate::{
-    KeyEncapsulation, XWingKeyEncapsulation, hkdf_expand_sha256, unwrap_content_key,
-    wrap_content_key,
+    KeyEncapsulation, XWingAccountKeyEncapsulation, XWingKeyEncapsulation, hkdf_expand_sha256,
+    unwrap_content_key, wrap_content_key,
 };
 
 const RECIPIENT_KEY_INFO: &[u8] = b"mitsuzo-xwing-recipient-key-v1";
@@ -19,14 +19,25 @@ pub fn seal_content_key_for_xwing(
     Ok((shared_secret, ciphertext, nonce, sealed))
 }
 
-/// Decapsulate an X-Wing envelope and unwrap its content key.
-pub fn open_content_key_for_xwing(
+/// Open a legacy X-Wing envelope to preserve access to existing pastes.
+pub fn open_content_key_for_legacy_xwing(
     seed: &[u8; 32],
     ciphertext: &[u8],
     nonce: &[u8; 12],
     sealed: &[u8; 48],
 ) -> Result<[u8; 32], String> {
     let shared_secret = XWingKeyEncapsulation::decapsulate(seed, ciphertext)?;
+    open_content_key_for_xwing_shared(&shared_secret, nonce, sealed)
+}
+
+/// Open an X-Wing account envelope using its account-identity key.
+pub fn open_content_key_for_xwing_account(
+    seed: &[u8; 32],
+    ciphertext: &[u8],
+    nonce: &[u8; 12],
+    sealed: &[u8; 48],
+) -> Result<[u8; 32], String> {
+    let shared_secret = XWingAccountKeyEncapsulation::decapsulate(seed, ciphertext)?;
     open_content_key_for_xwing_shared(&shared_secret, nonce, sealed)
 }
 

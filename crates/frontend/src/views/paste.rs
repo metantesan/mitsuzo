@@ -16,11 +16,21 @@ use mitsuzo_types::{
 };
 use mitsuzo_utils::{
     ContentCipherKind, compute_burn_receipt, compute_password_hash, derive_keys, encrypt_setup,
-    get_chunk_bounds, get_plaintext_size, open_content_key_for_recipient,
-    open_content_key_for_xwing, open_content_key_for_xwing_shared, unwrap_content_key,
+    get_chunk_bounds, get_plaintext_size, kid_from_pubkey, open_content_key_for_legacy_xwing,
+    open_content_key_for_recipient, open_content_key_for_xwing_account,
+    open_content_key_for_xwing_shared, unwrap_content_key,
 };
 use wasm_bindgen::JsCast;
 use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
+
+const PROGRESS_DEBOUNCE_MS: f64 = 100.0;
+
+fn now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map(|performance| performance.now())
+        .unwrap_or(0.0)
+}
 
 pub struct PasteContent {
     pub bytes: Vec<u8>,
@@ -41,11 +51,27 @@ pub struct ProgressState {
 #[derive(Clone, Copy)]
 struct RecipientKey {
     kid: [u8; 32],
+    legacy_kid: [u8; 32],
     scalar: [u8; 32],
+    uses_xwing_account_key: bool,
     /// Public key paired with a sender-held ephemeral scalar. Ignored for a
     /// recipient account scalar, which uses the envelope ephemeral public key.
     sender_recipient_pub: Option<[u8; 32]>,
     xwing_shared_secret: Option<[u8; 32]>,
+}
+
+impl RecipientKey {
+    fn for_paste(&self, paste_kid: [u8; 32]) -> Option<Self> {
+        if self.kid == paste_kid || self.legacy_kid == paste_kid {
+            Some(Self {
+                kid: paste_kid,
+                uses_xwing_account_key: paste_kid != self.legacy_kid,
+                ..*self
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[component]
@@ -218,7 +244,9 @@ pub fn paste_view(id: String) -> Element {
                 Ok(session) => {
                     recipient_session.set(Some(RecipientKey {
                         kid: session.kid,
+                        legacy_kid: kid_from_pubkey(&session.pubkey),
                         scalar: session.scalar,
+                        uses_xwing_account_key: session.kid != kid_from_pubkey(&session.pubkey),
                         sender_recipient_pub: None,
                         xwing_shared_secret: None,
                     }));
@@ -695,16 +723,27 @@ async fn do_decrypt(
     // pastes route through the account/challenge flow, `Password` pastes
     // continue below. Any other status (404 etc.) falls through to the
     // generic error handling.
-    let is_recipient_mode_salt = match &salt_result {
+    let salt_info = match &salt_result {
         Ok(response) if response.status >= 200 && response.status < 300 => response
             .body
             .as_ref()
-            .and_then(|b| bitcode::decode::<GetSaltResponse>(b).ok())
-            .is_some_and(|decoded| decoded.mode == PasteAuthMode::Recipient),
-        _ => false,
+            .and_then(|b| bitcode::decode::<GetSaltResponse>(b).ok()),
+        _ => None,
     };
+    let is_recipient_mode_salt = salt_info
+        .as_ref()
+        .is_some_and(|decoded| decoded.mode == PasteAuthMode::Recipient);
     if is_recipient_mode_salt {
         is_recipient_mode.set(true);
+        let Some(paste_kid) = salt_info
+            .as_ref()
+            .and_then(|decoded| decoded.recipient.as_ref())
+            .map(|recipient| recipient.kid)
+        else {
+            progress.set(None);
+            popup_ctx.write().show_error(t!("recipient-auth-failed"));
+            return;
+        };
         let recipient_key = {
             // 1. Sender reopening: ephemeral key held for this session.
             let from_ephemeral = ephemerals
@@ -713,22 +752,35 @@ async fn do_decrypt(
                 .find(|e| e.paste_id == current_id)
                 .map(|e| RecipientKey {
                     kid: e.recipient_kid,
+                    legacy_kid: e.recipient_kid,
                     scalar: e.ephemeral_priv,
+                    uses_xwing_account_key: false,
                     sender_recipient_pub: Some(e.recipient_pub),
                     xwing_shared_secret: e.xwing_shared_secret,
-                });
+                })
+                .and_then(|key| key.for_paste(paste_kid));
             from_ephemeral
                 // 2. Account already unlocked.
                 .or_else(|| {
-                    account.read().clone().map(|a| RecipientKey {
-                        kid: a.kid,
-                        scalar: a.scalar,
-                        sender_recipient_pub: None,
-                        xwing_shared_secret: None,
+                    account.read().clone().and_then(|a| {
+                        RecipientKey {
+                            kid: a.kid,
+                            legacy_kid: kid_from_pubkey(&a.pubkey),
+                            scalar: a.scalar,
+                            uses_xwing_account_key: a.kid != kid_from_pubkey(&a.pubkey),
+                            sender_recipient_pub: None,
+                            xwing_shared_secret: None,
+                        }
+                        .for_paste(paste_kid)
                     })
                 })
                 // 3. Unlocked explicitly for this paste view.
-                .or_else(|| *recipient_session.read())
+                .or_else(|| {
+                    recipient_session
+                        .read()
+                        .as_ref()
+                        .and_then(|key| key.for_paste(paste_kid))
+                })
         };
         let Some(key) = recipient_key else {
             needs_account_password.set(true);
@@ -933,25 +985,30 @@ async fn do_decrypt(
                     let mut plaintext = Vec::with_capacity(plaintext_size);
                     progress.set(Some(ProgressState {
                         status: format!(
-                            "{} · 0 / {paste_total_chunks} chunks",
-                            t!("progress-decrypting-percent", percent: "0")
+                            "{} · 0.0 / {:.1} MiB",
+                            t!("progress-decrypting-percent", percent: "0"),
+                            plaintext_size as f64 / 1_048_576.0
                         ),
                         progress: 0.0,
                     }));
                     TimeoutFuture::new(0).await;
+                    let mut last_progress_update_ms = now_ms();
                     let result: Result<(), String> = async {
                         for i in 0..paste_total_chunks {
                             let (start, end) = get_chunk_bounds(paste_total_chunks, i, content.len());
                             match xchacha_nonce { Some(nonce) => ContentCipherKind::XChaCha20Poly1305.decrypt_chunk(&encryption_key, &nonce, i, &content[start..end], &mut plaintext)?, None => ContentCipherKind::ChaCha20Poly1305.decrypt_chunk(&encryption_key, &header_nonce, i, &content[start..end], &mut plaintext)? };
-                            if (i + 1) % 8 == 0 || i + 1 == paste_total_chunks {
+                            let current_ms = now_ms();
+                            if current_ms - last_progress_update_ms >= PROGRESS_DEBOUNCE_MS
+                                || i + 1 == paste_total_chunks
+                            {
+                                last_progress_update_ms = current_ms;
                                 let percent = ((i + 1) as f32 / paste_total_chunks as f32) * 100.0;
                                 progress.set(Some(ProgressState {
                                     status: format!(
-                                        "{} · chunk {}/{} · {:.1} MiB",
+                                        "{} · {:.1} / {:.1} MiB",
                                         t!("progress-decrypting-percent", percent: format!("{percent:.0}")),
-                                        i + 1,
-                                        paste_total_chunks,
-                                        plaintext.len() as f32 / 1_048_576.0
+                                        plaintext.len() as f64 / 1_048_576.0,
+                                        plaintext_size as f64 / 1_048_576.0
                                     ),
                                     progress: percent,
                                 }));
@@ -1172,7 +1229,13 @@ async fn do_recipient_decrypt(
                         &envelope.nonce,
                         &envelope.sealed_cek,
                     ),
-                    None => open_content_key_for_xwing(
+                    None if key.uses_xwing_account_key => open_content_key_for_xwing_account(
+                        &key.scalar,
+                        &kem_ciphertext,
+                        &envelope.nonce,
+                        &envelope.sealed_cek,
+                    ),
+                    None => open_content_key_for_legacy_xwing(
                         &key.scalar,
                         &kem_ciphertext,
                         &envelope.nonce,
@@ -1221,12 +1284,14 @@ async fn do_recipient_decrypt(
             let mut plaintext = Vec::with_capacity(plaintext_size);
             progress.set(Some(ProgressState {
                 status: format!(
-                    "{} · 0 / {paste_total_chunks} chunks",
-                    t!("progress-decrypting-percent", percent: "0")
+                    "{} · 0.0 / {:.1} MiB",
+                    t!("progress-decrypting-percent", percent: "0"),
+                    plaintext_size as f64 / 1_048_576.0
                 ),
                 progress: 0.0,
             }));
             TimeoutFuture::new(0).await;
+            let mut last_progress_update_ms = now_ms();
             let result: Result<(), String> = async {
                 for i in 0..paste_total_chunks {
                     let (start, end) = get_chunk_bounds(paste_total_chunks, i, content.len());
@@ -1246,15 +1311,18 @@ async fn do_recipient_decrypt(
                             &mut plaintext,
                         )?,
                     };
-                    if (i + 1) % 8 == 0 || i + 1 == paste_total_chunks {
+                    let current_ms = now_ms();
+                    if current_ms - last_progress_update_ms >= PROGRESS_DEBOUNCE_MS
+                        || i + 1 == paste_total_chunks
+                    {
+                        last_progress_update_ms = current_ms;
                         let percent = ((i + 1) as f32 / paste_total_chunks as f32) * 100.0;
                         progress.set(Some(ProgressState {
                             status: format!(
-                                "{} · chunk {}/{} · {:.1} MiB",
+                                "{} · {:.1} / {:.1} MiB",
                                 t!("progress-decrypting-percent", percent: format!("{percent:.0}")),
-                                i + 1,
-                                paste_total_chunks,
-                                plaintext.len() as f32 / 1_048_576.0
+                                plaintext.len() as f64 / 1_048_576.0,
+                                plaintext_size as f64 / 1_048_576.0
                             ),
                             progress: percent,
                         }));

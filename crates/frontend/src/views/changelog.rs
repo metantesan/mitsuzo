@@ -14,6 +14,22 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.15.4",
+            date: "2026-11-01",
+            items_en: vec![
+                "New account IDs are derived from X-Wing public keys; legacy X25519 accounts can authenticate and migrate with their seed phrase to a new ID",
+                "Legacy account IDs cannot receive new recipient pastes; existing legacy pastes remain readable",
+                "Removed chunk counts from paste progress and debounced status updates while preserving byte progress and throughput",
+                "Updated ctutils, rustls-webpki, webpki-root-certs, and webpki-roots to resolve reported security advisories",
+            ],
+            items_fa: vec![
+                "شناسهٔ حساب‌های جدید از کلید عمومی X-Wing مشتق می‌شود؛ حساب‌های قدیمی X25519 می‌توانند احراز هویت کنند و با عبارت بازیابی به شناسهٔ جدید مهاجرت کنند",
+                "شناسه‌های قدیمی نمی‌توانند Paste گیرندهٔ جدید دریافت کنند؛ Pasteهای قدیمی همچنان قابل خواندن هستند",
+                "حذف شمارش chunk از پیشرفت Paste و کاهش دفعات به‌روزرسانی متن، با حفظ نمایش بایت و سرعت",
+                "به‌روزرسانی ctutils، rustls-webpki، webpki-root-certs و webpki-roots برای رفع هشدارهای امنیتی گزارش‌شده",
+            ],
+        },
+        Change {
             version: "v0.15.3",
             date: "2026-11-01",
             items_en: vec![

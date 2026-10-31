@@ -12,8 +12,8 @@ use mitsuzo_types::{
     RegisterAccountRequest,
 };
 use mitsuzo_utils::{
-    derive_account_scalar, derive_xwing_public_key, kid_from_pubkey, lock_account_key,
-    open_challenge, pubkey_from_scalar, unlock_account_key,
+    derive_account_scalar, derive_xwing_account_public_key, kid_from_pubkey, kid_from_xwing_pubkey,
+    lock_account_key, open_challenge, pubkey_from_scalar, unlock_account_key,
 };
 use serde::{Deserialize, Serialize};
 
@@ -134,7 +134,8 @@ pub fn new_account_key() -> Result<(String, AccountKeyMaterial), String> {
     let seed = mnemonic.to_seed("");
     let scalar = derive_account_scalar(&seed);
     let pubkey = pubkey_from_scalar(&scalar);
-    let kid = kid_from_pubkey(&pubkey);
+    let xwing_pubkey = derive_xwing_account_public_key(&scalar)?;
+    let kid = kid_from_xwing_pubkey(&xwing_pubkey);
     Ok((
         phrase,
         AccountKeyMaterial {
@@ -152,7 +153,8 @@ pub fn account_key_from_mnemonic(phrase: &str) -> Result<AccountKeyMaterial, Str
     let seed = mnemonic.to_seed("");
     let scalar = derive_account_scalar(&seed);
     let pubkey = pubkey_from_scalar(&scalar);
-    let kid = kid_from_pubkey(&pubkey);
+    let xwing_pubkey = derive_xwing_account_public_key(&scalar)?;
+    let kid = kid_from_xwing_pubkey(&xwing_pubkey);
     Ok(AccountKeyMaterial {
         scalar,
         pubkey,
@@ -168,7 +170,8 @@ fn persist_account(
     password: &str,
 ) -> Result<AccountKeyBlob, String> {
     let blob = lock_account_key(scalar, password)?;
-    let kid = kid_from_pubkey(pubkey);
+    let xwing_pubkey = derive_xwing_account_public_key(scalar)?;
+    let kid = kid_from_xwing_pubkey(&xwing_pubkey);
     save_persisted(&PersistedAccount {
         name: name.to_string(),
         kid: hex(&kid),
@@ -220,6 +223,7 @@ pub async fn register_on_server(
     let request = RegisterAccountRequest {
         kid: session.kid,
         pubkey: session.pubkey,
+        xwing_pubkey: derive_xwing_account_public_key(&session.scalar)?,
         name: session.name.clone(),
     };
     let response = do_xhr_post(
@@ -262,7 +266,7 @@ async fn register_xwing_key_on_server(session: &AccountSession) -> Result<(), St
             .and_then(|b| bitcode::decode(&b).ok())
             .ok_or_else(|| "Invalid account challenge response".to_string())?;
     let challenge_response = solve_account_challenge(&session.scalar, &challenge)?;
-    let public_key = derive_xwing_public_key(&session.scalar)?;
+    let public_key = derive_xwing_account_public_key(&session.scalar)?;
     let request = AccountXWingKeyRequest {
         public_key,
         challenge_response,
@@ -294,6 +298,9 @@ pub async fn fetch_xwing_public_key(kid: &[u8; 32]) -> Result<Vec<u8>, String> {
     )
     .await?;
     if !(200..300).contains(&response.status) {
+        if response.status == 404 {
+            return Err(t!("account-recipient-needs-upgrade").to_string());
+        }
         return Err("Recipient has not registered an X-Wing key".into());
     }
     let response: AccountXWingKeyResponse = response
@@ -438,6 +445,8 @@ pub fn account_view() -> Element {
     let inbox_loading = use_signal(|| false);
     let inbox: Signal<Option<Vec<PasteInboxListing>>> = use_signal(|| None);
     let inbox_loaded = use_signal(|| false);
+    let legacy_account_needs_migration = use_signal(|| false);
+    let mut migration_seed = use_signal(String::new);
     let recipient_target = use_recipient_target();
     let recipient_ephemerals = use_recipient_ephemerals();
 
@@ -627,6 +636,75 @@ pub fn account_view() -> Element {
         }
     };
 
+    let migrate_legacy_account_action = {
+        let mut busy = busy;
+        let mut account = account;
+        let mut legacy_account_needs_migration = legacy_account_needs_migration;
+        let mut migration_seed = migration_seed;
+        let mut inbox = inbox;
+        let mut inbox_loaded = inbox_loaded;
+        move |_| {
+            let Some(legacy_session) = account.read().clone() else {
+                return;
+            };
+            if *busy.read() {
+                return;
+            }
+            let phrase = migration_seed.read().clone();
+            busy.set(true);
+            let mut popup_ctx = popup_ctx;
+            spawn(async move {
+                let result: Result<AccountSession, String> = async {
+                    let material = account_key_from_mnemonic(&phrase)?;
+                    if kid_from_pubkey(&material.pubkey) != legacy_session.kid
+                        || material.pubkey != legacy_session.pubkey
+                    {
+                        return Err(t!("account-migration-seed-mismatch").to_string());
+                    }
+
+                    let mut prefix = [0u8; 20];
+                    prefix.copy_from_slice(&material.kid[..20]);
+                    let migrated = AccountSession {
+                        scalar: material.scalar,
+                        kid: material.kid,
+                        kid_prefix: prefix,
+                        pubkey: material.pubkey,
+                        name: legacy_session.name.clone(),
+                    };
+                    let profile = register_on_server(&migrated).await?;
+                    if let Some(persisted) = persisted_account() {
+                        save_persisted(&PersistedAccount {
+                            name: profile.name.clone(),
+                            kid: hex(&profile.kid),
+                            pubkey: general_purpose::STANDARD.encode(profile.pubkey),
+                            ..persisted
+                        });
+                    }
+                    Ok(AccountSession {
+                        name: profile.name,
+                        ..migrated
+                    })
+                }
+                .await;
+
+                match result {
+                    Ok(session) => {
+                        account.set(Some(session));
+                        inbox.set(None);
+                        inbox_loaded.set(false);
+                        migration_seed.set(String::new());
+                        legacy_account_needs_migration.set(false);
+                        popup_ctx
+                            .write()
+                            .show_success(t!("account-migration-success"));
+                    }
+                    Err(error) => popup_ctx.write().show_error(error),
+                }
+                busy.set(false);
+            });
+        }
+    };
+
     let unlock_action = {
         let mut unlock_password = unlock_password;
         let mut busy = busy;
@@ -641,13 +719,9 @@ pub fn account_view() -> Element {
             spawn(async move {
                 match unlock_local_account(&password) {
                     Ok(session) => {
-                        let session_for_key = session.clone();
                         account.set(Some(session));
                         unlock_password.set(String::new());
                         popup_ctx.write().show_success(t!("account-unlocked"));
-                        spawn(async move {
-                            let _ = register_xwing_key_on_server(&session_for_key).await;
-                        });
                     }
                     Err(e) => popup_ctx.write().show_error(e),
                 }
@@ -745,10 +819,17 @@ pub fn account_view() -> Element {
             inbox_loading.set(true);
             let mut inbox = inbox;
             let mut inbox_loading = inbox_loading;
+            let mut legacy_account_needs_migration = legacy_account_needs_migration;
             let mut popup_ctx = popup_ctx;
             spawn(async move {
                 match fetch_inbox(&session).await {
-                    Ok(pastes) => inbox.set(Some(pastes)),
+                    Ok(pastes) => {
+                        inbox.set(Some(pastes));
+                        let is_legacy = derive_xwing_account_public_key(&session.scalar)
+                            .map(|key| kid_from_xwing_pubkey(&key) != session.kid)
+                            .unwrap_or(false);
+                        legacy_account_needs_migration.set(is_legacy);
+                    }
                     Err(e) => popup_ctx.write().show_error(e),
                 }
                 inbox_loading.set(false);
@@ -772,10 +853,17 @@ pub fn account_view() -> Element {
             inbox_loading.set(true);
             let mut inbox = inbox;
             let mut inbox_loading = inbox_loading;
+            let mut legacy_account_needs_migration = legacy_account_needs_migration;
             let mut popup_ctx = popup_ctx;
             spawn(async move {
                 match fetch_inbox(&session).await {
-                    Ok(pastes) => inbox.set(Some(pastes)),
+                    Ok(pastes) => {
+                        inbox.set(Some(pastes));
+                        let is_legacy = derive_xwing_account_public_key(&session.scalar)
+                            .map(|key| kid_from_xwing_pubkey(&key) != session.kid)
+                            .unwrap_or(false);
+                        legacy_account_needs_migration.set(is_legacy);
+                    }
                     Err(e) => popup_ctx.write().show_error(e),
                 }
                 inbox_loading.set(false);
@@ -845,6 +933,32 @@ pub fn account_view() -> Element {
                             div {
                                 p { class: "text-sm text-muted", {t!("account-pubkey-label")} }
                                 p { class: "font-mono text-xs break-all text-text-secondary", "{hex(&session.pubkey)}" }
+                            }
+                        }
+                        if *legacy_account_needs_migration.read() {
+                            div {
+                                class: "mb-6 rounded-lg border border-accent p-4",
+                                h3 {
+                                    class: "text-lg font-semibold text-accent mb-2",
+                                    {t!("account-migration-title")}
+                                }
+                                p {
+                                    class: "text-sm text-text-secondary mb-3",
+                                    {t!("account-migration-desc")}
+                                }
+                                textarea {
+                                    class: "w-full p-3 bg-bg text-text rounded-lg border border-border focus:outline-none focus:ring-2 focus:ring-accent",
+                                    rows: "3",
+                                    placeholder: "{t!(\"account-migration-seed-placeholder\")}",
+                                    oninput: move |evt| migration_seed.set(evt.value()),
+                                    value: "{migration_seed}",
+                                }
+                                button {
+                                    class: "mt-3 px-5 py-2 bg-accent text-bg font-semibold rounded-lg hover:bg-accent-hover transition-all duration-200 disabled:opacity-50",
+                                    disabled: *busy.read(),
+                                    onclick: migrate_legacy_account_action,
+                                    {t!("account-migration-button")}
+                                }
                             }
                         }
                         div {

@@ -304,8 +304,8 @@ pub struct PasteRecipientInfo {
 pub enum PasteAuthMode {
     /// Sealed to a password; authenticated with `X-Password-Hash`.
     Password,
-    /// Sealed to a user account's X25519 key; authenticated with
-    /// `X-Account-Proof` after solving the server challenge.
+    /// Sealed to a user account; authenticated with `X-Account-Proof` after
+    /// solving the server challenge with the account's X25519 key.
     Recipient,
 }
 
@@ -382,9 +382,13 @@ pub struct AccountKeyBlob {
 
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
 pub struct RegisterAccountRequest {
-    /// Full 32-byte SHA-256 of `pubkey`. The server recomputes and rejects on mismatch.
+    /// Full 32-byte SHA-256 of `xwing_pubkey`. The server recomputes and checks it.
     pub kid: [u8; 32],
+    /// X25519 key used to authenticate account access.
     pub pubkey: [u8; 32],
+    /// Required X-Wing public key. New accounts must be ready for hybrid
+    /// post-quantum recipient pastes at creation time.
+    pub xwing_pubkey: Vec<u8>,
     pub name: String,
 }
 
@@ -400,10 +404,11 @@ pub struct AccountRecord {
 
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
 pub struct AccountProfileResponse {
-    /// Full 32-byte SHA-256 of the public key.
+    /// Full 32-byte SHA-256 of the account identity public key.
     pub kid: [u8; 32],
     /// 20-byte display prefix (`0x` + 40 hex chars in URLs).
     pub kid_prefix: [u8; 20],
+    /// X25519 public key still used for account challenge authentication.
     pub pubkey: [u8; 32],
     pub name: String,
 }
@@ -414,7 +419,8 @@ pub struct AccountXWingKeyResponse {
     pub public_key: Vec<u8>,
 }
 
-/// Authenticated registration or rotation of an account's X-Wing key.
+/// Authenticated publication of an account's X-Wing key. Changing the key
+/// changes the account id, so key rotation creates a separate account.
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
 pub struct AccountXWingKeyRequest {
     pub public_key: Vec<u8>,

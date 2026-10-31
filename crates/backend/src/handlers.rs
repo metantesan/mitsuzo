@@ -18,7 +18,7 @@ use mitsuzo_types::{
 };
 use mitsuzo_utils::{
     KeyEncapsulation, XWING_PUBLIC_KEY_SIZE, XWingKeyEncapsulation, generate_x25519_keypair,
-    get_ciphertext_size, get_plaintext_size, kid_from_pubkey, seal_challenge,
+    get_ciphertext_size, get_plaintext_size, kid_from_xwing_pubkey, seal_challenge,
 };
 use rand::RngExt;
 use sha2::{Digest, Sha256};
@@ -394,12 +394,17 @@ pub async fn init_paste(
                 .get_account_by_kid(&recipient.recipient_kid)
                 .await
                 .ok_or(StatusCode::BAD_REQUEST)?;
-            if account.pubkey != recipient_pub || account.xwing_pubkey.is_none() {
+            if account.pubkey != recipient_pub
+                || account
+                    .xwing_pubkey
+                    .as_deref()
+                    .is_none_or(|key| kid_from_xwing_pubkey(key) != account.kid)
+            {
                 return Err(StatusCode::BAD_REQUEST);
             }
-        } else if let Some(account) = state.db.get_account_by_kid(&recipient.recipient_kid).await
-            && account.pubkey != recipient_pub
-        {
+        } else {
+            // Accept only X-Wing-marked recipient envelopes for new pastes.
+            // Legacy X25519 envelopes remain readable, but cannot be created.
             return Err(StatusCode::BAD_REQUEST);
         }
     } else if xwing_ciphertext.is_some() {
@@ -1149,9 +1154,8 @@ pub async fn get_stats(State(state): State<AppState>) -> Result<Vec<u8>, StatusC
     }))
 }
 
-/// Register a new account. The server recomputes `kid = SHA-256(pubkey)` and
-/// rejects it if it does not match the submitted value (prevents squatting a
-/// different account's namespace); 409 if the kid is already registered.
+/// Register an X-Wing account. Its id is SHA-256 of its X-Wing public key; the
+/// X25519 key remains the account-authentication key during this transition.
 pub async fn register_account(
     State(state): State<AppState>,
     client_ip: ClientIp,
@@ -1170,7 +1174,12 @@ pub async fn register_account(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let computed_kid = kid_from_pubkey(&request.pubkey);
+    if request.xwing_pubkey.len() != XWING_PUBLIC_KEY_SIZE
+        || XWingKeyEncapsulation::validate_public_key(&request.xwing_pubkey).is_err()
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let computed_kid = kid_from_xwing_pubkey(&request.xwing_pubkey);
     if !constant_time_eq(&computed_kid, &request.kid) {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -1193,7 +1202,7 @@ pub async fn register_account(
         pubkey: request.pubkey,
         name: request.name,
         created_at,
-        xwing_pubkey: None,
+        xwing_pubkey: Some(request.xwing_pubkey),
     };
     state.db.put_account(&record).await;
     info!(kid = %to_hex(&record.kid), "account registered");
@@ -1220,10 +1229,14 @@ pub async fn get_account_xwing_key(
         return Err(StatusCode::NOT_FOUND);
     };
     let public_key = record.xwing_pubkey.ok_or(StatusCode::NOT_FOUND)?;
+    if kid_from_xwing_pubkey(&public_key) != record.kid {
+        return Err(StatusCode::NOT_FOUND);
+    }
     Ok(encode(&AccountXWingKeyResponse { public_key }))
 }
 
-/// Bind or rotate the X-Wing public key after proving control of the account's X25519 key.
+/// Confirm the registered X-Wing key after proving control of the account's X25519 key.
+/// The key cannot be rotated in place because it defines the account id.
 pub async fn set_account_xwing_key(
     State(state): State<AppState>,
     client_ip: ClientIp,
@@ -1234,7 +1247,7 @@ pub async fn set_account_xwing_key(
     if !state.limiter.check(&format!("xwing:{}", ip), 20, 60).await {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
-    let Some(mut record) = resolve_account(&state.db, &kid_str).await? else {
+    let Some(record) = resolve_account(&state.db, &kid_str).await? else {
         return Err(StatusCode::NOT_FOUND);
     };
     let request: AccountXWingKeyRequest = decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -1251,8 +1264,12 @@ pub async fn set_account_xwing_key(
     }
     XWingKeyEncapsulation::validate_public_key(&request.public_key)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    record.xwing_pubkey = Some(request.public_key);
-    state.db.put_account(&record).await;
+    if kid_from_xwing_pubkey(&request.public_key) != record.kid {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if record.xwing_pubkey.as_deref() != Some(request.public_key.as_slice()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     Ok(encode(&AccountXWingKeyResponse {
         public_key: record.xwing_pubkey.unwrap_or_default(),
     }))

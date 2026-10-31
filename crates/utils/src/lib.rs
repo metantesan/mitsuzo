@@ -22,12 +22,12 @@ pub use xchacha::{
     decrypt_xchacha_chunk_into, derive_xchacha_chunk_nonce, encrypt_xchacha_chunk_into,
 };
 pub use xwing::{
-    KeyEncapsulation, XWING_CIPHERTEXT_SIZE, XWING_PUBLIC_KEY_SIZE, XWingKeyEncapsulation,
-    derive_xwing_public_key,
+    KeyEncapsulation, XWING_CIPHERTEXT_SIZE, XWING_PUBLIC_KEY_SIZE, XWingAccountKeyEncapsulation,
+    XWingKeyEncapsulation, derive_legacy_xwing_public_key, derive_xwing_account_public_key,
 };
 pub use xwing_recipient::{
-    XWingContentKeyEnvelope, open_content_key_for_xwing, open_content_key_for_xwing_shared,
-    seal_content_key_for_xwing,
+    XWingContentKeyEnvelope, open_content_key_for_legacy_xwing, open_content_key_for_xwing_account,
+    open_content_key_for_xwing_shared, seal_content_key_for_xwing,
 };
 
 const CHUNK_SIZE: usize = 65536;
