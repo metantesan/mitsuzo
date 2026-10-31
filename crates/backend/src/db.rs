@@ -214,6 +214,11 @@ impl DataStore {
             .wrap_err("Failed to begin transaction")?;
 
         paste::ActiveModel {
+            version: Set(if header.recipient.is_some() {
+                paste::PasteVersion::X25519HkdfSha256ChaCha20Poly1305
+            } else {
+                paste::PasteVersion::Argon2idHkdfSha256ChaCha20Poly1305
+            }),
             id: Set(id.to_owned()),
             try_count: Set(header.try_count.unwrap_or(0) as i32),
             expiration_timestamp: Set(expiration_timestamp),

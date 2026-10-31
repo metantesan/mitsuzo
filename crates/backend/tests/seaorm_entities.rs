@@ -39,6 +39,7 @@ async fn normalized_entities_round_trip() {
     .unwrap();
 
     paste::ActiveModel {
+        version: Set(paste::PasteVersion::Argon2idHkdfSha256ChaCha20Poly1305),
         id: Set("paste-1".to_owned()),
         try_count: Set(3),
         expiration_timestamp: Set(0),
@@ -141,6 +142,7 @@ async fn cloned_connections_can_write_concurrently() {
 async fn recipient_entities_store_normalized_inbox_data() {
     let db = test_database().await;
     paste::ActiveModel {
+        version: Set(paste::PasteVersion::X25519HkdfSha256ChaCha20Poly1305),
         id: Set("recipient-paste".to_owned()),
         try_count: Set(0),
         expiration_timestamp: Set(0),

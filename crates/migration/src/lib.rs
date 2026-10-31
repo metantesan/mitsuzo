@@ -8,7 +8,51 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20260927_000001_initial::Migration),
             Box::new(m20261013_000002_upload_token::Migration),
+            Box::new(m20261031_000003_paste_version::Migration),
         ]
+    }
+}
+
+mod m20261031_000003_paste_version {
+    use super::Pastes;
+    use sea_orm::ConnectionTrait;
+    use sea_orm_migration::prelude::*;
+
+    #[derive(DeriveMigrationName)]
+    pub struct Migration;
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Pastes::Table)
+                        .add_column(
+                            ColumnDef::new(Pastes::Version)
+                                .string()
+                                .not_null()
+                                .default("argon2id-hkdf-sha256-chacha20poly1305"),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+            manager.get_connection().execute_unprepared(
+                "UPDATE pastes SET version = 'x25519-hkdf-sha256-chacha20poly1305' WHERE recipient_kid IS NOT NULL",
+            ).await?;
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Pastes::Table)
+                        .drop_column(Pastes::Version)
+                        .to_owned(),
+                )
+                .await
+        }
     }
 }
 
@@ -261,6 +305,7 @@ mod m20261013_000002_upload_token {
 enum Pastes {
     Table,
     Id,
+    Version,
     TryCount,
     ExpirationTimestamp,
     DataType,

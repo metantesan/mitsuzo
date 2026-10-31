@@ -1,10 +1,20 @@
 use sea_orm::entity::prelude::*;
 
+#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "String(StringLen::None)")]
+pub enum PasteVersion {
+    #[sea_orm(string_value = "argon2id-hkdf-sha256-chacha20poly1305")]
+    Argon2idHkdfSha256ChaCha20Poly1305,
+    #[sea_orm(string_value = "x25519-hkdf-sha256-chacha20poly1305")]
+    X25519HkdfSha256ChaCha20Poly1305,
+}
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "pastes")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: String,
+    pub version: PasteVersion,
     pub try_count: i32,
     pub expiration_timestamp: i64,
     pub data_type: Vec<u8>,
