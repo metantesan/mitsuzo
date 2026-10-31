@@ -53,7 +53,7 @@ gloo-file = { version = "0.4.0", features = ["futures"] }
 gloo-timers = { version = "0.4.0", features = ["futures"] }
 futures = "0.3"
 wasm-bindgen-futures = "0.4"
-dioxus-i18n = "0.5"
+dioxus-i18n = "0.6"
 unic-langid = { version = "0.9", features = ["macros"] }
 
 clap = { version = "4", features = ["derive"] }
