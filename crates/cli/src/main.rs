@@ -18,7 +18,8 @@ use mitsuzo_utils::{
     seal_content_key_for_xwing, unlock_account_key, unwrap_content_key,
 };
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,9 +28,13 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use zeroize::{Zeroize, Zeroizing};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Default)]
+#[serde(default)]
 struct Config {
+    #[serde(skip_serializing_if = "Option::is_none")]
     base_url: Option<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_yaml::Value>,
 }
 
 const DEFAULT_BASE_URL: &str = "http://localhost:3030";
@@ -81,6 +86,28 @@ enum Commands {
         #[command(subcommand)]
         action: AccountCommand,
     },
+    /// View and edit the CLI configuration file.
+    Config {
+        #[command(subcommand)]
+        action: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Show the config file currently being used.
+    Show,
+    /// Print the path used by `config set`.
+    Path,
+    /// Set a config value, for example `config set base-url https://your-server.example`.
+    Set { key: ConfigKey, value: String },
+    /// Remove a value from the user config file.
+    Unset { key: ConfigKey },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ConfigKey {
+    BaseUrl,
 }
 
 #[derive(Subcommand)]
@@ -104,25 +131,100 @@ enum AccountCommand {
 
 fn get_config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(runtime_dir) = dirs::runtime_dir() {
-        paths.push(runtime_dir.join("mitsuzo/config.yml"));
-    }
     if let Some(config_dir) = dirs::config_dir() {
         paths.push(config_dir.join("mitsuzo/config.yml"));
+    }
+    if let Some(runtime_dir) = dirs::runtime_dir() {
+        paths.push(runtime_dir.join("mitsuzo/config.yml"));
     }
     paths.push(PathBuf::from("/etc/mitsuzo/config.yml"));
     paths
 }
 
-fn load_config() -> Option<Config> {
+fn user_config_path() -> eyre::Result<PathBuf> {
+    if let Some(config_dir) = dirs::config_dir() {
+        return Ok(config_dir.join("mitsuzo/config.yml"));
+    }
+    if let Some(runtime_dir) = dirs::runtime_dir() {
+        return Ok(runtime_dir.join("mitsuzo/config.yml"));
+    }
+    eyre::bail!("Could not determine a writable config directory")
+}
+
+fn load_config() -> eyre::Result<Option<(PathBuf, Config)>> {
     for path in get_config_paths() {
-        if let Ok(file) = std::fs::File::open(path)
-            && let Ok(config) = serde_yaml::from_reader(file)
-        {
-            return Some(config);
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let config = serde_yaml::from_reader(file)
+            .map_err(|error| eyre::eyre!("Invalid config file {}: {error}", path.display()))?;
+        return Ok(Some((path, config)));
+    }
+    Ok(None)
+}
+
+fn write_config(config: &Config) -> eyre::Result<PathBuf> {
+    let path = user_config_path()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| eyre::eyre!("Invalid config path: {}", path.display()))?;
+    std::fs::create_dir_all(parent)?;
+    let yaml = serde_yaml::to_string(config)?;
+    std::fs::write(&path, yaml)?;
+    Ok(path)
+}
+
+fn validate_base_url(value: &str) -> eyre::Result<String> {
+    let value = value.trim();
+    let url =
+        reqwest::Url::parse(value).map_err(|error| eyre::eyre!("Invalid base URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        eyre::bail!("Base URL must be an absolute http:// or https:// URL")
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        eyre::bail!("Base URL must not contain a username or password")
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        eyre::bail!("Base URL must not contain a query or fragment")
+    }
+    Ok(value.trim_end_matches('/').to_string())
+}
+
+fn handle_config_command(action: &ConfigCommand) -> eyre::Result<()> {
+    match action {
+        ConfigCommand::Show => {
+            if let Some((path, config)) = load_config()? {
+                println!("Config file: {}", path.display());
+                print!("{}", serde_yaml::to_string(&config)?);
+                if config.base_url.is_none() {
+                    println!("base_url is not set in this file.");
+                }
+            } else {
+                println!("No config file found.");
+                println!("Set the server with `mitsuzo config set base-url <URL>`.");
+            }
+        }
+        ConfigCommand::Path => println!("{}", user_config_path()?.display()),
+        ConfigCommand::Set { key, value } => {
+            let mut config = load_config()?.map(|(_, config)| config).unwrap_or_default();
+            match key {
+                ConfigKey::BaseUrl => config.base_url = Some(validate_base_url(value)?),
+            }
+            let path = write_config(&config)?;
+            println!("Saved config to {}", path.display());
+        }
+        ConfigCommand::Unset { key } => {
+            let mut config = load_config()?.map(|(_, config)| config).unwrap_or_default();
+            match key {
+                ConfigKey::BaseUrl => config.base_url = None,
+            }
+            let path = write_config(&config)?;
+            println!("Updated config at {}", path.display());
         }
     }
-    None
+    Ok(())
 }
 
 fn account_path() -> PathBuf {
@@ -662,6 +764,10 @@ async fn finish_decrypt(
 async fn main() -> eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
+    if let Commands::Config { action } = &cli.command {
+        return handle_config_command(action);
+    }
+    let config = load_config()?;
     let client = Client::builder()
         .timeout(Duration::from_secs(300))
         .build()?;
@@ -669,7 +775,7 @@ async fn main() -> eyre::Result<()> {
     let base_url = cli
         .base_url
         .or_else(|| std::env::var("MITSUZO_BASE_URL").ok())
-        .or_else(|| load_config().and_then(|c| c.base_url))
+        .or_else(|| config.and_then(|(_, config)| config.base_url))
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
     match &cli.command {
@@ -1401,6 +1507,7 @@ async fn main() -> eyre::Result<()> {
                 );
             }
         }
+        Commands::Config { .. } => unreachable!("config commands are handled before client setup"),
     }
 
     Ok(())

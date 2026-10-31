@@ -20,6 +20,7 @@ pub fn cli_section() -> Element {
                 p { {t!("cli-get")} }
                 p { {t!("cli-passwd")} }
                 p { {t!("cli-account")} }
+                p { {t!("cli-config")} }
             }
             p {
                 class: "text-muted text-sm mt-2",

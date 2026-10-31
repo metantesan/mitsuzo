@@ -14,6 +14,18 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.15.2",
+            date: "2026-11-01",
+            items_en: vec![
+                "Added CLI commands to show, locate, set, and unset the server URL in the user config file",
+                "Documented CLI config commands and the precedence of --base-url, MITSUZO_BASE_URL, and config files",
+            ],
+            items_fa: vec![
+                "افزودن فرمان‌های CLI برای نمایش، یافتن مسیر، تنظیم و حذف نشانی سرور در فایل پیکربندی کاربر",
+                "مستندسازی فرمان‌های پیکربندی CLI و اولویت گزینهٔ --base-url، متغیر MITSUZO_BASE_URL و فایل‌های پیکربندی",
+            ],
+        },
+        Change {
             version: "v0.15.1",
             date: "2026-10-31",
             items_en: vec![
