@@ -14,3 +14,7 @@ getrandom.workspace = true
 zeroize.workspace = true
 x25519-dalek.workspace = true
 mitsuzo-types = { workspace = true }
+
+[[bench]]
+name = "encryption"
+harness = false
