@@ -818,6 +818,7 @@ pub fn home_view() -> Element {
                         &format!("{}/api/paste/{}/chunk/{}", BASE_URL, paste_id, i),
                         chunk_data,
                         vec![("X-Upload-Token".to_string(), upload_token.clone())],
+                        cancel_flag.clone(),
                         |loaded, total| {
                             if cancel_flag.load(Ordering::Relaxed) {
                                 return;

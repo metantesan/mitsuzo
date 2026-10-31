@@ -1,8 +1,12 @@
-use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
+use futures::{FutureExt, StreamExt};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use web_sys::{ProgressEvent, XmlHttpRequest};
@@ -49,6 +53,7 @@ pub struct XhrProgress {
 pub struct XhrRequest {
     pub response: oneshot::Receiver<XhrResponse>,
     pub progress: mpsc::Receiver<XhrProgress>,
+    pub xhr: XmlHttpRequest,
 }
 
 fn setup_xhr_response(xhr: &XmlHttpRequest) -> Result<oneshot::Receiver<XhrResponse>, String> {
@@ -159,7 +164,11 @@ pub fn xhr_put_headers(
     xhr.send_with_opt_u8_array(Some(&body))
         .map_err(|e| format!("Failed to send XHR: {:?}", e))?;
 
-    Ok(XhrRequest { response, progress })
+    Ok(XhrRequest {
+        response,
+        progress,
+        xhr: xhr.clone(),
+    })
 }
 
 pub fn xhr_post_headers(
@@ -185,7 +194,11 @@ pub fn xhr_post_headers(
     xhr.send_with_opt_u8_array(Some(&body))
         .map_err(|e| format!("Failed to send XHR: {:?}", e))?;
 
-    Ok(XhrRequest { response, progress })
+    Ok(XhrRequest {
+        response,
+        progress,
+        xhr: xhr.clone(),
+    })
 }
 
 pub fn xhr_get(url: &str, headers: Vec<(String, String)>) -> Result<XhrRequest, String> {
@@ -207,7 +220,11 @@ pub fn xhr_get(url: &str, headers: Vec<(String, String)>) -> Result<XhrRequest, 
     xhr.send()
         .map_err(|e| format!("Failed to send XHR: {:?}", e))?;
 
-    Ok(XhrRequest { response, progress })
+    Ok(XhrRequest {
+        response,
+        progress,
+        xhr: xhr.clone(),
+    })
 }
 
 pub async fn do_xhr_get<F>(
@@ -221,6 +238,7 @@ where
     let XhrRequest {
         mut response,
         mut progress,
+        ..
     } = xhr_get(url, headers)?;
     loop {
         futures::select! {
@@ -240,6 +258,7 @@ pub async fn do_xhr_put_headers<F>(
     url: &str,
     body: Vec<u8>,
     headers: Vec<(String, String)>,
+    cancel_flag: Arc<AtomicBool>,
     mut on_progress: F,
 ) -> Result<XhrResponse, String>
 where
@@ -248,11 +267,26 @@ where
     let XhrRequest {
         mut response,
         mut progress,
+        xhr,
     } = xhr_put_headers(url, body, headers)?;
+    let cancel = async move {
+        loop {
+            gloo_timers::future::TimeoutFuture::new(50).await;
+            if cancel_flag.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+    }
+    .fuse();
+    futures::pin_mut!(cancel);
     loop {
         futures::select! {
             result = response => {
                 break result.map_err(|e| format!("XHR cancelled: {:?}", e));
+            }
+            _ = cancel => {
+                let _ = xhr.abort();
+                return Err("XHR aborted after cancellation was requested".to_string());
             }
             item = progress.next() => {
                 if let Some(p) = item {
@@ -282,6 +316,7 @@ where
     let XhrRequest {
         mut response,
         mut progress,
+        ..
     } = xhr_post_headers(url, body, headers)?;
     loop {
         futures::select! {
