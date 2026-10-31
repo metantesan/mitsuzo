@@ -1000,12 +1000,12 @@ pub fn home_view() -> Element {
                         if *use_xchacha.read() { "XChaCha20-Poly1305" } else { "ChaCha20-Poly1305" }
                     }
                     svg {
-                        class: if *cipher_menu_open.read() { "w-4 h-4 rotate-180 transition-transform" } else { "w-4 h-4 transition-transform" },
+                        class: if *cipher_menu_open.read() { "w-3 h-3 rotate-180 transition-transform" } else { "w-3 h-3 transition-transform" },
                         style: "margin-inline-start: 0.5rem",
                         view_box: "0 0 24 24",
                         fill: "none",
                         stroke: "currentColor",
-                        stroke_width: "2",
+                        stroke_width: "1.5",
                         stroke_linecap: "round",
                         stroke_linejoin: "round",
                         "aria-hidden": "true",

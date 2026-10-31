@@ -14,6 +14,7 @@ nav-home = Home
 nav-docs = Docs
 nav-download = Download
 nav-account = Account
+nav-benchmark = Benchmark
 
 changelog-title = Changelog
 changelog-current = current
@@ -200,7 +201,7 @@ docs-title = Documentation
 docs-intro = Everything about how Mitsuzo works: the cryptography, the API, and running your own server.
 docs-security-title = Security Model
 docs-security-desc = The complete key hierarchy behind envelope encryption — the short version of what the server actually sees.
-docs-security-item1 = Content key (CEK): random 32 bytes per paste, encrypts every data chunk
+docs-security-item1 = Content key (CEK): random 32 bytes per paste, encrypts every data chunk with XChaCha20-Poly1305 by default; ChaCha20-Poly1305 is also selectable
 docs-security-item2 = Key-encryption key: KEK = HKDF-SHA256(Argon2id(password, salt), "mitsuzo-encryption-key")
 docs-security-item3 = CEK is wrapped with ChaCha20-Poly1305(KEK, wrap_nonce) into a 48-byte wrapped key, stored server-side
 docs-security-item4 = Password change: unwrap CEK with the old KEK, re-wrap with the new KEK — the ciphertext is never touched
@@ -241,8 +242,8 @@ e2e-item1 = Argon2id(password, salt) → 32-byte master key (19456 KiB memory, 2
 e2e-item2 = HKDF-SHA256(master, "mitsuzo-encryption-key") → 32-byte key-encryption key (KEK)
 e2e-item3 = HKDF-SHA256(master, "mitsuzo-validation-key") → 32-byte validation key
 e2e-item4 = Random 32-byte content key (CEK) per paste, wrapped with ChaCha20-Poly1305(KEK)
-e2e-item5 = ChaCha20-Poly1305(CEK, derived_nonce, plaintext) → ciphertext; files >64KB split into 64KB chunks with unique derived nonces
-e2e-item6 = Unique 16-byte salt, 12-byte base nonce and 12-byte wrap nonce per paste
+e2e-item5 = Content chunks use XChaCha20-Poly1305 by default; ChaCha20-Poly1305 can also be selected. Files >64KB are split into 64KB chunks with a unique derived nonce per chunk
+e2e-item6 = Unique 16-byte salt and 12-byte wrap nonce per paste; content uses a 24-byte XChaCha nonce by default or a 12-byte ChaCha nonce
 e2e-item7 = Server never sees your password, plaintext, or unwrapped CEK
 e2e-item8 = Recipient pastes use X-Wing (ML-KEM-768 + X25519) to establish the CEK-wrapping key; the sender keeps the shared secret only in the current browser session
 zk-validation = Zero-Knowledge Password Validation

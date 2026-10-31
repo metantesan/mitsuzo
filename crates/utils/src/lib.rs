@@ -26,7 +26,8 @@ pub use xwing::{
     derive_xwing_public_key,
 };
 pub use xwing_recipient::{
-    open_content_key_for_xwing, open_content_key_for_xwing_shared, seal_content_key_for_xwing,
+    XWingContentKeyEnvelope, open_content_key_for_xwing, open_content_key_for_xwing_shared,
+    seal_content_key_for_xwing,
 };
 
 const CHUNK_SIZE: usize = 65536;

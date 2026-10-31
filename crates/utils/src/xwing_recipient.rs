@@ -5,12 +5,14 @@ use crate::{
 
 const RECIPIENT_KEY_INFO: &[u8] = b"mitsuzo-xwing-recipient-key-v1";
 
+pub type XWingContentKeyEnvelope = ([u8; 32], Vec<u8>, [u8; 12], [u8; 48]);
+
 /// Encapsulate to a recipient, then wrap the paste's content key. The returned
 /// shared secret is held by the sender only for reopening this paste in-session.
 pub fn seal_content_key_for_xwing(
     public_key: &[u8],
     content_key: &[u8; 32],
-) -> Result<([u8; 32], Vec<u8>, [u8; 12], [u8; 48]), String> {
+) -> Result<XWingContentKeyEnvelope, String> {
     let (shared_secret, ciphertext) = XWingKeyEncapsulation::encapsulate(public_key)?;
     let wrap_key = derive_wrap_key(&shared_secret);
     let (nonce, sealed) = wrap_content_key(content_key, &wrap_key)?;

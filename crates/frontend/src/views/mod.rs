@@ -7,6 +7,9 @@ pub use paste::paste_view;
 pub mod docs;
 pub use docs::docs_view;
 
+pub mod benchmark;
+pub use benchmark::benchmark_view;
+
 pub mod changelog;
 pub use changelog::changelog_section;
 

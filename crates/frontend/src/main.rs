@@ -8,7 +8,10 @@ use crate::account::{
 };
 use crate::utils::do_xhr_get;
 use crate::views::paste_view as P;
-use crate::views::{app_layout, docs_view as Docs, home_view as Home, paste_view as Paste};
+use crate::views::{
+    app_layout, benchmark_view as Benchmark, docs_view as Docs, home_view as Home,
+    paste_view as Paste,
+};
 use components::PopupContext;
 use dioxus::prelude::*;
 use dioxus_i18n::prelude::*;
@@ -28,6 +31,8 @@ enum Route {
     Home {},
     #[route("/docs")]
     Docs {},
+    #[route("/benchmark")]
+    Benchmark {},
     #[route("/paste/:id")]
     Paste { id: String },
    #[route("/p/:id")]

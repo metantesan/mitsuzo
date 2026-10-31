@@ -14,6 +14,7 @@ nav-home = خانه
 nav-docs = مستندات
 nav-download = دانلود
 nav-account = حساب کاربری
+nav-benchmark = سنجش کارایی
 
 changelog-title = تغییرات
 changelog-current = فعلی
@@ -200,7 +201,7 @@ docs-title = مستندات
 docs-intro = همه‌چیز درباره نحوه کارکرد Mitsuzo: رمزنگاری، API و اجرای سرور اختصاصی خودتان.
 docs-security-title = مدل امنیتی
 docs-security-desc = سلسله‌مراتب کامل کلیدها در رمزگذاری پاکتی — خلاصه‌ای از آنچه سرور واقعاً می‌بیند.
-docs-security-item1 = کلید محتوا (CEK): ۳۲ بایت تصادفی برای هر Paste، همه تکه‌های داده را رمزگذاری می‌کند
+docs-security-item1 = کلید محتوا (CEK): ۳۲ بایت تصادفی برای هر Paste؛ همه تکه‌های داده را به‌طور پیش‌فرض با XChaCha20-Poly1305 رمزگذاری می‌کند و ChaCha20-Poly1305 نیز قابل انتخاب است
 docs-security-item2 = کلید رمزگذاری کپسول: KEK = HKDF-SHA256(Argon2id(password, salt), "mitsuzo-encryption-key")
 docs-security-item3 = CEK با ChaCha20-Poly1305(KEK, wrap_nonce) در یک کلید کپسوله ۴۸ بایتی ذخیره می‌شود
 docs-security-item4 = تغییر رمز عبور: باز کردن CEK با KEK قدیمی و کپسوله مجدد با KEK جدید — ciphertext دست‌نخورده می‌ماند
@@ -241,8 +242,8 @@ e2e-item1 = Argon2id(password, salt) → کلید اصلی ۳۲ بایت (۱۹۴
 e2e-item2 = HKDF-SHA256(master, "mitsuzo-encryption-key") → کلید رمزگذاری کپسول (KEK) ۳۲ بایت
 e2e-item3 = HKDF-SHA256(master, "mitsuzo-validation-key") → کلید اعتبارسنجی ۳۲ بایت
 e2e-item4 = کلید محتوای تصادفی ۳۲ بایت (CEK) برای هر Paste، کپسوله‌شده با ChaCha20-Poly1305(KEK)
-e2e-item5 = ChaCha20-Poly1305(CEK, derived_nonce, plaintext) → متن رمزگذاری‌شده؛ فایل‌های >۶۴KB به تکه‌های ۶۴KB با nonce مشتق‌شده منحصربه‌فرد تقسیم می‌شوند
-e2e-item6 = نمک ۱۶ بایت، nonce پایه ۱۲ بایت و wrap nonce ۱۲ بایت منحصربه‌فرد برای هر Paste
+e2e-item5 = تکه‌های محتوا به‌طور پیش‌فرض با XChaCha20-Poly1305 رمزگذاری می‌شوند و ChaCha20-Poly1305 نیز قابل انتخاب است. فایل‌های بزرگ‌تر از ۶۴KB به تکه‌های ۶۴KB با nonce مشتق‌شده منحصربه‌فرد تقسیم می‌شوند
+e2e-item6 = نمک ۱۶ بایت و wrap nonce دوازده‌بایتی منحصربه‌فرد برای هر Paste؛ nonce محتوا به‌طور پیش‌فرض ۲۴ بایت برای XChaCha و برای ChaCha دوازده بایت است
 e2e-item7 = سرور هرگز رمز عبور، متن اصلی یا CEK بازشده شما را نمی‌بیند
 e2e-item8 = در Pasteهای گیرنده، X-Wing (‏ML-KEM-768 + X25519) کلید پوشاننده CEK را ایجاد می‌کند؛ فرستنده راز مشترک را فقط در نشست فعلی مرورگر نگه می‌دارد
 zk-validation = اعتبارسنجی رمز عبور Zero-Knowledge

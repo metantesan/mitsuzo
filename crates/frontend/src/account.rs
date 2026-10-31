@@ -1081,8 +1081,6 @@ pub fn user_view(id: String) -> Element {
     });
 
     let send_action = {
-        let recipient = recipient;
-        let popup_ctx = popup_ctx;
         move |_| {
             let Some(p) = profile.read().clone() else {
                 return;

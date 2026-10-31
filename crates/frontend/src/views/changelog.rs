@@ -14,6 +14,18 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.15.1",
+            date: "2026-10-31",
+            items_en: vec![
+                "Added a browser benchmark page to compare single-threaded ChaCha20-Poly1305 and XChaCha20-Poly1305 encryption and decryption throughput",
+                "Clarified in the security and end-to-end encryption docs that XChaCha20-Poly1305 is the default content cipher and ChaCha20-Poly1305 remains selectable",
+            ],
+            items_fa: vec![
+                "افزودن صفحهٔ سنجش کارایی مرورگر برای مقایسهٔ سرعت رمزگذاری و رمزگشایی تک‌ریسمانی ChaCha20-Poly1305 و XChaCha20-Poly1305",
+                "شفاف‌سازی در مستندات امنیت و رمزگذاری سرتاسری: XChaCha20-Poly1305 رمز محتوای پیش‌فرض است و ChaCha20-Poly1305 همچنان قابل انتخاب است",
+            ],
+        },
+        Change {
             version: "v0.15.0",
             date: "2026-10-31",
             items_en: vec![
