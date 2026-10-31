@@ -278,7 +278,7 @@ async fn xchacha_password_paste_round_trip() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_bytes(response).await;
-    let (meta, returned_nonce, encrypted) = split_paste_frame_with_nonce(&body).unwrap();
+    let (meta, returned_nonce, _, encrypted) = split_paste_frame_with_nonce(&body).unwrap();
     assert_eq!(returned_nonce, Some(nonce));
     assert_eq!(meta.key.unwrap().wrapped_key, setup.wrapped_key);
     let mut plaintext = Vec::new();
@@ -394,7 +394,7 @@ async fn xchacha_recipient_paste_round_trip() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_bytes(response).await;
-    let (meta, returned_nonce, encrypted) = split_paste_frame_with_nonce(&body).unwrap();
+    let (meta, returned_nonce, _, encrypted) = split_paste_frame_with_nonce(&body).unwrap();
     assert_eq!(returned_nonce, Some(nonce));
     let envelope = meta.recipient.unwrap();
     let unwrapped = open_content_key_for_recipient(
@@ -407,6 +407,268 @@ async fn xchacha_recipient_paste_round_trip() {
     let mut plaintext = Vec::new();
     decrypt_xchacha_chunk_into(encrypted, &unwrapped, &nonce, 0, &mut plaintext).unwrap();
     assert_eq!(plaintext, b"recipient secret");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn xwing_recipient_paste_end_to_end_for_both_content_ciphers() {
+    use mitsuzo_types::{
+        AccountProfileResponse, AccountXWingKeyRequest, AccountXWingKeyResponse, ChallengeResponse,
+        RecipientAuthChallenge, RecipientEnvelope, RegisterAccountRequest, XWingCreatePasteRequest,
+        encode_xwing_create, split_paste_frame_with_nonce,
+    };
+    use mitsuzo_utils::{
+        XWING_CIPHERTEXT_SIZE, decrypt_chunk_into, decrypt_xchacha_chunk_into,
+        derive_xwing_public_key, encrypt_chunk_into, encrypt_xchacha_chunk_into,
+        generate_x25519_keypair, kid_from_pubkey, open_challenge, open_content_key_for_xwing,
+        open_content_key_for_xwing_shared, seal_content_key_for_xwing,
+    };
+
+    let (state, dir) = test_state(false).await;
+    let router = api_router(state);
+    let peer = "203.0.113.44";
+    let (recipient_secret, recipient_pub) = generate_x25519_keypair().unwrap();
+    let kid = kid_from_pubkey(&recipient_pub);
+    let kid_hex: String = kid.iter().map(|b| format!("{b:02x}")).collect();
+
+    let registration = RegisterAccountRequest {
+        kid,
+        pubkey: recipient_pub,
+        name: "X-Wing recipient".to_string(),
+    };
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/account",
+            peer,
+            &[],
+            encode(&registration),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let _: AccountProfileResponse = bitcode::decode(&body_bytes(response).await).unwrap();
+
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/account/{kid_hex}/xwing"),
+            peer,
+            &[],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let unauthenticated_update = AccountXWingKeyRequest {
+        public_key: derive_xwing_public_key(&recipient_secret).unwrap(),
+        challenge_response: [0; 32],
+    };
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/account/{kid_hex}/xwing"),
+            peer,
+            &[],
+            encode(&unauthenticated_update),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/account/{kid_hex}/challenge"),
+            peer,
+            &[],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let challenge: ChallengeResponse = bitcode::decode(&body_bytes(response).await).unwrap();
+    let challenge_response = open_challenge(
+        &recipient_secret,
+        &challenge.ephemeral_pub,
+        &challenge.nonce,
+        &challenge.sealed,
+    )
+    .unwrap();
+    let xwing_public_key = derive_xwing_public_key(&recipient_secret).unwrap();
+    let set_key = AccountXWingKeyRequest {
+        public_key: xwing_public_key.clone(),
+        challenge_response,
+    };
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/account/{kid_hex}/xwing"),
+            peer,
+            &[],
+            encode(&set_key),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved: AccountXWingKeyResponse = bitcode::decode(&body_bytes(response).await).unwrap();
+    assert_eq!(saved.public_key, xwing_public_key);
+
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/account/{kid_hex}/xwing"),
+            peer,
+            &[],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let fetched: AccountXWingKeyResponse = bitcode::decode(&body_bytes(response).await).unwrap();
+    assert_eq!(fetched.public_key, xwing_public_key);
+
+    for xchacha in [false, true] {
+        let key = [if xchacha { 65 } else { 64 }; 32];
+        let text = if xchacha {
+            b"X-Wing XChaCha".as_slice()
+        } else {
+            b"X-Wing ChaCha".as_slice()
+        };
+        let mut base_nonce = [11u8; 12];
+        base_nonce[0] = if xchacha { 2 } else { 1 };
+        let xchacha_nonce = xchacha.then_some([21u8; 24]);
+        let (shared_secret, kem_ciphertext, wrap_nonce, sealed_cek) =
+            seal_content_key_for_xwing(&xwing_public_key, &key).unwrap();
+        assert_eq!(kem_ciphertext.len(), XWING_CIPHERTEXT_SIZE);
+        let mut header = password_header();
+        header.nonce = base_nonce;
+        header.salt = None;
+        header.password_hash = None;
+        header.key = None;
+        header.try_count = None;
+        header.recipient_pub = Some(recipient_pub);
+        header.recipient = Some(RecipientEnvelope {
+            recipient_kid: kid,
+            ephemeral_pub: [0; 32],
+            nonce: wrap_nonce,
+            sealed_cek,
+        });
+        let request_body = encode_xwing_create(&XWingCreatePasteRequest {
+            header,
+            xwing_ciphertext: kem_ciphertext.clone(),
+            xchacha_nonce,
+        });
+        let response = router
+            .clone()
+            .oneshot(request(Method::POST, "/paste", peer, &[], request_body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let init: InitPasteResponse = bitcode::decode(&body_bytes(response).await).unwrap();
+        let token = b64(&init.upload_token);
+        let mut ciphertext = Vec::new();
+        if let Some(nonce) = xchacha_nonce {
+            encrypt_xchacha_chunk_into(text, &key, &nonce, 0, &mut ciphertext).unwrap();
+        } else {
+            encrypt_chunk_into(text, &key, &base_nonce, 0, &mut ciphertext).unwrap();
+        }
+        let response = router
+            .clone()
+            .oneshot(request(
+                Method::PUT,
+                &format!("/paste/{}/chunk/0", init.id),
+                peer,
+                &[("x-upload-token", &token)],
+                ciphertext,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = router
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/paste/{}/complete", init.id),
+                peer,
+                &[("x-upload-token", &token)],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/paste/{}/challenge", init.id),
+                peer,
+                &[],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let challenge: RecipientAuthChallenge =
+            bitcode::decode(&body_bytes(response).await).unwrap();
+        let answer = open_challenge(
+            &recipient_secret,
+            &challenge.challenge.ephemeral_pub,
+            &challenge.challenge.nonce,
+            &challenge.challenge.sealed,
+        )
+        .unwrap();
+        let proof = format!("{}:{}", kid_hex, b64(&answer));
+        let response = router
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/paste/{}/data", init.id),
+                peer,
+                &[("x-account-proof", &proof)],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_bytes(response).await;
+        let (meta, returned_xnonce, returned_kem, encrypted) =
+            split_paste_frame_with_nonce(&body).unwrap();
+        assert_eq!(returned_xnonce, xchacha_nonce);
+        let returned_kem = returned_kem.expect("X-Wing frame marker and KEM ciphertext");
+        assert_eq!(returned_kem, kem_ciphertext);
+        let envelope = meta.recipient.unwrap();
+        let recipient_key = open_content_key_for_xwing(
+            &recipient_secret,
+            &returned_kem,
+            &envelope.nonce,
+            &envelope.sealed_cek,
+        )
+        .unwrap();
+        assert_eq!(recipient_key, key);
+        let sender_key = open_content_key_for_xwing_shared(
+            &shared_secret,
+            &envelope.nonce,
+            &envelope.sealed_cek,
+        )
+        .unwrap();
+        assert_eq!(sender_key, key);
+        let mut plaintext = Vec::new();
+        if let Some(nonce) = returned_xnonce {
+            decrypt_xchacha_chunk_into(encrypted, &recipient_key, &nonce, 0, &mut plaintext)
+                .unwrap();
+        } else {
+            decrypt_chunk_into(encrypted, &recipient_key, &base_nonce, 0, &mut plaintext).unwrap();
+        }
+        assert_eq!(plaintext, text);
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 

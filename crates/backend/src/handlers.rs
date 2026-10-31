@@ -10,15 +10,15 @@ use base64::{Engine as _, engine::general_purpose};
 use bitcode::{decode, encode};
 use futures::stream::{self, StreamExt};
 use mitsuzo_types::{
-    AccountProfileResponse, AccountRecord, CHUNK_SIZE, ChallengeResponse, ChangeNameRequest,
-    ChangePasswordRequest, ChunkInfoResponse, CreatePasteHeader, FailedAttempt, GetPasteHeader,
-    GetSaltResponse, GetStatsResponse, InboxResponse, InitPasteResponse, PasteAuthMode,
-    PasteRecipientInfo, RecipientAuthChallenge, RecipientEnvelope, RegisterAccountRequest,
-    UPLOAD_CHUNK_SIZE,
+    AccountProfileResponse, AccountRecord, AccountXWingKeyRequest, AccountXWingKeyResponse,
+    CHUNK_SIZE, ChallengeResponse, ChangeNameRequest, ChangePasswordRequest, ChunkInfoResponse,
+    CreatePasteHeader, FailedAttempt, GetPasteHeader, GetSaltResponse, GetStatsResponse,
+    InboxResponse, InitPasteResponse, PasteAuthMode, PasteRecipientInfo, RecipientAuthChallenge,
+    RecipientEnvelope, RegisterAccountRequest, UPLOAD_CHUNK_SIZE,
 };
 use mitsuzo_utils::{
-    generate_x25519_keypair, get_ciphertext_size, get_plaintext_size, kid_from_pubkey,
-    seal_challenge,
+    KeyEncapsulation, XWING_PUBLIC_KEY_SIZE, XWingKeyEncapsulation, generate_x25519_keypair,
+    get_ciphertext_size, get_plaintext_size, kid_from_pubkey, seal_challenge,
 };
 use rand::RngExt;
 use sha2::{Digest, Sha256};
@@ -305,22 +305,37 @@ pub async fn init_paste(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
-    let (header_body, xchacha_nonce) = if body.starts_with(mitsuzo_types::XCHACHA_FORMAT_MARKER) {
+    let (mut header, xchacha_nonce, xwing_ciphertext) = if body
+        .starts_with(mitsuzo_types::XWING_FORMAT_MARKER)
+    {
+        let request: mitsuzo_types::XWingCreatePasteRequest =
+            decode(&body[8..]).map_err(|_| StatusCode::BAD_REQUEST)?;
+        (
+            request.header,
+            request.xchacha_nonce,
+            Some(request.xwing_ciphertext),
+        )
+    } else if body.starts_with(mitsuzo_types::XCHACHA_FORMAT_MARKER) {
         if body.len() < 32 {
             return Err(StatusCode::BAD_REQUEST);
         }
+        let header: CreatePasteHeader = decode(&body[32..]).map_err(|_| StatusCode::BAD_REQUEST)?;
         (
-            &body[32..],
+            header,
             Some(
                 body[8..32]
                     .try_into()
                     .map_err(|_| StatusCode::BAD_REQUEST)?,
             ),
+            None,
         )
     } else {
-        (&body[..], None)
+        (
+            decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?,
+            None,
+            None,
+        )
     };
-    let mut header: CreatePasteHeader = decode(header_body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     if header.total_chunks == 0 {
         return Err(StatusCode::BAD_REQUEST);
@@ -347,11 +362,25 @@ pub async fn init_paste(
         };
         // If the recipient account exists, its public key must match the one
         // the client sealed to — otherwise the envelope cannot be opened.
-        if let Some(account) = state.db.get_account_by_kid(&recipient.recipient_kid).await
+        if let Some(ciphertext) = xwing_ciphertext.as_ref() {
+            if ciphertext.len() != mitsuzo_utils::XWING_CIPHERTEXT_SIZE {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            let account = state
+                .db
+                .get_account_by_kid(&recipient.recipient_kid)
+                .await
+                .ok_or(StatusCode::BAD_REQUEST)?;
+            if account.pubkey != recipient_pub || account.xwing_pubkey.is_none() {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        } else if let Some(account) = state.db.get_account_by_kid(&recipient.recipient_kid).await
             && account.pubkey != recipient_pub
         {
             return Err(StatusCode::BAD_REQUEST);
         }
+    } else if xwing_ciphertext.is_some() {
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     header.ttl_seconds = match header.ttl_seconds {
@@ -397,7 +426,13 @@ pub async fn init_paste(
 
     state
         .db
-        .init_paste(&id_str, &header, xchacha_nonce, &upload_token_hash)
+        .init_paste(
+            &id_str,
+            &header,
+            xchacha_nonce,
+            xwing_ciphertext.as_deref(),
+            &upload_token_hash,
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -874,9 +909,13 @@ pub(crate) async fn get_paste_data(
         burn_after_read: meta.burn_after_read,
         recipient: recipient_envelope,
     };
-    let frame = match xchacha_nonce {
-        Some(nonce) => frame_header.encode_xchacha_frame(&nonce),
-        None => frame_header.encode_frame(),
+    let frame = if let Some(kem_ciphertext) = state.db.get_xwing_ciphertext(&id).await {
+        frame_header.encode_xwing_frame(kem_ciphertext, xchacha_nonce)
+    } else {
+        match xchacha_nonce {
+            Some(nonce) => frame_header.encode_xchacha_frame(&nonce),
+            None => frame_header.encode_frame(),
+        }
     };
     let frame_len = frame.len() as u64;
 
@@ -1116,6 +1155,7 @@ pub async fn register_account(
         pubkey: request.pubkey,
         name: request.name,
         created_at,
+        xwing_pubkey: None,
     };
     state.db.put_account(&record).await;
     info!(kid = %to_hex(&record.kid), "account registered");
@@ -1131,6 +1171,53 @@ pub async fn get_account(
         return Err(StatusCode::NOT_FOUND);
     };
     Ok(encode(&account_profile(&record)))
+}
+
+/// Public X-Wing key used by senders to encapsulate a shared secret for this account.
+pub async fn get_account_xwing_key(
+    State(state): State<AppState>,
+    Path(kid_str): Path<String>,
+) -> Result<Vec<u8>, StatusCode> {
+    let Some(record) = resolve_account(&state.db, &kid_str).await? else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let public_key = record.xwing_pubkey.ok_or(StatusCode::NOT_FOUND)?;
+    Ok(encode(&AccountXWingKeyResponse { public_key }))
+}
+
+/// Bind or rotate the X-Wing public key after proving control of the account's X25519 key.
+pub async fn set_account_xwing_key(
+    State(state): State<AppState>,
+    client_ip: ClientIp,
+    Path(kid_str): Path<String>,
+    body: Bytes,
+) -> Result<Vec<u8>, StatusCode> {
+    let ip = client_ip.0;
+    if !state.limiter.check(&format!("xwing:{}", ip), 20, 60).await {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    let Some(mut record) = resolve_account(&state.db, &kid_str).await? else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let request: AccountXWingKeyRequest = decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.public_key.len() != XWING_PUBLIC_KEY_SIZE {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let challenge_key = format!("acct:{}", to_hex(&record.kid));
+    if !state
+        .challenges
+        .verify_and_consume(&challenge_key, &request.challenge_response)
+        .await
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    XWingKeyEncapsulation::validate_public_key(&request.public_key)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    record.xwing_pubkey = Some(request.public_key);
+    state.db.put_account(&record).await;
+    Ok(encode(&AccountXWingKeyResponse {
+        public_key: record.xwing_pubkey.unwrap_or_default(),
+    }))
 }
 
 /// Issue a single-use login challenge sealed to the account's public key.

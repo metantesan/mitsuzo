@@ -11,6 +11,10 @@ pub enum PasteVersion {
     X25519HkdfSha256ChaCha20Poly1305,
     #[sea_orm(string_value = "x25519-hkdf-sha256-xchacha20poly1305")]
     X25519HkdfSha256XChaCha20Poly1305,
+    #[sea_orm(string_value = "xwing-hkdf-sha256-chacha20poly1305")]
+    XWingHkdfSha256ChaCha20Poly1305,
+    #[sea_orm(string_value = "xwing-hkdf-sha256-xchacha20poly1305")]
+    XWingHkdfSha256XChaCha20Poly1305,
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]

@@ -4,6 +4,8 @@ mod cipher;
 mod content;
 mod password;
 mod xchacha;
+mod xwing;
+mod xwing_recipient;
 pub use account::{KeyAgreement, X25519, *};
 pub use chacha::{
     decrypt_chunk_into, decrypt_with_key_into, derive_chunk_nonce, encrypt_chunk_into,
@@ -18,6 +20,13 @@ pub use password::{EncryptionSetup, compute_password_hash, get_argon2_params};
 pub(crate) use password::{generate_salt, hkdf_expand_sha256, hmac_sha256};
 pub use xchacha::{
     decrypt_xchacha_chunk_into, derive_xchacha_chunk_nonce, encrypt_xchacha_chunk_into,
+};
+pub use xwing::{
+    KeyEncapsulation, XWING_CIPHERTEXT_SIZE, XWING_PUBLIC_KEY_SIZE, XWingKeyEncapsulation,
+    derive_xwing_public_key,
+};
+pub use xwing_recipient::{
+    open_content_key_for_xwing, open_content_key_for_xwing_shared, seal_content_key_for_xwing,
 };
 
 const CHUNK_SIZE: usize = 65536;

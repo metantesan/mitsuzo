@@ -1,2 +1,5 @@
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "debuginfo=0", "-C", "strip=symbols"]
+
+[alias]
+cov = "llvm-cov --workspace --exclude mitsuzo-frontend --exclude mitsuzo-migration --exclude cli"

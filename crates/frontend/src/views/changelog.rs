@@ -14,6 +14,22 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.15.0",
+            date: "2026-10-31",
+            items_en: vec![
+                "Added X-Wing hybrid key encapsulation (ML-KEM-768 + X25519) for recipient pastes, with ChaCha20-Poly1305 and XChaCha20-Poly1305 content encryption",
+                "Account seed phrases now derive an X-Wing decapsulation key; accounts publish its public key through an authenticated registration flow",
+                "Added versioned X-Wing paste envelopes and backend storage while preserving decryption of existing X25519 recipient pastes",
+                "Updated Orion to 0.18.1, including the fix for the ML-KEM timing advisory",
+            ],
+            items_fa: vec![
+                "افزودن سازوکار کپسوله‌سازی کلید ترکیبی X-Wing (‏ML-KEM-768 + X25519) برای Pasteهای گیرنده، همراه با رمزنگاری محتوای ChaCha20-Poly1305 و XChaCha20-Poly1305",
+                "عبارت بازیابی حساب اکنون کلید بازگشایی X-Wing را نیز به‌صورت قطعی مشتق می‌کند؛ حساب‌ها کلید عمومی را از مسیر ثبت احرازشده منتشر می‌کنند",
+                "افزودن envelopeهای نسخه‌دار X-Wing و ذخیره‌سازی backend، با حفظ امکان رمزگشایی Pasteهای گیرنده X25519 موجود",
+                "به‌روزرسانی Orion به نسخه ۰.۱۸.۱، شامل رفع advisory زمان‌بندی ML-KEM",
+            ],
+        },
+        Change {
             version: "v0.14.0",
             date: "2026-10-31",
             items_en: vec![

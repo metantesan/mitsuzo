@@ -16,7 +16,8 @@ use mitsuzo_types::{
 };
 use mitsuzo_utils::{
     ContentCipherKind, compute_burn_receipt, compute_password_hash, derive_keys, encrypt_setup,
-    get_chunk_bounds, get_plaintext_size, open_content_key_for_recipient, unwrap_content_key,
+    get_chunk_bounds, get_plaintext_size, open_content_key_for_recipient,
+    open_content_key_for_xwing, open_content_key_for_xwing_shared, unwrap_content_key,
 };
 use wasm_bindgen::JsCast;
 use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
@@ -44,6 +45,7 @@ struct RecipientKey {
     /// Public key paired with a sender-held ephemeral scalar. Ignored for a
     /// recipient account scalar, which uses the envelope ephemeral public key.
     sender_recipient_pub: Option<[u8; 32]>,
+    xwing_shared_secret: Option<[u8; 32]>,
 }
 
 #[component]
@@ -218,6 +220,7 @@ pub fn paste_view(id: String) -> Element {
                         kid: session.kid,
                         scalar: session.scalar,
                         sender_recipient_pub: None,
+                        xwing_shared_secret: None,
                     }));
                     needs_account_password2.set(false);
                     account_password_input.set(String::new());
@@ -706,6 +709,7 @@ async fn do_decrypt(
                     kid: e.recipient_kid,
                     scalar: e.ephemeral_priv,
                     sender_recipient_pub: Some(e.recipient_pub),
+                    xwing_shared_secret: e.xwing_shared_secret,
                 });
             from_ephemeral
                 // 2. Account already unlocked.
@@ -714,6 +718,7 @@ async fn do_decrypt(
                         kid: a.kid,
                         scalar: a.scalar,
                         sender_recipient_pub: None,
+                        xwing_shared_secret: None,
                     })
                 })
                 // 3. Unlocked explicitly for this paste view.
@@ -855,7 +860,7 @@ async fn do_decrypt(
                     // password-wrapped content key, followed by the ciphertext.
                     let (frame_header, xchacha_nonce, ciphertext) =
                         match split_paste_frame_with_nonce(&body) {
-                            Ok(pair) => pair,
+                            Ok((header, nonce, _kem, ciphertext)) => (header, nonce, ciphertext),
                             Err(e) => {
                                 popup_ctx
                                     .write()
@@ -1092,9 +1097,9 @@ async fn do_recipient_decrypt(
                 progress.set(None);
                 return;
             };
-            let (frame_header, xchacha_nonce, ciphertext) =
+            let (frame_header, xchacha_nonce, kem, ciphertext) =
                 match split_paste_frame_with_nonce(&body) {
-                    Ok(pair) => pair,
+                    Ok((header, nonce, kem, ciphertext)) => (header, nonce, kem, ciphertext),
                     Err(e) => {
                         popup_ctx
                             .write()
@@ -1116,12 +1121,29 @@ async fn do_recipient_decrypt(
                 .sender_recipient_pub
                 .as_ref()
                 .unwrap_or(&envelope.ephemeral_pub);
-            let encryption_key = match open_content_key_for_recipient(
-                &key.scalar,
-                ecdh_peer,
-                &envelope.nonce,
-                &envelope.sealed_cek,
-            ) {
+            let encryption_key_result = if let Some(kem_ciphertext) = kem {
+                match key.xwing_shared_secret {
+                    Some(shared_secret) => open_content_key_for_xwing_shared(
+                        &shared_secret,
+                        &envelope.nonce,
+                        &envelope.sealed_cek,
+                    ),
+                    None => open_content_key_for_xwing(
+                        &key.scalar,
+                        &kem_ciphertext,
+                        &envelope.nonce,
+                        &envelope.sealed_cek,
+                    ),
+                }
+            } else {
+                open_content_key_for_recipient(
+                    &key.scalar,
+                    ecdh_peer,
+                    &envelope.nonce,
+                    &envelope.sealed_cek,
+                )
+            };
+            let encryption_key = match encryption_key_result {
                 Ok(ck) => ck,
                 Err(e) => {
                     popup_ctx

@@ -9,7 +9,77 @@ impl MigratorTrait for Migrator {
             Box::new(m20260927_000001_initial::Migration),
             Box::new(m20261013_000002_upload_token::Migration),
             Box::new(m20261031_000003_paste_version::Migration),
+            Box::new(m20261031_000004_account_xwing_key::Migration),
+            Box::new(m20261031_000005_recipient_xwing::Migration),
         ]
+    }
+}
+
+mod m20261031_000005_recipient_xwing {
+    use super::PasteRecipients;
+    use sea_orm_migration::prelude::*;
+    pub struct Migration;
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261031_000005_recipient_xwing"
+        }
+    }
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(PasteRecipients::Table)
+                        .add_column(ColumnDef::new(PasteRecipients::XwingCiphertext).binary())
+                        .to_owned(),
+                )
+                .await
+        }
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(PasteRecipients::Table)
+                        .drop_column(PasteRecipients::XwingCiphertext)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+}
+
+mod m20261031_000004_account_xwing_key {
+    use super::Accounts;
+    use sea_orm_migration::prelude::*;
+    pub struct Migration;
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261031_000004_account_xwing_key"
+        }
+    }
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Accounts::Table)
+                        .add_column(ColumnDef::new(Accounts::XwingPubkey).binary())
+                        .to_owned(),
+                )
+                .await
+        }
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Accounts::Table)
+                        .drop_column(Accounts::XwingPubkey)
+                        .to_owned(),
+                )
+                .await
+        }
     }
 }
 
@@ -349,6 +419,7 @@ enum PasteRecipients {
     EphemeralPub,
     Nonce,
     SealedCek,
+    XwingCiphertext,
 }
 #[derive(Iden)]
 enum PasteChunks {
@@ -370,6 +441,7 @@ enum Accounts {
     Pubkey,
     Name,
     CreatedAt,
+    XwingPubkey,
 }
 #[derive(Iden)]
 enum Stats {

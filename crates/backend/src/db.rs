@@ -106,6 +106,7 @@ fn account_from_model(m: &account::Model) -> Option<AccountRecord> {
         pubkey: arr32(&m.pubkey)?,
         name: m.name.clone(),
         created_at: m.created_at as u64,
+        xwing_pubkey: m.xwing_pubkey.clone(),
     })
 }
 
@@ -191,6 +192,7 @@ impl DataStore {
         id: &str,
         header: &mitsuzo_types::CreatePasteHeader,
         xchacha_nonce: Option<[u8; 24]>,
+        xwing_ciphertext: Option<&[u8]>,
         upload_token_hash: &[u8; 32],
     ) -> eyre::Result<()> {
         // The PRNG hands out IDs that are otherwise available, which includes
@@ -221,7 +223,11 @@ impl DataStore {
             .wrap_err("Failed to begin transaction")?;
 
         paste::ActiveModel {
-            version: Set(if xchacha_nonce.is_some() && header.recipient.is_some() {
+            version: Set(if xwing_ciphertext.is_some() && xchacha_nonce.is_some() {
+                paste::PasteVersion::XWingHkdfSha256XChaCha20Poly1305
+            } else if xwing_ciphertext.is_some() {
+                paste::PasteVersion::XWingHkdfSha256ChaCha20Poly1305
+            } else if xchacha_nonce.is_some() && header.recipient.is_some() {
                 paste::PasteVersion::X25519HkdfSha256XChaCha20Poly1305
             } else if xchacha_nonce.is_some() {
                 paste::PasteVersion::Argon2idHkdfSha256XChaCha20Poly1305
@@ -272,6 +278,7 @@ impl DataStore {
                 ephemeral_pub: Set(recipient.ephemeral_pub.to_vec()),
                 nonce: Set(recipient.nonce.to_vec()),
                 sealed_cek: Set(recipient.sealed_cek.to_vec()),
+                xwing_ciphertext: Set(xwing_ciphertext.map(|v| v.to_vec())),
             }
             .insert(&txn)
             .await
@@ -589,6 +596,18 @@ impl DataStore {
         })
     }
 
+    pub async fn get_xwing_ciphertext(&self, id: &str) -> Option<Vec<u8>> {
+        if self.is_expired(id).await {
+            return None;
+        }
+        recipient::Entity::find_by_id(id.to_owned())
+            .one(&self.db)
+            .await
+            .ok()
+            .flatten()?
+            .xwing_ciphertext
+    }
+
     /// Non-expired recipient-mode pastes addressed to an account.
     pub async fn list_recipient_pastes(&self, kid: &[u8; 32]) -> Vec<PasteInboxListing> {
         let rows = recipient_inbox::Entity::find()
@@ -703,10 +722,15 @@ impl DataStore {
             pubkey: Set(record.pubkey.to_vec()),
             name: Set(record.name.clone()),
             created_at: Set(record.created_at as i64),
+            xwing_pubkey: Set(record.xwing_pubkey.clone()),
         })
         .on_conflict(
             OnConflict::column(account::Column::Kid)
-                .update_columns([account::Column::Pubkey, account::Column::Name])
+                .update_columns([
+                    account::Column::Pubkey,
+                    account::Column::Name,
+                    account::Column::XwingPubkey,
+                ])
                 .to_owned(),
         )
         .exec(&self.db)
@@ -774,6 +798,7 @@ mod tests {
                     pubkey: [0x42; 32],
                     name: format!("user{}", i),
                     created_at: 0,
+                    xwing_pubkey: None,
                 })
                 .await;
         }

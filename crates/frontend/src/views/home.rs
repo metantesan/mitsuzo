@@ -1,7 +1,8 @@
 use crate::BASE_URL;
 use crate::Route;
 use crate::account::{
-    RecipientEphemeral, RecipientTarget, use_recipient_ephemerals, use_recipient_target,
+    RecipientEphemeral, RecipientTarget, fetch_xwing_public_key, use_recipient_ephemerals,
+    use_recipient_target,
 };
 use crate::components::{PopupContext, QrCode};
 use crate::sanitize_id;
@@ -16,11 +17,11 @@ use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{
     AccountProfileResponse, CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, DataType,
     GetStatsResponse, InitPasteResponse, KeyEnvelope, MAX_PASTE_SIZE, RecipientEnvelope,
-    UPLOAD_CHUNK_SIZE, encode_xchacha_create,
+    UPLOAD_CHUNK_SIZE, XWingCreatePasteRequest, encode_xchacha_create, encode_xwing_create,
 };
 use mitsuzo_utils::{
     ContentCipherKind, compute_burn_receipt, encrypt_setup, generate_content_key,
-    generate_x25519_keypair, get_ciphertext_size, seal_content_key_for_recipient,
+    get_ciphertext_size, seal_content_key_for_xwing,
 };
 use wasm_bindgen::JsCast;
 use web_sys;
@@ -31,6 +32,7 @@ struct SenderEphemeralKey {
     recipient_kid: [u8; 32],
     recipient_pub: [u8; 32],
     ephemeral_priv: [u8; 32],
+    xwing_shared_secret: Option<[u8; 32]>,
 }
 
 fn format_count(n: u64) -> String {
@@ -139,16 +141,22 @@ pub fn home_view() -> Element {
                         if let Some(body) = r.body
                             && let Ok(p) = bitcode::decode::<AccountProfileResponse>(&body)
                         {
-                            recipient.set(Some(RecipientTarget {
-                                kid: p.kid,
-                                kid_prefix: p.kid_prefix,
-                                pubkey: p.pubkey,
-                                name: p.name.clone(),
-                            }));
-                            recipient_search.set(String::new());
-                            popup_ctx
-                                .write()
-                                .show_success(t!("recipient-found", name: p.name));
+                            match fetch_xwing_public_key(&p.kid).await {
+                                Ok(xwing_pubkey) => {
+                                    recipient.set(Some(RecipientTarget {
+                                        kid: p.kid,
+                                        kid_prefix: p.kid_prefix,
+                                        pubkey: p.pubkey,
+                                        xwing_pubkey,
+                                        name: p.name.clone(),
+                                    }));
+                                    recipient_search.set(String::new());
+                                    popup_ctx
+                                        .write()
+                                        .show_success(t!("recipient-found", name: p.name));
+                                }
+                                Err(e) => popup_ctx.write().show_error(e),
+                            }
                         } else {
                             popup_ctx.write().show_error(t!("user-not-found"));
                         }
@@ -356,118 +364,109 @@ pub fn home_view() -> Element {
                     (file_size_for_chunks as usize).div_ceil(CHUNK_SIZE) as u32
                 };
 
-                let (header, session_ephemeral): (CreatePasteHeader, Option<SenderEphemeralKey>) =
-                    if !password_mode {
-                        // Recipient mode: seal the CEK to the recipient's
-                        // public key. Both the recipient (via account scalar)
-                        // and the sender (via the ephemeral key held in memory)
-                        // can reopen this envelope.
-                        let Some(target) = recipient_info.as_ref() else {
-                            return;
-                        };
-                        let mut base_nonce = [0u8; 12];
-                        let _ = getrandom::fill(&mut base_nonce);
-                        let (eph_priv, eph_pub) = match generate_x25519_keypair() {
-                            Ok(pair) => pair,
-                            Err(e) => {
-                                popup_ctx.write().show_error(t!(
-                                    "error-encryption-failed",
-                                    error: e.to_string()
-                                ));
-                                progress.set(None);
-                                return;
-                            }
-                        };
-                        let (env_nonce, sealed_cek) = match seal_content_key_for_recipient(
-                            &eph_priv,
-                            &target.pubkey,
-                            &content_key,
-                        ) {
-                            Ok(pair) => pair,
-                            Err(e) => {
-                                popup_ctx.write().show_error(t!(
-                                    "error-encryption-failed",
-                                    error: e.to_string()
-                                ));
-                                progress.set(None);
-                                return;
-                            }
-                        };
-                        let header = CreatePasteHeader {
-                            nonce: base_nonce,
-                            salt: None,
-                            password_hash: None,
-                            key: None,
-                            try_count: None,
-                            ttl_seconds: ttl_seconds_option,
-                            data_type,
-                            filename: file_name.read().clone(),
-                            content_type: file_content_type.read().clone(),
-                            total_chunks,
-                            allow_download: !*disable_download.read(),
-                            burn_after_read: *burn_after_read.read(),
-                            burn_receipt_hash: if *burn_after_read.read() {
-                                compute_burn_receipt(&content_key)
-                            } else {
-                                [0u8; 32]
-                            },
-                            recipient: Some(RecipientEnvelope {
-                                recipient_kid: target.kid,
-                                ephemeral_pub: eph_pub,
-                                nonce: env_nonce,
-                                sealed_cek,
-                            }),
-                            recipient_pub: Some(target.pubkey),
-                        };
-                        (
-                            header,
-                            Some(SenderEphemeralKey {
-                                recipient_kid: target.kid,
-                                recipient_pub: target.pubkey,
-                                ephemeral_priv: eph_priv,
-                            }),
-                        )
-                    } else {
-                        let setup = match encrypt_setup(&password, &content_key) {
-                            Ok(data) => data,
-                            Err(e) => {
-                                popup_ctx.write().show_error(t!(
-                                    "error-encryption-failed",
-                                    error: e.to_string()
-                                ));
-                                progress.set(None);
-                                return;
-                            }
-                        };
-                        let salt_bytes = setup.salt;
-                        let nonce_bytes = setup.base_nonce;
-                        let password_hash = setup.password_hash;
-                        let header = CreatePasteHeader {
-                            nonce: nonce_bytes,
-                            salt: Some(salt_bytes),
-                            password_hash: Some(password_hash),
-                            key: Some(KeyEnvelope {
-                                wrap_nonce: setup.wrap_nonce,
-                                wrapped_key: setup.wrapped_key,
-                            }),
-                            try_count,
-                            ttl_seconds: ttl_seconds_option,
-                            data_type,
-                            filename: file_name.read().clone(),
-                            content_type: file_content_type.read().clone(),
-                            total_chunks,
-                            allow_download: !*disable_download.read(),
-                            burn_after_read: *burn_after_read.read(),
-                            burn_receipt_hash: if *burn_after_read.read() {
-                                compute_burn_receipt(&content_key)
-                            } else {
-                                [0u8; 32]
-                            },
-                            recipient: None,
-                            recipient_pub: None,
-                        };
-                        (header, None)
+                let (header, session_ephemeral, xwing_ciphertext): (
+                    CreatePasteHeader,
+                    Option<SenderEphemeralKey>,
+                    Option<Vec<u8>>,
+                ) = if !password_mode {
+                    // Recipient mode: seal the CEK to the recipient's
+                    // public key. Both the recipient (via account scalar)
+                    // and the sender (via the ephemeral key held in memory)
+                    // can reopen this envelope.
+                    let Some(target) = recipient_info.as_ref() else {
+                        return;
                     };
+                    let mut base_nonce = [0u8; 12];
+                    let _ = getrandom::fill(&mut base_nonce);
+                    let (shared_secret, kem_ciphertext, env_nonce, sealed_cek) =
+                        match seal_content_key_for_xwing(&target.xwing_pubkey, &content_key) {
+                            Ok(result) => result,
+                            Err(e) => {
+                                popup_ctx.write().show_error(t!(
+                                    "error-encryption-failed",
+                                    error: e.to_string()
+                                ));
+                                progress.set(None);
+                                return;
+                            }
+                        };
+                    let header = CreatePasteHeader {
+                        nonce: base_nonce,
+                        salt: None,
+                        password_hash: None,
+                        key: None,
+                        try_count: None,
+                        ttl_seconds: ttl_seconds_option,
+                        data_type,
+                        filename: file_name.read().clone(),
+                        content_type: file_content_type.read().clone(),
+                        total_chunks,
+                        allow_download: !*disable_download.read(),
+                        burn_after_read: *burn_after_read.read(),
+                        burn_receipt_hash: if *burn_after_read.read() {
+                            compute_burn_receipt(&content_key)
+                        } else {
+                            [0u8; 32]
+                        },
+                        recipient: Some(RecipientEnvelope {
+                            recipient_kid: target.kid,
+                            ephemeral_pub: [0; 32],
+                            nonce: env_nonce,
+                            sealed_cek,
+                        }),
+                        recipient_pub: Some(target.pubkey),
+                    };
+                    (
+                        header,
+                        Some(SenderEphemeralKey {
+                            recipient_kid: target.kid,
+                            recipient_pub: target.pubkey,
+                            ephemeral_priv: [0; 32],
+                            xwing_shared_secret: Some(shared_secret),
+                        }),
+                        Some(kem_ciphertext),
+                    )
+                } else {
+                    let setup = match encrypt_setup(&password, &content_key) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            popup_ctx.write().show_error(t!(
+                                "error-encryption-failed",
+                                error: e.to_string()
+                            ));
+                            progress.set(None);
+                            return;
+                        }
+                    };
+                    let salt_bytes = setup.salt;
+                    let nonce_bytes = setup.base_nonce;
+                    let password_hash = setup.password_hash;
+                    let header = CreatePasteHeader {
+                        nonce: nonce_bytes,
+                        salt: Some(salt_bytes),
+                        password_hash: Some(password_hash),
+                        key: Some(KeyEnvelope {
+                            wrap_nonce: setup.wrap_nonce,
+                            wrapped_key: setup.wrapped_key,
+                        }),
+                        try_count,
+                        ttl_seconds: ttl_seconds_option,
+                        data_type,
+                        filename: file_name.read().clone(),
+                        content_type: file_content_type.read().clone(),
+                        total_chunks,
+                        allow_download: !*disable_download.read(),
+                        burn_after_read: *burn_after_read.read(),
+                        burn_receipt_hash: if *burn_after_read.read() {
+                            compute_burn_receipt(&content_key)
+                        } else {
+                            [0u8; 32]
+                        },
+                        recipient: None,
+                        recipient_pub: None,
+                    };
+                    (header, None, None)
+                };
                 let encryption_key = content_key;
                 let nonce_bytes = header.nonce;
                 let xnonce = if *use_xchacha.read() {
@@ -483,9 +482,16 @@ pub fn home_view() -> Element {
                 } else {
                     None
                 };
-                let header_bytes = match xnonce {
-                    Some(nonce) => encode_xchacha_create(&header, &nonce),
-                    None => bitcode::encode(&header),
+                let header_bytes = match xwing_ciphertext {
+                    Some(ciphertext) => encode_xwing_create(&XWingCreatePasteRequest {
+                        header: header.clone(),
+                        xwing_ciphertext: ciphertext,
+                        xchacha_nonce: xnonce,
+                    }),
+                    None => match xnonce {
+                        Some(nonce) => encode_xchacha_create(&header, &nonce),
+                        None => bitcode::encode(&header),
+                    },
                 };
 
                 progress.set(Some(ProgressState {
@@ -636,6 +642,7 @@ pub fn home_view() -> Element {
                         recipient_kid: eph.recipient_kid,
                         recipient_pub: eph.recipient_pub,
                         ephemeral_priv: eph.ephemeral_priv,
+                        xwing_shared_secret: eph.xwing_shared_secret,
                     });
                 }
 

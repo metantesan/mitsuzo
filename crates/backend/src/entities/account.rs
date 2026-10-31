@@ -8,6 +8,7 @@ pub struct Model {
     pub pubkey: Vec<u8>,
     pub name: String,
     pub created_at: i64,
+    pub xwing_pubkey: Option<Vec<u8>>,
 }
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}

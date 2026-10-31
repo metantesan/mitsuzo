@@ -67,6 +67,10 @@ pub fn api_router(state: AppState) -> Router {
         .route("/account", post(handlers::register_account))
         .route("/account/{kid}", get(handlers::get_account))
         .route(
+            "/account/{kid}/xwing",
+            get(handlers::get_account_xwing_key).post(handlers::set_account_xwing_key),
+        )
+        .route(
             "/account/{kid}/challenge",
             get(handlers::get_account_challenge),
         )

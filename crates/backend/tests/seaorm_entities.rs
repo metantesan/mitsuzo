@@ -33,6 +33,7 @@ async fn normalized_entities_round_trip() {
         pubkey: Set(vec![8; 32]),
         name: Set("alice".to_owned()),
         created_at: Set(123),
+        xwing_pubkey: Set(None),
     }
     .insert(&db)
     .await
@@ -168,6 +169,7 @@ async fn recipient_entities_store_normalized_inbox_data() {
         ephemeral_pub: Set(vec![5; 32]),
         nonce: Set(vec![6; 12]),
         sealed_cek: Set(vec![7; 48]),
+        xwing_ciphertext: Set(None),
     }
     .insert(&db)
     .await

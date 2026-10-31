@@ -23,6 +23,7 @@ pub fn e2e_section() -> Element {
                 li { {t!("e2e-item5")} }
                 li { {t!("e2e-item6")} }
                 li { {t!("e2e-item7")} }
+                li { {t!("e2e-item8")} }
             }
         }
     }

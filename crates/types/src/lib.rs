@@ -6,6 +6,23 @@ pub const MAX_PASTE_SIZE: usize = 1_073_741_824;
 
 /// Prefix for the extended paste wire format. Legacy frames never use it.
 pub const XCHACHA_FORMAT_MARKER: &[u8; 8] = b"MITSUXC1";
+/// Prefix for versioned recipient pastes using an X-Wing KEM envelope.
+pub const XWING_FORMAT_MARKER: &[u8; 8] = b"MITSUPQ1";
+
+#[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
+pub struct XWingCreatePasteRequest {
+    pub header: CreatePasteHeader,
+    pub xwing_ciphertext: Vec<u8>,
+    pub xchacha_nonce: Option<[u8; 24]>,
+}
+
+pub fn encode_xwing_create(request: &XWingCreatePasteRequest) -> Vec<u8> {
+    let encoded = bitcode::encode(request);
+    let mut result = Vec::with_capacity(8 + encoded.len());
+    result.extend_from_slice(XWING_FORMAT_MARKER);
+    result.extend_from_slice(&encoded);
+    result
+}
 
 /// Encode an XChaCha create request while keeping the legacy header unchanged.
 pub fn encode_xchacha_create(header: &CreatePasteHeader, nonce: &[u8; 24]) -> Vec<u8> {
@@ -129,6 +146,13 @@ pub struct GetPasteHeader {
     pub recipient: Option<RecipientEnvelope>,
 }
 
+#[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
+pub struct XWingPasteFrame {
+    pub header: GetPasteHeader,
+    pub xwing_ciphertext: Vec<u8>,
+    pub xchacha_nonce: Option<[u8; 24]>,
+}
+
 impl GetPasteHeader {
     /// Serialize as a length-prefixed metadata frame: `[u32 LE len][bitcode]`.
     pub fn encode_frame(&self) -> Vec<u8> {
@@ -148,10 +172,29 @@ impl GetPasteHeader {
         out.extend_from_slice(&encoded);
         out
     }
+
+    pub fn encode_xwing_frame(
+        &self,
+        xwing_ciphertext: Vec<u8>,
+        xchacha_nonce: Option<[u8; 24]>,
+    ) -> Vec<u8> {
+        let encoded = bitcode::encode(&XWingPasteFrame {
+            header: self.clone(),
+            xwing_ciphertext,
+            xchacha_nonce,
+        });
+        let mut inner = Vec::with_capacity(8 + encoded.len());
+        inner.extend_from_slice(XWING_FORMAT_MARKER);
+        inner.extend_from_slice(&encoded);
+        let mut out = Vec::with_capacity(4 + inner.len());
+        out.extend_from_slice(&(inner.len() as u32).to_le_bytes());
+        out.extend_from_slice(&inner);
+        out
+    }
 }
 
 /// Decode either frame format, borrowing the ciphertext from the response.
-pub type DecodedPasteFrame<'a> = (GetPasteHeader, Option<[u8; 24]>, &'a [u8]);
+pub type DecodedPasteFrame<'a> = (GetPasteHeader, Option<[u8; 24]>, Option<Vec<u8>>, &'a [u8]);
 
 pub fn split_paste_frame_with_nonce(data: &[u8]) -> Result<DecodedPasteFrame<'_>, String> {
     if data.len() < 4 {
@@ -165,6 +208,15 @@ pub fn split_paste_frame_with_nonce(data: &[u8]) -> Result<DecodedPasteFrame<'_>
         return Err("truncated paste frame".to_string());
     }
     let header = &data[4..end];
+    if header.starts_with(XWING_FORMAT_MARKER) {
+        let frame: XWingPasteFrame = bitcode::decode(&header[8..]).map_err(|e| e.to_string())?;
+        return Ok((
+            frame.header,
+            frame.xchacha_nonce,
+            Some(frame.xwing_ciphertext),
+            &data[end..],
+        ));
+    }
     let (encoded, nonce) = if header.starts_with(XCHACHA_FORMAT_MARKER) {
         if header.len() < 32 {
             return Err("truncated XChaCha frame".to_string());
@@ -174,7 +226,7 @@ pub fn split_paste_frame_with_nonce(data: &[u8]) -> Result<DecodedPasteFrame<'_>
         (header, None)
     };
     let parsed = bitcode::decode(encoded).map_err(|e| e.to_string())?;
-    Ok((parsed, nonce, &data[end..]))
+    Ok((parsed, nonce, None, &data[end..]))
 }
 
 /// Split a framed paste body into its metadata header and the trailing
@@ -214,16 +266,18 @@ mod frame_tests {
         };
         let mut legacy = header.encode_frame();
         legacy.extend_from_slice(b"body");
-        let (parsed, nonce, body) = split_paste_frame_with_nonce(&legacy).unwrap();
+        let (parsed, nonce, kem, body) = split_paste_frame_with_nonce(&legacy).unwrap();
         assert_eq!(parsed, header);
         assert_eq!(nonce, None);
+        assert_eq!(kem, None);
         assert_eq!(body, b"body");
         assert_eq!(split_paste_frame(&legacy).unwrap().0, header);
         let mut extended = header.encode_xchacha_frame(&[9; 24]);
         extended.extend_from_slice(b"body");
-        let (parsed, nonce, body) = split_paste_frame_with_nonce(&extended).unwrap();
+        let (parsed, nonce, kem, body) = split_paste_frame_with_nonce(&extended).unwrap();
         assert_eq!(parsed, header);
         assert_eq!(nonce, Some([9; 24]));
+        assert_eq!(kem, None);
         assert_eq!(body, b"body");
         assert!(split_paste_frame(&extended).is_err());
         assert!(split_paste_frame_with_nonce(&extended[..20]).is_err());
@@ -341,6 +395,7 @@ pub struct AccountRecord {
     pub pubkey: [u8; 32],
     pub name: String,
     pub created_at: u64,
+    pub xwing_pubkey: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
@@ -351,6 +406,19 @@ pub struct AccountProfileResponse {
     pub kid_prefix: [u8; 20],
     pub pubkey: [u8; 32],
     pub name: String,
+}
+
+/// X-Wing public encapsulation key published for recipient paste encryption.
+#[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
+pub struct AccountXWingKeyResponse {
+    pub public_key: Vec<u8>,
+}
+
+/// Authenticated registration or rotation of an account's X-Wing key.
+#[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
+pub struct AccountXWingKeyRequest {
+    pub public_key: Vec<u8>,
+    pub challenge_response: [u8; 32],
 }
 
 /// Server-issued login challenge. `ephemeral_pub` is the server's one-shot

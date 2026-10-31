@@ -21,6 +21,7 @@ pub fn accounts_section() -> Element {
                 li { {t!("docs-accounts-item3")} }
                 li { {t!("docs-accounts-item4")} }
                 li { {t!("docs-accounts-item5")} }
+                li { {t!("docs-accounts-item6")} }
             }
         }
     }

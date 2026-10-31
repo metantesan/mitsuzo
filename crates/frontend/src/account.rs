@@ -7,12 +7,13 @@ use bip39::Mnemonic;
 use dioxus::prelude::*;
 use dioxus_i18n::t;
 use mitsuzo_types::{
-    AccountKeyBlob, AccountProfileResponse, ChallengeResponse, ChangeNameRequest, DataType,
-    InboxResponse, PasteInboxListing, RegisterAccountRequest,
+    AccountKeyBlob, AccountProfileResponse, AccountXWingKeyRequest, AccountXWingKeyResponse,
+    ChallengeResponse, ChangeNameRequest, DataType, InboxResponse, PasteInboxListing,
+    RegisterAccountRequest,
 };
 use mitsuzo_utils::{
-    derive_account_scalar, kid_from_pubkey, lock_account_key, open_challenge, pubkey_from_scalar,
-    unlock_account_key,
+    derive_account_scalar, derive_xwing_public_key, kid_from_pubkey, lock_account_key,
+    open_challenge, pubkey_from_scalar, unlock_account_key,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +41,7 @@ pub struct RecipientTarget {
     pub kid: [u8; 32],
     pub kid_prefix: [u8; 20],
     pub pubkey: [u8; 32],
+    pub xwing_pubkey: Vec<u8>,
     pub name: String,
 }
 
@@ -60,6 +62,7 @@ pub struct RecipientEphemeral {
     /// envelope's own ephemeral public key.
     pub recipient_pub: [u8; 32],
     pub ephemeral_priv: [u8; 32],
+    pub xwing_shared_secret: Option<[u8; 32]>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -227,7 +230,10 @@ pub async fn register_on_server(
     .await?;
     if response.status >= 200 && response.status < 300 {
         let body = response.body.ok_or_else(|| "Empty response".to_string())?;
-        bitcode::decode::<AccountProfileResponse>(&body).map_err(|e| format!("Bad response: {}", e))
+        let profile = bitcode::decode::<AccountProfileResponse>(&body)
+            .map_err(|e| format!("Bad response: {}", e))?;
+        register_xwing_key_on_server(session).await?;
+        Ok(profile)
     } else if response.status == 409 {
         Err(t!("account-error-already-exists").to_string())
     } else {
@@ -237,6 +243,64 @@ pub async fn register_on_server(
         )
         .to_string())
     }
+}
+
+async fn register_xwing_key_on_server(session: &AccountSession) -> Result<(), String> {
+    let kid = hex(&session.kid);
+    let challenge_resp = do_xhr_get(
+        &format!("{}/api/account/{}/challenge", BASE_URL, kid),
+        vec![],
+        |_, _| {},
+    )
+    .await?;
+    if !(200..300).contains(&challenge_resp.status) {
+        return Err("Failed to get account challenge for X-Wing key registration".into());
+    }
+    let challenge: ChallengeResponse =
+        challenge_resp
+            .body
+            .and_then(|b| bitcode::decode(&b).ok())
+            .ok_or_else(|| "Invalid account challenge response".to_string())?;
+    let challenge_response = solve_account_challenge(&session.scalar, &challenge)?;
+    let public_key = derive_xwing_public_key(&session.scalar)?;
+    let request = AccountXWingKeyRequest {
+        public_key,
+        challenge_response,
+    };
+    let result = do_xhr_post(
+        &format!("{}/api/account/{}/xwing", BASE_URL, kid),
+        bitcode::encode(&request),
+        |_, _| {},
+    )
+    .await?;
+    if !(200..300).contains(&result.status) {
+        return Err(format!(
+            "Failed to register X-Wing key (HTTP {})",
+            result.status
+        ));
+    }
+    let _: AccountXWingKeyResponse = result
+        .body
+        .and_then(|b| bitcode::decode(&b).ok())
+        .ok_or_else(|| "Invalid X-Wing key response".to_string())?;
+    Ok(())
+}
+
+pub async fn fetch_xwing_public_key(kid: &[u8; 32]) -> Result<Vec<u8>, String> {
+    let response = do_xhr_get(
+        &format!("{}/api/account/{}/xwing", BASE_URL, hex(kid)),
+        vec![],
+        |_, _| {},
+    )
+    .await?;
+    if !(200..300).contains(&response.status) {
+        return Err("Recipient has not registered an X-Wing key".into());
+    }
+    let response: AccountXWingKeyResponse = response
+        .body
+        .and_then(|b| bitcode::decode(&b).ok())
+        .ok_or_else(|| "Invalid X-Wing key response".to_string())?;
+    Ok(response.public_key)
 }
 
 /// Solve a server-issued challenge with the account (or ephemeral) scalar.
@@ -577,9 +641,13 @@ pub fn account_view() -> Element {
             spawn(async move {
                 match unlock_local_account(&password) {
                     Ok(session) => {
+                        let session_for_key = session.clone();
                         account.set(Some(session));
                         unlock_password.set(String::new());
                         popup_ctx.write().show_success(t!("account-unlocked"));
+                        spawn(async move {
+                            let _ = register_xwing_key_on_server(&session_for_key).await;
+                        });
                     }
                     Err(e) => popup_ctx.write().show_error(e),
                 }
@@ -981,6 +1049,7 @@ pub fn user_view(id: String) -> Element {
     let not_found = use_signal(|| false);
     let navigator = use_navigator();
     let recipient = use_recipient_target();
+    let popup_ctx = use_context::<Signal<PopupContext>>();
 
     use_effect({
         move || {
@@ -1012,18 +1081,30 @@ pub fn user_view(id: String) -> Element {
     });
 
     let send_action = {
-        let mut recipient = recipient;
+        let recipient = recipient;
+        let popup_ctx = popup_ctx;
         move |_| {
             let Some(p) = profile.read().clone() else {
                 return;
             };
-            recipient.set(Some(RecipientTarget {
-                kid: p.kid,
-                kid_prefix: p.kid_prefix,
-                pubkey: p.pubkey,
-                name: p.name,
-            }));
-            navigator.push(Route::Home {});
+            let mut recipient = recipient;
+            let navigator = navigator;
+            let mut popup_ctx = popup_ctx;
+            spawn(async move {
+                match fetch_xwing_public_key(&p.kid).await {
+                    Ok(xwing_pubkey) => {
+                        recipient.set(Some(RecipientTarget {
+                            kid: p.kid,
+                            kid_prefix: p.kid_prefix,
+                            pubkey: p.pubkey,
+                            xwing_pubkey,
+                            name: p.name,
+                        }));
+                        navigator.push(Route::Home {});
+                    }
+                    Err(e) => popup_ctx.write().show_error(e),
+                }
+            });
         }
     };
 

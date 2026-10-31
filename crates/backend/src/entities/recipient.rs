@@ -9,6 +9,7 @@ pub struct Model {
     pub ephemeral_pub: Vec<u8>,
     pub nonce: Vec<u8>,
     pub sealed_cek: Vec<u8>,
+    pub xwing_ciphertext: Option<Vec<u8>>,
 }
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}

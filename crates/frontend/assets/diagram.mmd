@@ -8,11 +8,13 @@ sequenceDiagram
     B->>B:Generate BIP39 seed phrase (24 words)
     B->>B:Derive X25519 scalar from seed (HKDF, clamped)
     B->>B:pubkey = scalar x G, kid = SHA-256(pubkey)
+    B->>B:Derive X-Wing decapsulation key from account scalar (domain-separated HKDF)
     B->>B:Lock scalar with password KEK (Argon2id + ChaCha20-Poly1305)
     Note right of B:Blob stored on device (localStorage / account.enc)
     B->>S:POST /api/account [kid, pubkey, name]
     S->>S:Verify kid = SHA-256(pubkey); 409 if taken
     S->>B:Account profile (kid, name)
+    B->>S:Authenticated POST /api/account/{kid}/xwing [X-Wing public key]
     Note right of B:Server never sees the seed phrase or private key
 
     Note over U,S:CREATE PASTE (password mode)
@@ -34,13 +36,14 @@ sequenceDiagram
 
     Note over U,S:CREATE PASTE (recipient mode)
     U->>B:Text/File + recipient account
-    B->>B:Generate CEK + fresh ephemeral X25519 keypair
-    B->>B:Seal CEK: ChaCha20-Poly1305(HKDF(ECDH(eph_priv, recipient_pub)))
+    B->>B:Generate CEK + encapsulate to recipient X-Wing public key
+    B->>B:Derive wrap key = HKDF-SHA256(X-Wing shared secret, info)
+    B->>B:Seal CEK with ChaCha20-Poly1305(wrap key)
     B->>S:POST /api/paste [recipient envelope, no salt/hash]
     S->>S:Validate recipient_pub matches account (if registered)
     S->>B:Return paste ID
     B->>S:PUT chunks + complete (same protocol as password mode)
-    Note right of B:Sender keeps ephemeral key to reopen the paste
+    Note right of B:Sender keeps the shared secret in browser session memory to reopen the paste
 
     Note over U,S:VIEW PASTE (password mode)
     U->>B:Paste ID + Password (from URL #hash)
@@ -70,13 +73,17 @@ sequenceDiagram
     B->>S:GET /api/paste/{id}/data + X-Account-Proof:{kid}:{nonce}
     alt Proof verifies (single-use, constant-time)
         S->>B:Metadata frame (recipient envelope) + ciphertext
-        B->>B:Open CEK: ECDH(account scalar, sender ephemeral_pub)
+        alt New X-Wing paste
+            B->>B:Decapsulate X-Wing ciphertext with account seed; derive wrap key; open CEK
+        else Legacy X25519 paste
+            B->>B:Open CEK with legacy X25519 ECDH envelope
+        end
         B->>B:Decrypt chunks with CEK
         B->>U:Display plaintext / Download file
     else Proof invalid / stale
         S->>B:401 + fresh challenge
     end
-    Note right of B:Sender reopens with their retained ephemeral key (ECDH symmetry)
+    Note right of B:Sender reopens with the retained session shared secret; legacy pastes use the old ECDH envelope
 
     Note over U,S:ACCOUNT INBOX
     U->>B:Open account page

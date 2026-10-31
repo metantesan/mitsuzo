@@ -23,6 +23,7 @@ pub fn security_section() -> Element {
                 li { {t!("docs-security-item5")} }
                 li { {t!("docs-security-item6")} }
                 li { {t!("docs-security-item7")} }
+                li { {t!("docs-security-item8")} }
             }
         }
     }

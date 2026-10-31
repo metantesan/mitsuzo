@@ -3,17 +3,19 @@ use bip39::Mnemonic;
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::*;
 use mitsuzo_types::{
-    AccountKeyBlob, AccountProfileResponse, CHUNK_SIZE, ChangePasswordRequest, ChunkInfoResponse,
-    CreatePasteHeader, DataType, GetSaltResponse, InitPasteResponse, KeyEnvelope, PasteAuthMode,
-    PasteRecipientInfo, RecipientAuthChallenge, RecipientEnvelope, RegisterAccountRequest,
-    UPLOAD_CHUNK_SIZE, encode_xchacha_create, split_paste_frame_with_nonce,
+    AccountKeyBlob, AccountProfileResponse, AccountXWingKeyRequest, AccountXWingKeyResponse,
+    CHUNK_SIZE, ChallengeResponse, ChangePasswordRequest, ChunkInfoResponse, CreatePasteHeader,
+    DataType, GetSaltResponse, InitPasteResponse, KeyEnvelope, PasteAuthMode, PasteRecipientInfo,
+    RecipientAuthChallenge, RecipientEnvelope, RegisterAccountRequest, UPLOAD_CHUNK_SIZE,
+    XWingCreatePasteRequest, encode_xchacha_create, encode_xwing_create,
+    split_paste_frame_with_nonce,
 };
 use mitsuzo_utils::{
     ContentCipherKind, compute_burn_receipt, compute_password_hash, derive_account_scalar,
-    derive_keys, encrypt_setup, generate_content_key, generate_x25519_keypair, get_chunk_bounds,
+    derive_keys, derive_xwing_public_key, encrypt_setup, generate_content_key, get_chunk_bounds,
     get_ciphertext_size, kid_from_pubkey, lock_account_key, open_challenge,
-    open_content_key_for_recipient, pubkey_from_scalar, seal_content_key_for_recipient,
-    unlock_account_key, unwrap_content_key,
+    open_content_key_for_recipient, open_content_key_for_xwing, pubkey_from_scalar,
+    seal_content_key_for_xwing, unlock_account_key, unwrap_content_key,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -267,6 +269,7 @@ async fn register_account(
         .await?;
     if resp.status().is_success() {
         let profile: AccountProfileResponse = bitcode::decode(&resp.bytes().await?)?;
+        register_xwing_key(client, base_url, &scalar, &kid).await?;
         print_profile("Registered account:", &profile);
     } else if resp.status() == reqwest::StatusCode::CONFLICT {
         eprintln!(
@@ -283,13 +286,60 @@ async fn register_account(
     Ok(())
 }
 
+async fn register_xwing_key(
+    client: &Client,
+    base_url: &str,
+    scalar: &[u8; 32],
+    kid: &[u8; 32],
+) -> eyre::Result<()> {
+    let challenge: ChallengeResponse = bitcode::decode(
+        &client
+            .get(format!("{}/api/account/{}/challenge", base_url, hex(kid)))
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?,
+    )?;
+    let challenge_response = open_challenge(
+        scalar,
+        &challenge.ephemeral_pub,
+        &challenge.nonce,
+        &challenge.sealed,
+    )
+    .map_err(|e| eyre::eyre!("Failed to solve account challenge: {}", e))?;
+    let request = AccountXWingKeyRequest {
+        public_key: derive_xwing_public_key(scalar)
+            .map_err(|e| eyre::eyre!("Failed to derive X-Wing key: {}", e))?,
+        challenge_response,
+    };
+    let response = client
+        .post(format!("{}/api/account/{}/xwing", base_url, hex(kid)))
+        .body(bitcode::encode(&request))
+        .send()
+        .await?
+        .error_for_status()?;
+    let _: AccountXWingKeyResponse = bitcode::decode(&response.bytes().await?)?;
+    Ok(())
+}
+
+async fn fetch_xwing_key(client: &Client, base_url: &str, kid: &[u8; 32]) -> eyre::Result<Vec<u8>> {
+    let response = client
+        .get(format!("{}/api/account/{}/xwing", base_url, hex(kid)))
+        .send()
+        .await?
+        .error_for_status()?;
+    let decoded: AccountXWingKeyResponse = bitcode::decode(&response.bytes().await?)?;
+    Ok(decoded.public_key)
+}
+
 /// Unlock the local account blob and fetch/print the public profile.
 async fn login_account(client: &Client, base_url: &str) -> eyre::Result<()> {
     let password = Zeroizing::new(rpassword::prompt_password(format!(
         "{} ",
         "Account password:".cyan().bold()
     ))?);
-    let (_scalar, _pubkey, kid) =
+    let (scalar, _pubkey, kid) =
         unlock_account(&password).map_err(|e| eyre::eyre!("{} {}", "Error:".red().bold(), e))?;
     let resp = client
         .get(format!("{}/api/account/{}", base_url, hex(&kid)))
@@ -297,6 +347,7 @@ async fn login_account(client: &Client, base_url: &str) -> eyre::Result<()> {
         .await?;
     if resp.status().is_success() {
         let profile: AccountProfileResponse = bitcode::decode(&resp.bytes().await?)?;
+        register_xwing_key(client, base_url, &scalar, &kid).await?;
         print_profile("Logged in as:", &profile);
     } else {
         eprintln!(
@@ -405,18 +456,28 @@ async fn account_paste_get(
         return Ok(());
     }
     let body = data_resp.bytes().await?;
-    let (frame_header, xnonce, ciphertext) = split_paste_frame_with_nonce(&body)
+    let (frame_header, xnonce, xwing_ciphertext, ciphertext) = split_paste_frame_with_nonce(&body)
         .map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
     let Some(recipient) = frame_header.recipient.clone() else {
         eprintln!("{} Missing recipient envelope.", "Error:".red().bold());
         return Ok(());
     };
-    let ek = match open_content_key_for_recipient(
-        &scalar,
-        &recipient.ephemeral_pub,
-        &recipient.nonce,
-        &recipient.sealed_cek,
-    ) {
+    let ek_result = if let Some(kem_ciphertext) = xwing_ciphertext {
+        open_content_key_for_xwing(
+            &scalar,
+            &kem_ciphertext,
+            &recipient.nonce,
+            &recipient.sealed_cek,
+        )
+    } else {
+        open_content_key_for_recipient(
+            &scalar,
+            &recipient.ephemeral_pub,
+            &recipient.nonce,
+            &recipient.sealed_cek,
+        )
+    };
+    let ek = match ek_result {
         Ok(key) => key,
         Err(e) => {
             eprintln!(
@@ -635,13 +696,14 @@ async fn main() -> eyre::Result<()> {
                     );
                 }
                 let profile: AccountProfileResponse = bitcode::decode(&resp.bytes().await?)?;
+                let xwing_public_key = fetch_xwing_key(&client, &base_url, &profile.kid).await?;
                 eprintln!(
                     "{} Encrypting to account {} (0x{})",
                     "Recipient:".cyan().bold(),
                     profile.name,
                     hex(&profile.kid_prefix)
                 );
-                Some(profile)
+                Some((profile, xwing_public_key))
             } else {
                 None
             };
@@ -705,48 +767,57 @@ async fn main() -> eyre::Result<()> {
             );
 
             let recipient = recipient_profile.as_ref();
-            let (salt, nonce, password_hash, key_envelope, envelope, recipient_pub) =
-                if let Some(profile) = recipient {
-                    // Recipient mode: no password setup; seal the CEK to the
-                    // recipient account's public key via X25519 ECDH.
-                    let mut base_nonce = [0u8; 12];
-                    getrandom::fill(&mut base_nonce)?;
-                    let (eph_priv, eph_pub) = generate_x25519_keypair()
-                        .map_err(|e| eyre::eyre!("Keypair generation failed: {}", e))?;
-                    let (env_nonce, sealed_cek) =
-                        seal_content_key_for_recipient(&eph_priv, &profile.pubkey, &content_key)
-                            .map_err(|e| eyre::eyre!("Failed to seal content key: {}", e))?;
-                    let envelope = RecipientEnvelope {
-                        recipient_kid: profile.kid,
-                        ephemeral_pub: eph_pub,
-                        nonce: env_nonce,
-                        sealed_cek,
-                    };
-                    (
-                        None,
-                        base_nonce,
-                        None,
-                        None,
-                        Some(envelope),
-                        Some(profile.pubkey),
-                    )
-                } else {
-                    let setup =
-                        encrypt_setup(password.as_ref().map_or("", |p| p.as_str()), &content_key)
-                            .map_err(|e| eyre::eyre!("Encryption setup failed: {}", e))?;
-                    let key_envelope = KeyEnvelope {
-                        wrap_nonce: setup.wrap_nonce,
-                        wrapped_key: setup.wrapped_key,
-                    };
-                    (
-                        Some(setup.salt),
-                        setup.base_nonce,
-                        Some(setup.password_hash),
-                        Some(key_envelope),
-                        None,
-                        None,
-                    )
+            let (
+                salt,
+                nonce,
+                password_hash,
+                key_envelope,
+                envelope,
+                recipient_pub,
+                xwing_ciphertext,
+                _xwing_shared_secret,
+            ) = if let Some((profile, xwing_public_key)) = recipient {
+                // Recipient mode: encapsulate the CEK with the recipient's X-Wing key.
+                let mut base_nonce = [0u8; 12];
+                getrandom::fill(&mut base_nonce)?;
+                let (shared_secret, kem_ciphertext, env_nonce, sealed_cek) =
+                    seal_content_key_for_xwing(xwing_public_key, &content_key)
+                        .map_err(|e| eyre::eyre!("Failed to seal content key: {}", e))?;
+                let envelope = RecipientEnvelope {
+                    recipient_kid: profile.kid,
+                    ephemeral_pub: [0; 32],
+                    nonce: env_nonce,
+                    sealed_cek,
                 };
+                (
+                    None,
+                    base_nonce,
+                    None,
+                    None,
+                    Some(envelope),
+                    Some(profile.pubkey),
+                    Some(kem_ciphertext),
+                    Some(shared_secret),
+                )
+            } else {
+                let setup =
+                    encrypt_setup(password.as_ref().map_or("", |p| p.as_str()), &content_key)
+                        .map_err(|e| eyre::eyre!("Encryption setup failed: {}", e))?;
+                let key_envelope = KeyEnvelope {
+                    wrap_nonce: setup.wrap_nonce,
+                    wrapped_key: setup.wrapped_key,
+                };
+                (
+                    Some(setup.salt),
+                    setup.base_nonce,
+                    Some(setup.password_hash),
+                    Some(key_envelope),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            };
 
             let mut header = CreatePasteHeader {
                 nonce,
@@ -781,9 +852,16 @@ async fn main() -> eyre::Result<()> {
             } else {
                 None
             };
-            let header_bytes = match xnonce {
-                Some(nonce) => encode_xchacha_create(&header, &nonce),
-                None => bitcode::encode(&header),
+            let header_bytes = match xwing_ciphertext {
+                Some(ciphertext) => encode_xwing_create(&XWingCreatePasteRequest {
+                    header: header.clone(),
+                    xwing_ciphertext: ciphertext,
+                    xchacha_nonce: xnonce,
+                }),
+                None => match xnonce {
+                    Some(nonce) => encode_xchacha_create(&header, &nonce),
+                    None => bitcode::encode(&header),
+                },
             };
 
             let pb = make_pb(total_enc_chunks as u64, "blue", "");
@@ -1074,7 +1152,7 @@ async fn main() -> eyre::Result<()> {
                 return Ok(());
             }
             let meta_body = meta_resp.bytes().await?;
-            let (meta, xnonce, _) = split_paste_frame_with_nonce(&meta_body)
+            let (meta, xnonce, _, _) = split_paste_frame_with_nonce(&meta_body)
                 .map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
 
             let enc_bytes = get_ciphertext_size(meta.total_size as usize);
@@ -1129,7 +1207,7 @@ async fn main() -> eyre::Result<()> {
                             .send()
                             .await
                             && let Ok(data) = resp.bytes().await
-                            && let Ok((_, _, slice)) = split_paste_frame_with_nonce(&data)
+                            && let Ok((_, _, _, slice)) = split_paste_frame_with_nonce(&data)
                         {
                             let mut b = buf.lock().unwrap();
                             b[s as usize..][..slice.len()].copy_from_slice(slice);
@@ -1273,7 +1351,7 @@ async fn main() -> eyre::Result<()> {
             }
             let key_body = key_resp.bytes().await?;
             let envelope = match split_paste_frame_with_nonce(&key_body) {
-                Ok((hdr, _, _)) => hdr.key,
+                Ok((hdr, _, _, _)) => hdr.key,
                 Err(e) => return Err(eyre::eyre!("Invalid paste frame: {}", e)),
             };
 

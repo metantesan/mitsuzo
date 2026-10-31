@@ -8,7 +8,7 @@ async fn migrations_are_idempotent_and_reversible() {
 
     Migrator::up(&db, None).await.unwrap();
     let applied_once = Migrator::get_applied_migrations(&db).await.unwrap();
-    assert_eq!(applied_once.len(), 3);
+    assert_eq!(applied_once.len(), 5);
 
     // Startup may call the migrator more than once; this must be harmless.
     Migrator::up(&db, None).await.unwrap();
