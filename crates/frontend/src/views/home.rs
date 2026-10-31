@@ -1052,9 +1052,14 @@ pub fn home_view() -> Element {
                             span { class: "text-sm font-mono text-accent", "{prog.progress:.0}%" }
                             if create_cancel.read().is_some() {
                                 button {
-                                    class: "text-sm text-danger hover:text-danger-hover",
+                                    class: "text-sm text-danger hover:text-danger-hover disabled:opacity-60 disabled:cursor-wait",
+                                    disabled: create_cancel.read().as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)),
                                     onclick: move |_| { request_create_cancel(progress, create_cancel); },
-                                    {t!("recipient-cancel")}
+                                    if create_cancel.read().as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                                        {t!("progress-cancel-requested")}
+                                    } else {
+                                        {t!("recipient-cancel")}
+                                    }
                                 }
                             }
                         }
