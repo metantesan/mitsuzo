@@ -31,6 +31,52 @@ use wasm_bindgen::JsCast;
 use web_sys;
 
 const PROGRESS_DEBOUNCE_MS: f64 = 100.0;
+const UPLOAD_RETRY_MAX_DELAY_MS: u32 = 10_000;
+
+async fn upload_chunk_with_retry<F>(
+    url: &str,
+    body: Vec<u8>,
+    upload_token: &str,
+    cancel_flag: Arc<AtomicBool>,
+    mut on_progress: F,
+) -> Result<(), String>
+where
+    F: FnMut(u64, u64),
+{
+    let mut retry_count = 0u32;
+    loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err("upload cancelled".to_string());
+        }
+        let result = do_xhr_put_headers(
+            url,
+            body.clone(),
+            vec![("X-Upload-Token".to_string(), upload_token.to_string())],
+            cancel_flag.clone(),
+            &mut on_progress,
+        )
+        .await;
+        match result {
+            Ok(response) if (200..300).contains(&response.status) => return Ok(()),
+            Ok(response)
+                if response.status == 408
+                    || response.status == 425
+                    || response.status == 429
+                    || (500..600).contains(&response.status) =>
+            {
+                retry_count = retry_count.saturating_add(1);
+            }
+            Ok(response) => return Err(format!("upload rejected: HTTP {}", response.status)),
+            Err(error) if cancel_flag.load(Ordering::Relaxed) => return Err(error),
+            Err(_) => retry_count = retry_count.saturating_add(1),
+        }
+        let exponent = retry_count.saturating_sub(1).min(5);
+        let delay_ms = 400u32
+            .saturating_mul(1u32 << exponent)
+            .min(UPLOAD_RETRY_MAX_DELAY_MS);
+        TimeoutFuture::new(delay_ms).await;
+    }
+}
 
 /// Sender-held recipient key material kept for the session so the creator can
 /// reopen their own recipient-mode paste.
@@ -131,6 +177,7 @@ enum EncryptMode {
 pub fn home_view() -> Element {
     let mut content = use_signal(String::new);
     let mut password_input = use_signal(String::new);
+    let mut include_password_in_url = use_signal(|| false);
     let mut try_count_preset = use_signal(|| "5".to_string());
     let mut try_count_custom = use_signal(|| "5".to_string());
     let mut generated_id: Signal<Option<String>> = use_signal(|| None);
@@ -287,6 +334,7 @@ pub fn home_view() -> Element {
 
     let create_paste = {
         let mut auto_generated = auto_generated;
+        let mut burn_after_read = burn_after_read;
         let disable_download = disable_download;
         let mut recipient_ephemerals = recipient_ephemerals;
         let mut create_cancel = create_cancel;
@@ -298,8 +346,13 @@ pub fn home_view() -> Element {
                 let password_mode = mode == EncryptMode::Password;
                 // Account mode has no password at all; password mode
                 // auto-generates one when the field is left empty.
-                auto_generated.set(password_mode && password.is_empty());
-                let password = if password_mode && password.is_empty() {
+                let auto_password = password_mode && password.is_empty();
+                auto_generated.set(auto_password);
+                if auto_password {
+                    burn_after_read.set(true);
+                }
+                let burn_after = *burn_after_read.read() || auto_password;
+                let password = if auto_password {
                     let mut buf = [0u8; 16];
                     let _ = getrandom::fill(&mut buf);
                     let auto_pw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
@@ -457,8 +510,8 @@ pub fn home_view() -> Element {
                         content_type: file_content_type.read().clone(),
                         total_chunks,
                         allow_download: !*disable_download.read(),
-                        burn_after_read: *burn_after_read.read(),
-                        burn_receipt_hash: if *burn_after_read.read() {
+                        burn_after_read: burn_after,
+                        burn_receipt_hash: if burn_after {
                             compute_burn_receipt(&content_key)
                         } else {
                             [0u8; 32]
@@ -512,8 +565,8 @@ pub fn home_view() -> Element {
                         content_type: file_content_type.read().clone(),
                         total_chunks,
                         allow_download: !*disable_download.read(),
-                        burn_after_read: *burn_after_read.read(),
-                        burn_receipt_hash: if *burn_after_read.read() {
+                        burn_after_read: burn_after,
+                        burn_receipt_hash: if burn_after {
                             compute_burn_receipt(&content_key)
                         } else {
                             [0u8; 32]
@@ -747,19 +800,18 @@ pub fn home_view() -> Element {
                             while enc_body.len() >= UPLOAD_CHUNK_SIZE {
                                 let remainder = enc_body.split_off(UPLOAD_CHUNK_SIZE);
                                 let batch = std::mem::replace(&mut enc_body, remainder);
-                                let sent = do_xhr_put_headers(
+                                let sent = upload_chunk_with_retry(
                                     &format!(
                                         "{}/api/paste/{}/chunk/{}",
                                         BASE_URL, paste_id, streamed_upload_chunks
                                     ),
                                     batch,
-                                    vec![("X-Upload-Token".to_string(), upload_token.clone())],
+                                    &upload_token,
                                     cancel_flag.clone(),
                                     |_, _| {},
                                 )
                                 .await;
-                                if !matches!(sent, Ok(ref response) if (200..300).contains(&response.status))
-                                {
+                                if sent.is_err() {
                                     cancel_remote_paste(&paste_id, &upload_token).await;
                                     popup_ctx.write().show_error(t!("error-create-paste-failed", status: format!("chunk {}", streamed_upload_chunks)));
                                     create_cancel.set(None);
@@ -811,18 +863,18 @@ pub fn home_view() -> Element {
 
                 if streaming_file && !enc_body.is_empty() {
                     let batch = std::mem::take(&mut enc_body);
-                    let sent = do_xhr_put_headers(
+                    let sent = upload_chunk_with_retry(
                         &format!(
                             "{}/api/paste/{}/chunk/{}",
                             BASE_URL, paste_id, streamed_upload_chunks
                         ),
                         batch,
-                        vec![("X-Upload-Token".to_string(), upload_token.clone())],
+                        &upload_token,
                         cancel_flag.clone(),
                         |_, _| {},
                     )
                     .await;
-                    if !matches!(sent, Ok(ref response) if (200..300).contains(&response.status)) {
+                    if sent.is_err() {
                         cancel_remote_paste(&paste_id, &upload_token).await;
                         popup_ctx.write().show_error(t!("error-create-paste-failed", status: format!("chunk {}", streamed_upload_chunks)));
                         create_cancel.set(None);
@@ -914,10 +966,10 @@ pub fn home_view() -> Element {
                     let chunk_data = enc_body[chunk_start..chunk_end].to_vec();
                     let uploaded_chunk_len = chunk_data.len();
 
-                    let upload_result = do_xhr_put_headers(
+                    let upload_result = upload_chunk_with_retry(
                         &format!("{}/api/paste/{}/chunk/{}", BASE_URL, paste_id, i),
                         chunk_data,
-                        vec![("X-Upload-Token".to_string(), upload_token.clone())],
+                        &upload_token,
                         cancel_flag.clone(),
                         |loaded, total| {
                             if cancel_flag.load(Ordering::Relaxed) {
@@ -962,7 +1014,7 @@ pub fn home_view() -> Element {
                     }
 
                     match upload_result {
-                        Ok(r) if r.status >= 200 && r.status < 300 => {
+                        Ok(()) => {
                             completed_bytes += uploaded_chunk_len;
                             uploaded_this_run += uploaded_chunk_len;
                             let percent =
@@ -1165,10 +1217,12 @@ pub fn home_view() -> Element {
                             }
                         }
                     }
-                    div { class: "mt-3 w-full bg-elevated rounded-full h-2 overflow-hidden", role: "progressbar", aria_label: "Current paste step progress", aria_valuemin: "0", aria_valuemax: "100", aria_valuenow: format!("{:.0}", prog.progress),
-                        div {
-                            class: "bg-accent h-full rounded-full transition-all duration-150",
-                            style: "width: {prog.progress.clamp(0.0, 100.0)}%"
+                    if !prog.status.starts_with("Uploading") {
+                        div { class: "mt-3 w-full bg-elevated rounded-full h-2 overflow-hidden", role: "progressbar", aria_label: "Current paste step progress", aria_valuemin: "0", aria_valuemax: "100", aria_valuenow: format!("{:.0}", prog.progress),
+                            div {
+                                class: "bg-accent h-full rounded-full transition-all duration-150",
+                                style: "width: {prog.progress.clamp(0.0, 100.0)}%"
+                            }
                         }
                     }
                 }
@@ -1499,6 +1553,8 @@ pub fn home_view() -> Element {
                     input {
                         r#type: "checkbox",
                         id: "burn-after",
+                        checked: *burn_after_read.read() || (!account_mode && password_input.read().is_empty()),
+                        disabled: !account_mode && password_input.read().is_empty(),
                         oninput: move |evt| burn_after_read.set(evt.checked()),
                     }
                     label {
@@ -1517,27 +1573,67 @@ pub fn home_view() -> Element {
             {generated_id.read().as_ref().map(|id| {
                 let password = password_input.read().clone();
                 let is_auto = *auto_generated.read();
+                let is_password_mode = *encrypt_mode.read() == EncryptMode::Password;
+                let include_password = *include_password_in_url.read()
+                    && is_password_mode
+                    && !password.is_empty();
                 let origin = web_sys::window()
                     .and_then(|w| w.location().origin().ok())
                     .unwrap_or_else(|| BASE_URL.to_string());
-                let paste_url = format!("{}/paste/{}{}", origin, id, if is_auto {
+                let paste_url = format!("{}/paste/{}{}", origin, id, if include_password {
                     format!("#{}", password)
                 } else {
                     String::new()
                 });
                 rsx!{
                     div {
-                        class: "mt-4 rounded-lg bg-success p-4 text-text shadow-md",
-                        p { class: "font-bold text-lg", {{t!("paste-created")}} }
+                        role: "status",
+                        aria_live: "polite",
+                        class: "mt-5 rounded-xl border border-border border-t-4 border-t-success bg-surface p-4 text-text shadow-lg sm:p-5",
                         div {
-                            class: "mt-3 flex flex-col gap-4 sm:flex-row sm:items-start",
+                            class: "mb-4 flex items-center gap-3 border-b border-border pb-4",
+                            span {
+                                class: "flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-success/15 text-success text-lg font-bold",
+                                "✓"
+                            }
+                            div {
+                                p { class: "font-semibold text-lg leading-tight", {{t!("paste-created")}} }
+                                p { class: "mt-1 text-sm text-text-secondary", {t!("remember-password")} }
+                            }
+                        }
+                        if is_password_mode {
+                            div {
+                                class: "mb-4 space-y-2",
+                                label {
+                                    class: "flex items-start gap-2 text-sm text-text",
+                                    input {
+                                        class: "mt-1 accent-accent",
+                                        r#type: "checkbox",
+                                        id: "include-password-in-url",
+                                        checked: *include_password_in_url.read(),
+                                        oninput: move |evt| include_password_in_url.set(evt.checked()),
+                                    }
+                                    span { {t!("include-password-in-url")} }
+                                }
+                                if *include_password_in_url.read() {
+                                    div {
+                                        role: "alert",
+                                        class: "flex items-start gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger",
+                                        span { class: "shrink-0 font-bold", "!" }
+                                        p { {t!("password-url-warning")} }
+                                    }
+                                }
+                            }
+                        }
+                        div {
+                            class: "flex flex-col gap-4 sm:flex-row sm:items-start",
                             div {
                                 class: "min-w-0 flex-1",
                                 div {
-                                    class: "flex justify-between items-center",
-                                    p { class: "text-sm text-text-secondary", {t!("full-link")} }
+                                    class: "flex flex-wrap items-center justify-between gap-2",
+                                    p { class: "text-sm font-medium text-text", {t!("full-link")} }
                                     button {
-                                        class: "px-3 py-1 bg-accent text-bg text-xs font-semibold rounded hover:bg-accent-hover transition-all duration-200",
+                                        class: "rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-bg hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-surface transition-colors",
                                         onclick: {
                                             let url = paste_url.clone();
                                             move |_| {
@@ -1552,28 +1648,32 @@ pub fn home_view() -> Element {
                                     }
                                 }
                                 input {
-                                    class: "w-full p-2 mt-1 bg-success text-text rounded text-sm font-mono",
+                                    class: "mt-2 w-full rounded-md border border-border bg-bg px-3 py-2.5 text-sm text-text font-mono focus:outline-none focus:ring-2 focus:ring-accent",
                                     value: "{paste_url}",
                                     readonly: "true",
                                     onclick: move |_| {},
                                 }
                                 div {
-                                    class: "mt-3 grid grid-cols-2 gap-2",
+                                    class: "mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2",
                                     div {
-                                        p { class: "text-sm text-text-secondary", {t!("paste-id-label")} }
+                                        p { class: "text-xs font-medium text-text-secondary", {t!("paste-id-label")} }
                                         input {
-                                            class: "w-full p-2 mt-1 bg-success text-text rounded text-sm font-mono",
+                                            class: "mt-1.5 w-full rounded-md border border-border bg-bg px-3 py-2 text-sm text-text font-mono",
                                             value: "{id}",
                                             readonly: "true",
                                         }
                                     }
                                     if is_auto {
                                         div {
-                                            p { class: "text-sm text-text-secondary", {t!("passcode-label")} }
+                                            p { class: "text-xs font-medium text-text-secondary", {t!("passcode-label")} }
                                             input {
-                                                class: "w-full p-2 mt-1 bg-success text-text rounded text-sm font-mono",
+                                                class: "mt-1.5 w-full rounded-md border border-border bg-bg px-3 py-2 text-sm text-text font-mono",
                                                 value: "{password}",
                                                 readonly: "true",
+                                            }
+                                            p {
+                                                class: "mt-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning",
+                                                {t!("burn-required-auto-password")}
                                             }
                                         }
                                     }
@@ -1581,7 +1681,6 @@ pub fn home_view() -> Element {
                             }
                             QrCode { url: paste_url.clone() }
                         }
-                        p { class: "mt-2 text-xs text-text-secondary", {{t!("remember-password")}} }
                     }
                 }
             })}

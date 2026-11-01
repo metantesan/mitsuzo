@@ -14,6 +14,22 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.15.6",
+            date: "2026-11-01",
+            items_en: vec![
+                "Added retry with backoff for failed upload batches; retries use the same chunk index and can be cancelled",
+                "Moved the password-in-link option into the created-paste panel and added a clear security warning",
+                "Auto-generated-password pastes now burn after the first successful read, and upload progress no longer shows a progress bar",
+                "Improved the created-paste panel colors and readability",
+            ],
+            items_fa: vec![
+                "افزودن تلاش مجدد با تأخیر افزایشی برای batchهای ناموفق آپلود؛ تلاش‌ها از همان شمارهٔ chunk استفاده می‌کنند و قابل لغو هستند",
+                "انتقال گزینهٔ قراردادن رمز در پیوند به پنل Paste ساخته‌شده و افزودن هشدار امنیتی روشن",
+                "Pasteهای دارای رمز خودکار پس از اولین مشاهدهٔ موفق حذف می‌شوند و مرحلهٔ آپلود نوار پیشرفت ندارد",
+                "بهبود رنگ و خوانایی پنل Paste ساخته‌شده",
+            ],
+        },
+        Change {
             version: "v0.15.5",
             date: "2026-11-01",
             items_en: vec![
