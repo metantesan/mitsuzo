@@ -15,6 +15,7 @@ pub struct PendingChallenge {
 }
 
 pub const CHALLENGE_TTL: Duration = Duration::from_secs(60);
+const MAX_PENDING_CHALLENGES: usize = 10_000;
 
 #[derive(Clone)]
 pub struct ChallengeStore {
@@ -35,7 +36,18 @@ impl ChallengeStore {
     }
 
     pub async fn insert(&self, key: String, ephemeral_priv: [u8; 32], expected_response: [u8; 32]) {
-        self.inner.lock().await.insert(
+        let mut map = self.inner.lock().await;
+        map.retain(|_, pending| pending.created.elapsed() <= CHALLENGE_TTL);
+        if !map.contains_key(&key)
+            && map.len() >= MAX_PENDING_CHALLENGES
+            && let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, p)| p.created)
+                .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest);
+        }
+        map.insert(
             key,
             PendingChallenge {
                 ephemeral_priv,

@@ -14,6 +14,20 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.15.5",
+            date: "2026-11-01",
+            items_en: vec![
+                "Paste IDs are claimed through the database without replacing active pastes; concurrent duplicate chunk uploads are serialized",
+                "File encryption now uploads bounded encrypted batches directly, while paste salt and recipient challenge endpoints are rate-limited",
+                "Recipient display names are withheld before proof, and outstanding challenges are capped",
+            ],
+            items_fa: vec![
+                "شناسهٔ Paste از طریق پایگاه‌داده تخصیص می‌یابد و Paste فعال جایگزین نمی‌شود؛ آپلودهای هم‌زمان یک chunk سریال می‌شوند",
+                "رمزگذاری فایل اکنون batchهای محدودشده را مستقیم آپلود می‌کند و endpointهای salt و challenge محدودیت نرخ دارند",
+                "نام نمایشی گیرنده پیش از اثبات هویت ارسال نمی‌شود و تعداد challengeهای باز محدود است",
+            ],
+        },
+        Change {
             version: "v0.15.4",
             date: "2026-11-01",
             items_en: vec![

@@ -3,6 +3,7 @@ use eyre::{Context, eyre};
 use mitsuzo_types::{
     AccountRecord, DataType, KeyEnvelope, PasteInboxListing, PasteMeta, RecipientEnvelope,
 };
+use rand::RngExt;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
     ExprTrait, QueryFilter, Set, TransactionTrait,
@@ -26,6 +27,7 @@ pub struct DataStore {
     /// Serializes destructive paste deletions so a paste's row, credential,
     /// recipient, chunk, inbox, and content-file state is torn down coherently.
     deletion_lock: Arc<Mutex<()>>,
+    chunk_write_lock: Arc<Mutex<()>>,
 }
 
 fn epoch_secs() -> u64 {
@@ -52,7 +54,7 @@ fn nonce_path(files_dir: &Path, id: &str) -> PathBuf {
 /// avoid concurrent-write interference. Blocking; call via `spawn_blocking`.
 fn write_chunk_file(files_dir: &Path, id: &str, chunk_index: u32, data: &[u8]) -> Result<(), ()> {
     let path = content_path(files_dir, id);
-    let temp_path = content_path(files_dir, &format!("{}.{}", id, chunk_index));
+    let temp_path = content_path(files_dir, &format!("{}.{}.tmp", id, chunk_index));
     let mut temp = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -111,6 +113,37 @@ fn account_from_model(m: &account::Model) -> Option<AccountRecord> {
 }
 
 impl DataStore {
+    /// Generate and atomically claim a paste ID. The database primary key is
+    /// the arbiter: concurrent contenders retry after a uniqueness conflict.
+    pub async fn create_paste(
+        &self,
+        header: &mitsuzo_types::CreatePasteHeader,
+        xchacha_nonce: Option<[u8; 24]>,
+        xwing_ciphertext: Option<&[u8]>,
+        upload_token_hash: &[u8; 32],
+    ) -> eyre::Result<String> {
+        for _ in 0..100 {
+            let candidate = {
+                let mut rng = rand::rng();
+                rng.random_range(100_000u32..1_000_000).to_string()
+            };
+            if self
+                .init_paste(
+                    &candidate,
+                    header,
+                    xchacha_nonce,
+                    xwing_ciphertext,
+                    upload_token_hash,
+                )
+                .await
+                .is_ok()
+            {
+                return Ok(candidate);
+            }
+        }
+        Err(eyre!("unable to claim a paste ID after 100 attempts"))
+    }
+
     pub async fn new() -> eyre::Result<Self> {
         Self::open(Path::new("database")).await
     }
@@ -164,6 +197,7 @@ impl DataStore {
             db,
             files_dir,
             deletion_lock: Arc::new(Mutex::new(())),
+            chunk_write_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -199,17 +233,17 @@ impl DataStore {
         // pastes that expired but have not been cleaned up yet. Reusing such an
         // ID would otherwise leave the old chunk rows and content file behind.
         if self.paste_model(id).await.is_some() {
-            self.delete_paste_inner(id).await;
+            if self.is_expired(id).await {
+                let _lock = self.deletion_lock.lock().await;
+                if self.is_expired(id).await {
+                    self.delete_paste_inner(id).await;
+                } else {
+                    return Err(eyre!("paste ID already claimed"));
+                }
+            } else {
+                return Err(eyre!("paste ID already claimed"));
+            }
         }
-
-        let nonce_path = nonce_path(&self.files_dir, id);
-        std::fs::write(
-            &nonce_path,
-            xchacha_nonce
-                .as_ref()
-                .map_or(header.nonce.as_slice(), |n| n.as_slice()),
-        )
-        .wrap_err_with(|| format!("Failed to write nonce for paste {}", id))?;
 
         let expiration_timestamp = match header.ttl_seconds {
             Some(ttl) if ttl > 0 => (epoch_secs() + u64::from(ttl)) as i64,
@@ -302,6 +336,17 @@ impl DataStore {
 
         txn.commit().await.wrap_err("Failed to commit paste")?;
 
+        // Write sidecar state only after the primary key is committed. A
+        // concurrent create that loses the unique-key race must not overwrite
+        // the winning paste's nonce file.
+        std::fs::write(
+            nonce_path(&self.files_dir, id),
+            xchacha_nonce
+                .as_ref()
+                .map_or(header.nonce.as_slice(), |n| n.as_slice()),
+        )
+        .wrap_err_with(|| format!("Failed to write nonce for paste {}", id))?;
+
         self.increment_stat("pastes_all_time").await;
         self.increment_stat(&day_key("pastes_day")).await;
         Ok(())
@@ -309,6 +354,7 @@ impl DataStore {
 
     #[allow(clippy::result_unit_err)]
     pub async fn append_chunk(&self, id: &str, chunk_index: u32, data: &[u8]) -> Result<(), ()> {
+        let _write_lock = self.chunk_write_lock.lock().await;
         let already = chunk::Entity::find_by_id((id.to_owned(), chunk_index as i32))
             .one(&self.db)
             .await
@@ -828,6 +874,13 @@ mod tests {
             .init_paste("atomic-attempts", &header, None, None, &[7; 32])
             .await
             .expect("insert test paste");
+        assert!(
+            store
+                .init_paste("atomic-attempts", &header, None, None, &[8; 32])
+                .await
+                .is_err()
+        );
+        assert!(store.get_meta("atomic-attempts").await.is_some());
 
         let calls = 24;
         let barrier = Arc::new(tokio::sync::Barrier::new(calls));
@@ -915,6 +968,58 @@ mod tests {
             "should point at the migration release: {message}"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_duplicate_chunk_upload_is_recorded_once() {
+        let id_num = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("mitsuzo-db-chunks-{}-{id_num}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = test_store(&dir).await;
+        let header = CreatePasteHeader {
+            nonce: [1; 12],
+            salt: Some([2; 16]),
+            password_hash: Some([3; 32]),
+            key: Some(KeyEnvelope {
+                wrap_nonce: [4; 12],
+                wrapped_key: [5; 48],
+            }),
+            try_count: Some(5),
+            ttl_seconds: Some(60),
+            data_type: DataType::File,
+            filename: None,
+            content_type: None,
+            total_chunks: 1,
+            allow_download: true,
+            burn_after_read: false,
+            burn_receipt_hash: [0; 32],
+            recipient: None,
+            recipient_pub: None,
+        };
+        store
+            .init_paste("duplicate-chunk", &header, None, None, &[7; 32])
+            .await
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut tasks = Vec::new();
+        for byte in [11u8, 22u8] {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store.append_chunk("duplicate-chunk", 0, &[byte; 32]).await
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        assert_eq!(store.get_received_chunks("duplicate-chunk").await, 1);
+        let path = store.get_content_path("duplicate-chunk").await.unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(bytes.len(), 32);
+        assert!(bytes.iter().all(|b| *b == bytes[0]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

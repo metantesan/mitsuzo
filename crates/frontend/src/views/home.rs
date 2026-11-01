@@ -552,157 +552,6 @@ pub fn home_view() -> Element {
                 };
 
                 progress.set(Some(ProgressState {
-                    status: t!("progress-encrypting"),
-                    progress: 0.0,
-                }));
-
-                let mut enc_body = Vec::new();
-                let js_file = file_data.read().as_ref().cloned();
-                let encryption_started_ms = now_ms();
-                let mut last_encryption_progress_ms = encryption_started_ms;
-
-                match (text_fallback, js_file) {
-                    (Some(text_bytes), _) => {
-                        let chunk_size = get_ciphertext_size(text_bytes.len());
-                        enc_body.reserve(chunk_size);
-                        for i in 0..total_chunks {
-                            if cancel_flag.load(Ordering::Relaxed) {
-                                create_cancel.set(None);
-                                progress.set(None);
-                                return;
-                            }
-                            let start = i as usize * CHUNK_SIZE;
-                            let end = (start + CHUNK_SIZE).min(text_bytes.len());
-                            let chunk = &text_bytes[start..end];
-                            let result = match xnonce {
-                                Some(nonce) => ContentCipherKind::XChaCha20Poly1305.encrypt_chunk(
-                                    &encryption_key,
-                                    &nonce,
-                                    i,
-                                    chunk,
-                                    &mut enc_body,
-                                ),
-                                None => ContentCipherKind::ChaCha20Poly1305.encrypt_chunk(
-                                    &encryption_key,
-                                    &nonce_bytes,
-                                    i,
-                                    chunk,
-                                    &mut enc_body,
-                                ),
-                            };
-                            if let Err(e) = result {
-                                popup_ctx.write().show_error(
-                                    t!("error-encryption-failed", error: e.to_string()),
-                                );
-                                create_cancel.set(None);
-                                progress.set(None);
-                                return;
-                            }
-                            let current_ms = now_ms();
-                            if current_ms - last_encryption_progress_ms >= PROGRESS_DEBOUNCE_MS
-                                || i + 1 == total_chunks
-                            {
-                                last_encryption_progress_ms = current_ms;
-                                let percent = ((i + 1) as f32 / total_chunks as f32) * 100.0;
-                                let processed = end as u64;
-                                let elapsed_seconds =
-                                    ((now_ms() - encryption_started_ms) / 1000.0).max(0.001);
-                                let speed_mbps = processed as f64 / 1_000_000.0 / elapsed_seconds;
-                                progress.set(Some(ProgressState {
-                                    status: format!(
-                                        "{} · {} / {} · {speed_mbps:.1} MB/s",
-                                        t!("progress-encrypting-percent", percent: format!("{percent:.0}")),
-                                        format_size(processed),
-                                        format_size(text_bytes.len() as u64)
-                                    ),
-                                    progress: percent,
-                                }));
-                                TimeoutFuture::new(0).await;
-                            }
-                        }
-                    }
-                    (_, Some(file)) => {
-                        let total_cipher_size = get_ciphertext_size(file_size_for_chunks as usize);
-                        enc_body.reserve(total_cipher_size);
-                        for i in 0..total_chunks {
-                            if cancel_flag.load(Ordering::Relaxed) {
-                                create_cancel.set(None);
-                                progress.set(None);
-                                return;
-                            }
-                            let start = i as u64 * CHUNK_SIZE as u64;
-                            let end =
-                                std::cmp::min(start + CHUNK_SIZE as u64, file_size_for_chunks);
-                            let blob = file
-                                .slice_with_f64_and_f64(start as f64, end as f64)
-                                .map_err(|_| "slice failed".to_string())
-                                .unwrap();
-                            let g_blob: gloo_file::Blob = blob.into();
-                            let chunk_bytes = gloo_file::futures::read_as_bytes(&g_blob)
-                                .await
-                                .map_err(|_| "read failed".to_string())
-                                .unwrap();
-                            if cancel_flag.load(Ordering::Relaxed) {
-                                create_cancel.set(None);
-                                progress.set(None);
-                                return;
-                            }
-                            if let Err(e) = match xnonce {
-                                Some(nonce) => ContentCipherKind::XChaCha20Poly1305.encrypt_chunk(
-                                    &encryption_key,
-                                    &nonce,
-                                    i,
-                                    &chunk_bytes,
-                                    &mut enc_body,
-                                ),
-                                None => ContentCipherKind::ChaCha20Poly1305.encrypt_chunk(
-                                    &encryption_key,
-                                    &nonce_bytes,
-                                    i,
-                                    &chunk_bytes,
-                                    &mut enc_body,
-                                ),
-                            } {
-                                popup_ctx.write().show_error(
-                                    t!("error-encryption-failed", error: e.to_string()),
-                                );
-                                create_cancel.set(None);
-                                progress.set(None);
-                                return;
-                            }
-                            let current_ms = now_ms();
-                            if current_ms - last_encryption_progress_ms >= PROGRESS_DEBOUNCE_MS
-                                || i + 1 == total_chunks
-                            {
-                                last_encryption_progress_ms = current_ms;
-                                let pct = ((i + 1) as f32 / total_chunks as f32) * 100.0;
-                                let processed = end;
-                                let elapsed_seconds =
-                                    ((now_ms() - encryption_started_ms) / 1000.0).max(0.001);
-                                let speed_mbps = processed as f64 / 1_000_000.0 / elapsed_seconds;
-                                progress.set(Some(ProgressState {
-                                    status: format!(
-                                        "{} · {} / {} · {speed_mbps:.1} MB/s",
-                                        t!("progress-encrypting-percent", percent: format!("{pct:.0}")),
-                                        format_size(end),
-                                        format_size(file_size_for_chunks)
-                                    ),
-                                    progress: pct,
-                                }));
-                                TimeoutFuture::new(0).await;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-
-                if cancel_flag.load(Ordering::Relaxed) {
-                    create_cancel.set(None);
-                    progress.set(None);
-                    return;
-                }
-
-                progress.set(Some(ProgressState {
                     status: t!("progress-initiating-upload"),
                     progress: 0.0,
                 }));
@@ -756,7 +605,247 @@ pub fn home_view() -> Element {
                     return;
                 }
 
-                let total_upload_chunks = enc_body.len().div_ceil(UPLOAD_CHUNK_SIZE);
+                progress.set(Some(ProgressState {
+                    status: t!("progress-encrypting"),
+                    progress: 0.0,
+                }));
+
+                let mut enc_body = Vec::new();
+                let js_file = file_data.read().as_ref().cloned();
+                let streaming_file = js_file.is_some();
+                let total_ciphertext_size = get_ciphertext_size(file_size_for_chunks as usize);
+                let mut streamed_upload_chunks = 0u32;
+                let encryption_started_ms = now_ms();
+                let mut last_encryption_progress_ms = encryption_started_ms;
+
+                match (text_fallback, js_file) {
+                    (Some(text_bytes), _) => {
+                        let chunk_size = get_ciphertext_size(text_bytes.len());
+                        enc_body.reserve(chunk_size);
+                        for i in 0..total_chunks {
+                            if cancel_flag.load(Ordering::Relaxed) {
+                                cancel_remote_paste(&paste_id, &upload_token).await;
+                                create_cancel.set(None);
+                                progress.set(None);
+                                return;
+                            }
+                            let start = i as usize * CHUNK_SIZE;
+                            let end = (start + CHUNK_SIZE).min(text_bytes.len());
+                            let chunk = &text_bytes[start..end];
+                            let result = match xnonce {
+                                Some(nonce) => ContentCipherKind::XChaCha20Poly1305.encrypt_chunk(
+                                    &encryption_key,
+                                    &nonce,
+                                    i,
+                                    chunk,
+                                    &mut enc_body,
+                                ),
+                                None => ContentCipherKind::ChaCha20Poly1305.encrypt_chunk(
+                                    &encryption_key,
+                                    &nonce_bytes,
+                                    i,
+                                    chunk,
+                                    &mut enc_body,
+                                ),
+                            };
+                            if let Err(e) = result {
+                                cancel_remote_paste(&paste_id, &upload_token).await;
+                                popup_ctx.write().show_error(
+                                    t!("error-encryption-failed", error: e.to_string()),
+                                );
+                                create_cancel.set(None);
+                                progress.set(None);
+                                return;
+                            }
+                            let current_ms = now_ms();
+                            if current_ms - last_encryption_progress_ms >= PROGRESS_DEBOUNCE_MS
+                                || i + 1 == total_chunks
+                            {
+                                last_encryption_progress_ms = current_ms;
+                                let percent = ((i + 1) as f32 / total_chunks as f32) * 100.0;
+                                let processed = end as u64;
+                                let elapsed_seconds =
+                                    ((now_ms() - encryption_started_ms) / 1000.0).max(0.001);
+                                let speed_mbps = processed as f64 / 1_000_000.0 / elapsed_seconds;
+                                progress.set(Some(ProgressState {
+                                    status: format!(
+                                        "{} · {} / {} · {speed_mbps:.1} MB/s",
+                                        t!("progress-encrypting-percent", percent: format!("{percent:.0}")),
+                                        format_size(processed),
+                                        format_size(text_bytes.len() as u64)
+                                    ),
+                                    progress: percent,
+                                }));
+                                TimeoutFuture::new(0).await;
+                            }
+                        }
+                    }
+                    (_, Some(file)) => {
+                        enc_body.reserve(UPLOAD_CHUNK_SIZE + 64);
+                        for i in 0..total_chunks {
+                            if cancel_flag.load(Ordering::Relaxed) {
+                                cancel_remote_paste(&paste_id, &upload_token).await;
+                                create_cancel.set(None);
+                                progress.set(None);
+                                return;
+                            }
+                            let start = i as u64 * CHUNK_SIZE as u64;
+                            let end =
+                                std::cmp::min(start + CHUNK_SIZE as u64, file_size_for_chunks);
+                            let blob = match file.slice_with_f64_and_f64(start as f64, end as f64) {
+                                Ok(blob) => blob,
+                                Err(error) => {
+                                    cancel_remote_paste(&paste_id, &upload_token).await;
+                                    popup_ctx.write().show_error(t!("error-encryption-failed", error: format!("slice failed: {error:?}")));
+                                    create_cancel.set(None);
+                                    progress.set(None);
+                                    return;
+                                }
+                            };
+                            let g_blob: gloo_file::Blob = blob.into();
+                            let chunk_bytes = match gloo_file::futures::read_as_bytes(&g_blob).await
+                            {
+                                Ok(bytes) => bytes,
+                                Err(error) => {
+                                    cancel_remote_paste(&paste_id, &upload_token).await;
+                                    popup_ctx.write().show_error(t!("error-encryption-failed", error: format!("read failed: {error:?}")));
+                                    create_cancel.set(None);
+                                    progress.set(None);
+                                    return;
+                                }
+                            };
+                            if cancel_flag.load(Ordering::Relaxed) {
+                                cancel_remote_paste(&paste_id, &upload_token).await;
+                                create_cancel.set(None);
+                                progress.set(None);
+                                return;
+                            }
+                            if let Err(e) = match xnonce {
+                                Some(nonce) => ContentCipherKind::XChaCha20Poly1305.encrypt_chunk(
+                                    &encryption_key,
+                                    &nonce,
+                                    i,
+                                    &chunk_bytes,
+                                    &mut enc_body,
+                                ),
+                                None => ContentCipherKind::ChaCha20Poly1305.encrypt_chunk(
+                                    &encryption_key,
+                                    &nonce_bytes,
+                                    i,
+                                    &chunk_bytes,
+                                    &mut enc_body,
+                                ),
+                            } {
+                                cancel_remote_paste(&paste_id, &upload_token).await;
+                                popup_ctx.write().show_error(
+                                    t!("error-encryption-failed", error: e.to_string()),
+                                );
+                                create_cancel.set(None);
+                                progress.set(None);
+                                return;
+                            }
+                            while enc_body.len() >= UPLOAD_CHUNK_SIZE {
+                                let remainder = enc_body.split_off(UPLOAD_CHUNK_SIZE);
+                                let batch = std::mem::replace(&mut enc_body, remainder);
+                                let sent = do_xhr_put_headers(
+                                    &format!(
+                                        "{}/api/paste/{}/chunk/{}",
+                                        BASE_URL, paste_id, streamed_upload_chunks
+                                    ),
+                                    batch,
+                                    vec![("X-Upload-Token".to_string(), upload_token.clone())],
+                                    cancel_flag.clone(),
+                                    |_, _| {},
+                                )
+                                .await;
+                                if !matches!(sent, Ok(ref response) if (200..300).contains(&response.status))
+                                {
+                                    cancel_remote_paste(&paste_id, &upload_token).await;
+                                    popup_ctx.write().show_error(t!("error-create-paste-failed", status: format!("chunk {}", streamed_upload_chunks)));
+                                    create_cancel.set(None);
+                                    progress.set(None);
+                                    return;
+                                }
+                                streamed_upload_chunks += 1;
+                                progress.set(Some(ProgressState {
+                                    status: format!(
+                                        "Uploading · {} / {}",
+                                        format_size(
+                                            u64::from(streamed_upload_chunks)
+                                                * UPLOAD_CHUNK_SIZE as u64
+                                        ),
+                                        format_size(total_ciphertext_size as u64)
+                                    ),
+                                    progress: (u64::from(streamed_upload_chunks)
+                                        * UPLOAD_CHUNK_SIZE as u64)
+                                        as f32
+                                        / total_ciphertext_size.max(1) as f32
+                                        * 100.0,
+                                }));
+                            }
+                            let current_ms = now_ms();
+                            if current_ms - last_encryption_progress_ms >= PROGRESS_DEBOUNCE_MS
+                                || i + 1 == total_chunks
+                            {
+                                last_encryption_progress_ms = current_ms;
+                                let pct = ((i + 1) as f32 / total_chunks as f32) * 100.0;
+                                let processed = end;
+                                let elapsed_seconds =
+                                    ((now_ms() - encryption_started_ms) / 1000.0).max(0.001);
+                                let speed_mbps = processed as f64 / 1_000_000.0 / elapsed_seconds;
+                                progress.set(Some(ProgressState {
+                                    status: format!(
+                                        "{} · {} / {} · {speed_mbps:.1} MB/s",
+                                        t!("progress-encrypting-percent", percent: format!("{pct:.0}")),
+                                        format_size(end),
+                                        format_size(file_size_for_chunks)
+                                    ),
+                                    progress: pct,
+                                }));
+                                TimeoutFuture::new(0).await;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                if streaming_file && !enc_body.is_empty() {
+                    let batch = std::mem::take(&mut enc_body);
+                    let sent = do_xhr_put_headers(
+                        &format!(
+                            "{}/api/paste/{}/chunk/{}",
+                            BASE_URL, paste_id, streamed_upload_chunks
+                        ),
+                        batch,
+                        vec![("X-Upload-Token".to_string(), upload_token.clone())],
+                        cancel_flag.clone(),
+                        |_, _| {},
+                    )
+                    .await;
+                    if !matches!(sent, Ok(ref response) if (200..300).contains(&response.status)) {
+                        cancel_remote_paste(&paste_id, &upload_token).await;
+                        popup_ctx.write().show_error(t!("error-create-paste-failed", status: format!("chunk {}", streamed_upload_chunks)));
+                        create_cancel.set(None);
+                        progress.set(None);
+                        return;
+                    }
+                }
+
+                if cancel_flag.load(Ordering::Relaxed) {
+                    cancel_remote_paste(&paste_id, &upload_token).await;
+                    create_cancel.set(None);
+                    progress.set(None);
+                    return;
+                }
+
+                if cancel_flag.load(Ordering::Relaxed) {
+                    cancel_remote_paste(&paste_id, &upload_token).await;
+                    create_cancel.set(None);
+                    progress.set(None);
+                    return;
+                }
+
+                let total_upload_chunks = total_ciphertext_size.div_ceil(UPLOAD_CHUNK_SIZE);
 
                 // Remember the sender's ephemeral key so this session can
                 // reopen the paste (ECDH symmetry with the recipient).
@@ -789,8 +878,19 @@ pub fn home_view() -> Element {
                         .and_then(|b| bitcode::decode::<ChunkInfoResponse>(b).ok())
                         .map(|c| c.received)
                         .unwrap_or(0),
+                    _ if streaming_file => streamed_upload_chunks,
                     _ => 0,
                 };
+
+                if streaming_file && start_chunk < streamed_upload_chunks {
+                    cancel_remote_paste(&paste_id, &upload_token).await;
+                    popup_ctx
+                        .write()
+                        .show_error(t!("error-create-paste-failed", status: "chunk verification"));
+                    create_cancel.set(None);
+                    progress.set(None);
+                    return;
+                }
 
                 let mut completed_bytes =
                     (start_chunk as usize * UPLOAD_CHUNK_SIZE).min(enc_body.len());

@@ -20,7 +20,6 @@ use mitsuzo_utils::{
     KeyEncapsulation, XWING_PUBLIC_KEY_SIZE, XWingKeyEncapsulation, generate_x25519_keypair,
     get_ciphertext_size, get_plaintext_size, kid_from_xwing_pubkey, seal_challenge,
 };
-use rand::RngExt;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
@@ -429,40 +428,20 @@ pub async fn init_paste(
         };
     }
 
-    let id_str;
-    let mut attempts = 0;
-    loop {
-        // Scope the (non-Send) thread rng so it is dropped before awaiting.
-        let candidate = {
-            let mut rng = rand::rng();
-            let id: u32 = rng.random_range(100_000..1_000_000);
-            id.to_string()
-        };
-        if state.db.id_available(&candidate).await {
-            id_str = candidate;
-            break;
-        }
-        attempts += 1;
-        if attempts >= 100 {
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        }
-    }
-
     let mut upload_token = [0u8; 32];
     getrandom::fill(&mut upload_token).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let upload_token_hash = sha256(&upload_token);
 
-    state
+    let id_str = state
         .db
-        .init_paste(
-            &id_str,
+        .create_paste(
             &header,
             xchacha_nonce,
             xwing_ciphertext.as_deref(),
             &upload_token_hash,
         )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
     info!(id = %id_str, "paste initialized");
 
@@ -565,8 +544,16 @@ pub async fn cancel_paste(
 
 pub async fn get_salt(
     State(state): State<AppState>,
+    client_ip: ClientIp,
     Path(id): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
+    if !state
+        .limiter
+        .check(&format!("salt:{}", client_ip.0), 30, 60)
+        .await
+    {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     validate_id(&id)?;
     // Tells the client which authentication the paste uses: `salt: Some`
     // → password mode; `salt: None` → recipient/audience mode. Only the
@@ -588,14 +575,10 @@ pub async fn get_salt(
         let recipient_kid = meta.recipient_kid.unwrap_or_default();
         let mut kid_prefix = [0u8; 20];
         kid_prefix.copy_from_slice(&recipient_kid[..20]);
-        let name = match meta.recipient_kid {
-            Some(kid) => state.db.get_account_by_kid(&kid).await.map(|a| a.name),
-            None => None,
-        };
         Some(PasteRecipientInfo {
             kid: recipient_kid,
             kid_prefix,
-            name,
+            name: None,
         })
     } else {
         None
@@ -797,8 +780,16 @@ async fn issue_recipient_challenge(
 /// request — no unauthenticated probe round needed.
 pub async fn get_paste_challenge(
     State(state): State<AppState>,
+    client_ip: ClientIp,
     Path(id): Path<String>,
 ) -> Result<Vec<u8>, StatusCode> {
+    if !state
+        .limiter
+        .check(&format!("challenge:{}", client_ip.0), 20, 60)
+        .await
+    {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     validate_id(&id)?;
     let meta = state
         .db
