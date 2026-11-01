@@ -18,9 +18,8 @@ use mitsuzo_types::{
 };
 use mitsuzo_utils::{
     KeyEncapsulation, XWING_PUBLIC_KEY_SIZE, XWingKeyEncapsulation, generate_x25519_keypair,
-    get_ciphertext_size, get_plaintext_size, kid_from_xwing_pubkey, seal_challenge,
+    get_ciphertext_size, get_plaintext_size, kid_from_xwing_pubkey, seal_challenge, sha256_digest,
 };
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::sync::{Mutex, OnceLock};
@@ -39,9 +38,7 @@ fn static_cache() -> &'static Mutex<HashMap<String, StaticAsset>> {
 }
 
 fn etag(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    let digest = hasher.finalize();
+    let digest = sha256_digest(content.as_bytes());
     format!(
         "\"{}\"",
         digest
@@ -179,9 +176,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize().into()
+    sha256_digest(data)
 }
 
 /// Authenticate an in-progress upload: the caller must present the per-paste
@@ -327,15 +322,25 @@ pub async fn init_paste(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
-    let (mut header, xchacha_nonce, xwing_ciphertext) = if body
-        .starts_with(mitsuzo_types::XWING_FORMAT_MARKER)
+    let (mut header, xchacha_nonce, xwing_ciphertext, blake3_integrity) = if body
+        .starts_with(mitsuzo_types::BLAKE3_FORMAT_MARKER)
     {
+        let request: mitsuzo_types::Blake3CreatePasteRequest =
+            decode(&body[8..]).map_err(|_| StatusCode::BAD_REQUEST)?;
+        (
+            request.header,
+            request.xchacha_nonce,
+            request.xwing_ciphertext,
+            true,
+        )
+    } else if body.starts_with(mitsuzo_types::XWING_FORMAT_MARKER) {
         let request: mitsuzo_types::XWingCreatePasteRequest =
             decode(&body[8..]).map_err(|_| StatusCode::BAD_REQUEST)?;
         (
             request.header,
             request.xchacha_nonce,
             Some(request.xwing_ciphertext),
+            false,
         )
     } else if body.starts_with(mitsuzo_types::XCHACHA_FORMAT_MARKER) {
         if body.len() < 32 {
@@ -350,12 +355,14 @@ pub async fn init_paste(
                     .map_err(|_| StatusCode::BAD_REQUEST)?,
             ),
             None,
+            false,
         )
     } else {
         (
             decode(&body).map_err(|_| StatusCode::BAD_REQUEST)?,
             None,
             None,
+            false,
         )
     };
 
@@ -438,6 +445,7 @@ pub async fn init_paste(
             &header,
             xchacha_nonce,
             xwing_ciphertext.as_deref(),
+            blake3_integrity,
             &upload_token_hash,
         )
         .await
@@ -476,7 +484,8 @@ pub async fn upload_chunk(
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     // Enforce the configured maximum paste size across the whole upload.
-    let max_cipher_len = get_ciphertext_size(state.config.max_file_size as usize) as u64;
+    let max_cipher_len = (get_ciphertext_size(state.config.max_file_size as usize) as u64)
+        .saturating_add(mitsuzo_types::BLAKE3_COMMITMENT_CIPHERTEXT_LEN as u64);
     let write_end = u64::from(chunk_index) * UPLOAD_CHUNK_SIZE as u64 + body.len() as u64;
     if write_end > max_cipher_len {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
@@ -522,7 +531,11 @@ pub async fn complete_paste(
     verify_upload_token(&state.db, &id, &headers).await?;
     // Every chunk must have arrived before the paste is considered complete;
     // otherwise a partial upload would be served as if it were whole.
-    if !state.db.upload_is_complete(&id, meta.total_chunks).await {
+    if !state
+        .db
+        .upload_is_complete(&id, meta.total_chunks, meta.blake3_integrity)
+        .await
+    {
         return Err(StatusCode::CONFLICT);
     }
     info!(id = %id, "paste completed");
@@ -626,7 +639,15 @@ pub(crate) async fn get_paste(
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
     let content_len = file_meta.len() as usize;
-    let total_size = get_plaintext_size(meta.total_chunks, content_len).unwrap_or(0) as u64;
+    let content_len_for_size = content_len
+        .checked_sub(if meta.blake3_integrity {
+            mitsuzo_types::BLAKE3_COMMITMENT_CIPHERTEXT_LEN
+        } else {
+            0
+        })
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let total_size = get_plaintext_size(meta.total_chunks, content_len_for_size)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as u64;
     state.db.increment_success().await;
 
     let xchacha_nonce: Option<[u8; 24]> = if nonce.len() == 24 {
@@ -661,9 +682,13 @@ pub(crate) async fn get_paste(
         recipient: None,
     };
 
-    let head = match xchacha_nonce {
-        Some(nonce) => header.encode_xchacha_frame(&nonce),
-        None => header.encode_frame(),
+    let head = if meta.blake3_integrity {
+        header.encode_blake3_frame(None, xchacha_nonce)
+    } else {
+        match xchacha_nonce {
+            Some(nonce) => header.encode_xchacha_frame(&nonce),
+            None => header.encode_frame(),
+        }
     };
 
     let file = tokio::fs::File::open(&file_path)
@@ -934,7 +959,18 @@ pub(crate) async fn get_paste_data(
         data_type: meta.data_type.clone(),
         filename: meta.filename.clone(),
         content_type: meta.content_type.clone(),
-        total_size: get_plaintext_size(meta.total_chunks, file_len as usize).unwrap_or(0) as u64,
+        total_size: get_plaintext_size(
+            meta.total_chunks,
+            (file_len as usize)
+                .checked_sub(if meta.blake3_integrity {
+                    mitsuzo_types::BLAKE3_COMMITMENT_CIPHERTEXT_LEN
+                } else {
+                    0
+                })
+                .ok_or(ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR))?,
+        )
+        .map_err(|_| ApiError::Status(StatusCode::INTERNAL_SERVER_ERROR))?
+            as u64,
         total_chunks: meta.total_chunks,
         allow_download: meta.allow_download,
         key: state.db.get_key(&id).await,
@@ -943,7 +979,10 @@ pub(crate) async fn get_paste_data(
         burn_after_read: meta.burn_after_read,
         recipient: recipient_envelope,
     };
-    let frame = if let Some(kem_ciphertext) = state.db.get_xwing_ciphertext(&id).await {
+    let xwing_ciphertext = state.db.get_xwing_ciphertext(&id).await;
+    let frame = if meta.blake3_integrity {
+        frame_header.encode_blake3_frame(xwing_ciphertext, xchacha_nonce)
+    } else if let Some(kem_ciphertext) = xwing_ciphertext {
         frame_header.encode_xwing_frame(kem_ciphertext, xchacha_nonce)
     } else {
         match xchacha_nonce {

@@ -168,6 +168,15 @@ base_url: https://mitsuzo.metantesan.com
 4. Only ciphertext and the metadata needed to deliver and enforce paste
    settings are uploaded.
 
+New pastes use the explicitly marked BLAKE3 format. The client incrementally
+hashes plaintext chunks as it encrypts them, then stores the 32-byte digest in
+an encrypted EOF commitment under the content key. The commitment also binds
+the paste ID, protocol version, chunk count, plaintext length, and delivery
+metadata. Readers verify the commitment and recompute the digest from decrypted
+chunks before exposing plaintext. New clients can still read older formats,
+which predate this EOF commitment and cannot provide equivalent truncation
+detection.
+
 Changing a password re-wraps the content key; it does not encrypt or upload the
 paste body again.
 
@@ -190,7 +199,9 @@ an option to cancel an in-progress upload.
 The backend is an Axum server with SQLite metadata storage and filesystem
 ciphertext storage. The frontend is a Dioxus WebAssembly application. Static
 assets support ETag revalidation; the server sends baseline security headers
-and a report-only Content Security Policy.
+and an enforcing Content Security Policy. The policy blocks inline scripts,
+allows WebAssembly compilation, and permits inline style attributes for the
+dynamic UI.
 
 ```bash
 git clone https://github.com/metantesan/mitsuzo.git

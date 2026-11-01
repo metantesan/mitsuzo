@@ -16,6 +16,7 @@ pub use cipher::{
 };
 pub use content::generate_content_key;
 pub use content::*;
+pub use orion::hazardous::hash::blake3::Blake3 as Blake3Hasher;
 pub use password::{EncryptionSetup, compute_password_hash, get_argon2_params};
 pub(crate) use password::{generate_salt, hkdf_expand_sha256, hmac_sha256};
 pub use xchacha::{

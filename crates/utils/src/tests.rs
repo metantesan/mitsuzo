@@ -20,6 +20,34 @@ fn unwrap_with_wrong_kek_fails() {
 }
 
 #[test]
+fn key_wrap_rejects_tampered_ciphertext_and_nonce() {
+    let cek = [41u8; 32];
+    let kek = [42u8; 32];
+    let (nonce, wrapped) = wrap_content_key(&cek, &kek).unwrap();
+    let mut altered = wrapped;
+    altered[17] ^= 1;
+    assert!(unwrap_content_key(&altered, &nonce, &kek).is_err());
+    let mut altered_nonce = nonce;
+    altered_nonce[0] ^= 1;
+    assert!(unwrap_content_key(&wrapped, &altered_nonce, &kek).is_err());
+}
+
+#[test]
+fn chacha_chunk_nonce_derivation_is_unique_through_counter_boundary() {
+    let base = [92u8; 12];
+    let indices = [0, 1, 2, u32::MAX - 1, u32::MAX];
+    let nonces: Vec<_> = indices
+        .into_iter()
+        .map(|index| derive_chunk_nonce(&base, index))
+        .collect();
+    for i in 0..nonces.len() {
+        for j in i + 1..nonces.len() {
+            assert_ne!(nonces[i], nonces[j]);
+        }
+    }
+}
+
+#[test]
 fn password_change_rewrap_only() {
     let plaintext = b"hello mitsuzo".repeat(1000);
     let old_password = "correct horse battery staple";
@@ -152,6 +180,18 @@ fn account_scalar_pubkey_round_trip() {
 }
 
 #[test]
+fn account_id_query_binding_accepts_only_matching_full_or_prefix_ids() {
+    let kid = [0xab; 32];
+    assert!(account_id_matches_query(&"ab".repeat(32), &kid));
+    assert!(account_id_matches_query(
+        &format!("0x{}", "AB".repeat(20)),
+        &kid
+    ));
+    assert!(!account_id_matches_query(&"cd".repeat(32), &kid));
+    assert!(!account_id_matches_query("recipient-name", &kid));
+}
+
+#[test]
 fn ecdh_symmetry() {
     let (priv_a, pub_a) = generate_x25519_keypair().unwrap();
     let (priv_b, pub_b) = generate_x25519_keypair().unwrap();
@@ -264,5 +304,247 @@ fn size_math_equivalence() {
             legacy_formula(size, chunks),
             "size={size} chunks={chunks}"
         );
+    }
+}
+
+#[test]
+fn chacha_failed_authentication_preserves_and_cleans_output() {
+    let key = [11u8; 32];
+    let nonce = [12u8; 12];
+    let mut ciphertext = Vec::new();
+    encrypt_chunk_into(b"authenticated", &key, &nonce, 0, &mut ciphertext).unwrap();
+    ciphertext[0] ^= 0x80;
+
+    let mut output = b"existing prefix".to_vec();
+    let original = output.clone();
+    assert!(decrypt_chunk_into(&ciphertext, &key, &nonce, 0, &mut output).is_err());
+    assert_eq!(output, original);
+
+    for malformed in [&[][..], &[0u8][..], &[0u8; 15][..]] {
+        assert!(decrypt_chunk_into(malformed, &key, &nonce, 0, &mut output).is_err());
+        assert_eq!(output, original);
+    }
+}
+
+#[test]
+fn chunked_decrypt_failure_rolls_back_earlier_authenticated_chunks() {
+    let password = "chunk rollback";
+    let salt = [103u8; 16];
+    let key = derive_keys(password, &salt).unwrap().0;
+    let nonce = [102u8; 12];
+    let plaintext = vec![0x5a; CHUNK_SIZE + 10];
+    let mut ciphertext = Vec::new();
+    let chunks = encrypt_into(&plaintext, &key, &nonce, &mut ciphertext).unwrap();
+    *ciphertext.last_mut().unwrap() ^= 1;
+
+    let mut output = b"prefix".to_vec();
+    let original = output.clone();
+    let result = decrypt_into(&ciphertext, &nonce, password, &salt, chunks, &mut output);
+    assert!(result.is_err());
+    assert_eq!(output, original);
+}
+
+#[test]
+fn plaintext_size_rejects_malformed_tag_lengths_and_overlong_chunks() {
+    for len in [0, 1, 15] {
+        assert!(get_plaintext_size(1, len).is_err(), "len={len}");
+        assert!(
+            get_plaintext_size(2, CHUNK_SIZE + 16 + len).is_err(),
+            "len={len}"
+        );
+    }
+    assert_eq!(get_plaintext_size(1, 16).unwrap(), 0);
+    assert_eq!(get_plaintext_size(1, 17).unwrap(), 1);
+    assert_eq!(get_plaintext_size(1, 65_552).unwrap(), CHUNK_SIZE);
+    assert_eq!(get_plaintext_size(2, 65_552 + 16).unwrap(), CHUNK_SIZE);
+    assert!(get_plaintext_size(1, 65_553).is_err());
+    assert!(get_plaintext_size(2, 65_552).is_err());
+    assert!(get_plaintext_size(0, 16).is_err());
+    assert!(get_plaintext_size(u32::MAX, usize::MAX).is_err());
+}
+
+#[test]
+fn file_commitment_authenticates_identity_length_metadata_and_chunk_count() {
+    let key = [31u8; 32];
+    let nonce = [32u8; 24];
+    let metadata = b"file|report.pdf|application/pdf";
+    let context = Blake3CommitmentContext {
+        paste_id: "123456",
+        total_chunks: 3,
+        plaintext_len: 140_000,
+        metadata,
+    };
+    let plaintext_hash = blake3_digest(b"the authenticated plaintext").unwrap();
+    let mut commitment = Vec::new();
+    encrypt_blake3_commitment(
+        ContentCipherKind::XChaCha20Poly1305,
+        &key,
+        &nonce,
+        context,
+        &plaintext_hash,
+        &mut commitment,
+    )
+    .unwrap();
+    assert_eq!(
+        verify_blake3_commitment(
+            ContentCipherKind::XChaCha20Poly1305,
+            &key,
+            &nonce,
+            &commitment,
+            context
+        )
+        .unwrap(),
+        plaintext_hash
+    );
+
+    verify_blake3_commitment(
+        ContentCipherKind::XChaCha20Poly1305,
+        &key,
+        &nonce,
+        &commitment,
+        context,
+    )
+    .unwrap();
+    assert!(
+        verify_blake3_commitment(
+            ContentCipherKind::XChaCha20Poly1305,
+            &key,
+            &nonce,
+            &commitment,
+            Blake3CommitmentContext {
+                paste_id: "654321",
+                ..context
+            },
+        )
+        .is_err()
+    );
+    assert!(
+        verify_blake3_commitment(
+            ContentCipherKind::XChaCha20Poly1305,
+            &key,
+            &nonce,
+            &commitment,
+            Blake3CommitmentContext {
+                total_chunks: 2,
+                ..context
+            },
+        )
+        .is_err()
+    );
+    assert!(
+        verify_blake3_commitment(
+            ContentCipherKind::XChaCha20Poly1305,
+            &key,
+            &nonce,
+            &commitment,
+            Blake3CommitmentContext {
+                plaintext_len: 140_001,
+                ..context
+            },
+        )
+        .is_err()
+    );
+    assert!(
+        verify_blake3_commitment(
+            ContentCipherKind::XChaCha20Poly1305,
+            &key,
+            &nonce,
+            &commitment,
+            Blake3CommitmentContext {
+                metadata: b"file|changed.pdf|application/pdf",
+                ..context
+            },
+        )
+        .is_err()
+    );
+
+    commitment.pop();
+    assert!(
+        verify_blake3_commitment(
+            ContentCipherKind::XChaCha20Poly1305,
+            &key,
+            &nonce,
+            &commitment,
+            context,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn blake3_integrity_round_trips_empty_single_and_multichunk_content() {
+    for cipher in [
+        ContentCipherKind::ChaCha20Poly1305,
+        ContentCipherKind::XChaCha20Poly1305,
+    ] {
+        let key = [71u8; 32];
+        let nonce12 = [72u8; 12];
+        let nonce24 = [73u8; 24];
+        let nonce: &[u8] = if cipher == ContentCipherKind::XChaCha20Poly1305 {
+            &nonce24
+        } else {
+            &nonce12
+        };
+        for size in [0usize, 1, CHUNK_SIZE, CHUNK_SIZE + 1, 200_000] {
+            let plaintext: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let chunks = if size == 0 {
+                1
+            } else {
+                size.div_ceil(CHUNK_SIZE) as u32
+            };
+            let mut ciphertext = Vec::new();
+            for index in 0..chunks {
+                let start = index as usize * CHUNK_SIZE;
+                let end = (start + CHUNK_SIZE).min(size);
+                cipher
+                    .encrypt_chunk(&key, nonce, index, &plaintext[start..end], &mut ciphertext)
+                    .unwrap();
+            }
+            let metadata = mitsuzo_types::blake3_metadata_binding(
+                "456789",
+                &mitsuzo_types::DataType::File,
+                &Some("sample.bin".into()),
+                &Some("application/octet-stream".into()),
+                chunks,
+                size as u64,
+                true,
+                false,
+            );
+            let context = Blake3CommitmentContext {
+                paste_id: "456789",
+                total_chunks: chunks,
+                plaintext_len: size as u64,
+                metadata: &metadata,
+            };
+            let plaintext_hash = blake3_digest(&plaintext).unwrap();
+            encrypt_blake3_commitment(
+                cipher,
+                &key,
+                nonce,
+                context,
+                &plaintext_hash,
+                &mut ciphertext,
+            )
+            .unwrap();
+            let data_len = ciphertext.len() - mitsuzo_types::BLAKE3_COMMITMENT_CIPHERTEXT_LEN;
+            assert_eq!(
+                verify_blake3_commitment(cipher, &key, nonce, &ciphertext[data_len..], context)
+                    .unwrap(),
+                plaintext_hash
+            );
+            assert!(
+                verify_blake3_commitment(cipher, &key, nonce, &ciphertext[..data_len], context,)
+                    .is_err()
+            );
+            let mut decrypted = Vec::new();
+            for index in 0..chunks {
+                let (start, end) = get_chunk_bounds(chunks, index, data_len);
+                cipher
+                    .decrypt_chunk(&key, nonce, index, &ciphertext[start..end], &mut decrypted)
+                    .unwrap();
+            }
+            assert_eq!(decrypted, plaintext, "cipher={cipher:?}, size={size}");
+            assert_eq!(blake3_digest(&decrypted).unwrap(), plaintext_hash);
+        }
     }
 }

@@ -21,7 +21,11 @@ pub fn encrypt_xchacha_chunk_into(
         .map_err(|e| format!("Invalid key: {e:?}"))?;
     let nonce = xchacha20poly1305::Nonce::from(derive_xchacha_chunk_nonce(base_nonce, chunk_index));
     let offset = output.len();
-    output.resize(offset + plaintext.len() + 16, 0);
+    let end = offset
+        .checked_add(plaintext.len())
+        .and_then(|len| len.checked_add(16))
+        .ok_or_else(|| "Ciphertext output length overflow".to_string())?;
+    output.resize(end, 0);
     if let Err(e) = xchacha20poly1305::XChaCha20Poly1305::seal(
         &key,
         &nonce,
@@ -49,7 +53,10 @@ pub fn decrypt_xchacha_chunk_into(
         .map_err(|e| format!("Invalid key: {e:?}"))?;
     let nonce = xchacha20poly1305::Nonce::from(derive_xchacha_chunk_nonce(base_nonce, chunk_index));
     let offset = output.len();
-    output.resize(offset + ciphertext.len() - 16, 0);
+    let end = offset
+        .checked_add(ciphertext.len() - 16)
+        .ok_or_else(|| "Plaintext output length overflow".to_string())?;
+    output.resize(end, 0);
     if let Err(e) = xchacha20poly1305::XChaCha20Poly1305::open(
         &key,
         &nonce,
@@ -82,6 +89,10 @@ mod xchacha_tests {
         let mut output = b"unchanged".to_vec();
         assert!(decrypt_xchacha_chunk_into(&ciphertext, &key, &nonce, 2, &mut output).is_err());
         assert_eq!(output, b"unchanged");
+        for malformed in [&[][..], &[0u8][..], &[0u8; 15][..]] {
+            assert!(decrypt_xchacha_chunk_into(malformed, &key, &nonce, 2, &mut output).is_err());
+            assert_eq!(output, b"unchanged");
+        }
     }
 
     #[test]
@@ -91,6 +102,14 @@ mod xchacha_tests {
         assert_ne!(
             derive_xchacha_chunk_nonce(&nonce, 0),
             derive_xchacha_chunk_nonce(&nonce, 1)
+        );
+        assert_ne!(
+            derive_xchacha_chunk_nonce(&nonce, u32::MAX - 1),
+            derive_xchacha_chunk_nonce(&nonce, u32::MAX)
+        );
+        assert_ne!(
+            derive_xchacha_chunk_nonce(&nonce, 0),
+            derive_xchacha_chunk_nonce(&nonce, u32::MAX)
         );
         let chunks: [&[u8]; 3] = [b"first", b"second", b""];
         let mut ciphertext = Vec::new();
@@ -112,5 +131,22 @@ mod xchacha_tests {
             .unwrap();
         }
         assert_eq!(plaintext, b"firstsecond");
+    }
+
+    #[test]
+    fn reordered_duplicated_and_cross_file_chunks_are_rejected() {
+        let key = [14; 32];
+        let nonce = [15; 24];
+        let other_key = [16; 32];
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        encrypt_xchacha_chunk_into(b"chunk zero", &key, &nonce, 0, &mut first).unwrap();
+        encrypt_xchacha_chunk_into(b"chunk one", &key, &nonce, 1, &mut second).unwrap();
+
+        assert!(decrypt_xchacha_chunk_into(&second, &key, &nonce, 0, &mut Vec::new()).is_err());
+        assert!(decrypt_xchacha_chunk_into(&first, &key, &nonce, 1, &mut Vec::new()).is_err());
+        assert!(
+            decrypt_xchacha_chunk_into(&first, &other_key, &nonce, 0, &mut Vec::new()).is_err()
+        );
     }
 }

@@ -89,6 +89,13 @@ fn arr32(bytes: &[u8]) -> Option<[u8; 32]> {
 
 fn meta_from_model(m: &paste::Model) -> Option<PasteMeta> {
     Some(PasteMeta {
+        blake3_integrity: matches!(
+            m.version,
+            paste::PasteVersion::Argon2idHkdfSha256ChaCha20Poly1305Blake3
+                | paste::PasteVersion::Argon2idHkdfSha256XChaCha20Poly1305Blake3
+                | paste::PasteVersion::XWingHkdfSha256ChaCha20Poly1305Blake3
+                | paste::PasteVersion::XWingHkdfSha256XChaCha20Poly1305Blake3
+        ),
         try_count: m.try_count as u32,
         expiration_timestamp: m.expiration_timestamp as u64,
         data_type: decode::<DataType>(&m.data_type).ok()?,
@@ -120,6 +127,7 @@ impl DataStore {
         header: &mitsuzo_types::CreatePasteHeader,
         xchacha_nonce: Option<[u8; 24]>,
         xwing_ciphertext: Option<&[u8]>,
+        blake3_integrity: bool,
         upload_token_hash: &[u8; 32],
     ) -> eyre::Result<String> {
         for _ in 0..100 {
@@ -133,6 +141,7 @@ impl DataStore {
                     header,
                     xchacha_nonce,
                     xwing_ciphertext,
+                    blake3_integrity,
                     upload_token_hash,
                 )
                 .await
@@ -227,6 +236,7 @@ impl DataStore {
         header: &mitsuzo_types::CreatePasteHeader,
         xchacha_nonce: Option<[u8; 24]>,
         xwing_ciphertext: Option<&[u8]>,
+        blake3_integrity: bool,
         upload_token_hash: &[u8; 32],
     ) -> eyre::Result<()> {
         // The PRNG hands out IDs that are otherwise available, which includes
@@ -257,7 +267,14 @@ impl DataStore {
             .wrap_err("Failed to begin transaction")?;
 
         paste::ActiveModel {
-            version: Set(if xwing_ciphertext.is_some() && xchacha_nonce.is_some() {
+            version: Set(if blake3_integrity {
+                match (xwing_ciphertext.is_some(), xchacha_nonce.is_some()) {
+                    (true, true) => paste::PasteVersion::XWingHkdfSha256XChaCha20Poly1305Blake3,
+                    (true, false) => paste::PasteVersion::XWingHkdfSha256ChaCha20Poly1305Blake3,
+                    (false, true) => paste::PasteVersion::Argon2idHkdfSha256XChaCha20Poly1305Blake3,
+                    (false, false) => paste::PasteVersion::Argon2idHkdfSha256ChaCha20Poly1305Blake3,
+                }
+            } else if xwing_ciphertext.is_some() && xchacha_nonce.is_some() {
                 paste::PasteVersion::XWingHkdfSha256XChaCha20Poly1305
             } else if xwing_ciphertext.is_some() {
                 paste::PasteVersion::XWingHkdfSha256ChaCha20Poly1305
@@ -406,7 +423,12 @@ impl DataStore {
 
     /// Confirm the network upload is contiguous and its byte length is
     /// compatible with the declared number of encrypted chunks.
-    pub async fn upload_is_complete(&self, id: &str, encrypted_chunks: u32) -> bool {
+    pub async fn upload_is_complete(
+        &self,
+        id: &str,
+        encrypted_chunks: u32,
+        blake3_integrity: bool,
+    ) -> bool {
         use mitsuzo_types::{CHUNK_SIZE, UPLOAD_CHUNK_SIZE};
 
         if encrypted_chunks == 0 {
@@ -446,8 +468,14 @@ impl DataStore {
 
         let tag_bytes = u64::from(encrypted_chunks) * 16;
         let plaintext_capacity = u64::from(encrypted_chunks) * CHUNK_SIZE as u64;
-        let min_size = (u64::from(encrypted_chunks) - 1) * (CHUNK_SIZE as u64 + 16) + 16;
-        let max_size = plaintext_capacity + tag_bytes;
+        let commitment_len = if blake3_integrity {
+            mitsuzo_types::BLAKE3_COMMITMENT_CIPHERTEXT_LEN as u64
+        } else {
+            0
+        };
+        let min_size =
+            (u64::from(encrypted_chunks) - 1) * (CHUNK_SIZE as u64 + 16) + 16 + commitment_len;
+        let max_size = plaintext_capacity + tag_bytes + commitment_len;
         (min_size..=max_size).contains(&file_len)
     }
 
@@ -871,12 +899,12 @@ mod tests {
             recipient_pub: None,
         };
         store
-            .init_paste("atomic-attempts", &header, None, None, &[7; 32])
+            .init_paste("atomic-attempts", &header, None, None, false, &[7; 32])
             .await
             .expect("insert test paste");
         assert!(
             store
-                .init_paste("atomic-attempts", &header, None, None, &[8; 32])
+                .init_paste("atomic-attempts", &header, None, None, false, &[8; 32])
                 .await
                 .is_err()
         );
@@ -999,7 +1027,7 @@ mod tests {
             recipient_pub: None,
         };
         store
-            .init_paste("duplicate-chunk", &header, None, None, &[7; 32])
+            .init_paste("duplicate-chunk", &header, None, None, false, &[7; 32])
             .await
             .unwrap();
         let barrier = Arc::new(tokio::sync::Barrier::new(2));

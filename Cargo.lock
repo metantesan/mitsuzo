@@ -118,18 +118,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
-name = "argon2"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "134c52ddac6d63c576bef8168db10c83c49c26444ecbc68060fef078925a901c"
-dependencies = [
- "base64ct",
- "blake2",
- "cpufeatures 0.3.0",
- "password-hash",
-]
-
-[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -442,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "0.15.6"
+version = "0.15.7"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -458,7 +446,6 @@ dependencies = [
  "sea-orm",
  "sea-orm-migration",
  "serde",
- "sha2 0.11.1",
  "tokio",
  "tower",
  "tower-http 0.7.1",
@@ -498,12 +485,6 @@ name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
-
-[[package]]
-name = "base64ct"
-version = "1.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bigdecimal"
@@ -570,15 +551,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 dependencies = [
  "serde_core",
-]
-
-[[package]]
-name = "blake2"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b5d4d889834ee8ecfc0f8426ad30faf7cdcb10f741a8e6d7224d95325479f6f"
-dependencies = [
- "digest 0.11.3",
 ]
 
 [[package]]
@@ -793,7 +765,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "cli"
-version = "0.15.6"
+version = "0.15.7"
 dependencies = [
  "base64 0.23.1",
  "bip39",
@@ -893,12 +865,6 @@ dependencies = [
  "unicode-width",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "const-oid"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "const-random"
@@ -1328,7 +1294,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.1",
- "const-oid",
  "crypto-common 0.2.2",
  "ctutils",
 ]
@@ -3296,7 +3261,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuzo-frontend"
-version = "0.15.6"
+version = "0.15.7"
 dependencies = [
  "base64 0.23.1",
  "bip39",
@@ -3320,11 +3285,12 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-logger",
  "web-sys",
+ "zeroize",
 ]
 
 [[package]]
 name = "mitsuzo-migration"
-version = "0.15.6"
+version = "0.15.7"
 dependencies = [
  "async-trait",
  "sea-orm",
@@ -3334,7 +3300,7 @@ dependencies = [
 
 [[package]]
 name = "mitsuzo-types"
-version = "0.15.6"
+version = "0.15.7"
 dependencies = [
  "bitcode",
  "serde",
@@ -3342,13 +3308,11 @@ dependencies = [
 
 [[package]]
 name = "mitsuzo-utils"
-version = "0.15.6"
+version = "0.15.7"
 dependencies = [
- "argon2",
  "getrandom 0.4.3",
  "mitsuzo-types",
  "orion",
- "sha2 0.11.1",
  "x25519-dalek",
  "zeroize",
 ]
@@ -3619,16 +3583,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "password-hash"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aab41826031698d6ffcd9cff78ef56ef998e39dc7e5067cdfebe373842d4723b"
-dependencies = [
- "getrandom 0.4.3",
- "phc",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3641,17 +3595,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3673cba5b9a124916096a423b806a9f29620972c6c97b08db5f2053e9428b481"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "phc"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44dc769b75f93afdddd8c7fa12d685292ddeff1e66f7f0f3a234cf1818afe892"
-dependencies = [
- "base64ct",
- "ctutils",
- "getrandom 0.4.3",
 ]
 
 [[package]]

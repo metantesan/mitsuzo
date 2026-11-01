@@ -1,4 +1,5 @@
 use orion::hazardous::aead::chacha20poly1305;
+use zeroize::Zeroize;
 
 pub(crate) fn generate_nonce() -> Result<[u8; 12], String> {
     let mut nonce = [0u8; 12];
@@ -19,15 +20,25 @@ pub fn decrypt_with_key_into(
         return Err("Ciphertext too short".to_string());
     }
     let offset = output.len();
-    output.resize(offset + ciphertext.len() - 16, 0);
-    chacha20poly1305::ChaCha20Poly1305::open(
+    let plaintext_len = ciphertext.len() - 16;
+    let end = offset
+        .checked_add(plaintext_len)
+        .ok_or_else(|| "Plaintext output length overflow".to_string())?;
+    output.resize(end, 0);
+    if let Err(e) = chacha20poly1305::ChaCha20Poly1305::open(
         &key,
         &nonce_obj,
         ciphertext,
         None,
         &mut output[offset..],
-    )
-    .map_err(|e| format!("Failed to decrypt: {:?}. Password may be incorrect.", e))?;
+    ) {
+        output[offset..].zeroize();
+        output.truncate(offset);
+        return Err(format!(
+            "Failed to decrypt: {:?}. Password may be incorrect.",
+            e
+        ));
+    }
     Ok(())
 }
 
@@ -52,15 +63,22 @@ pub fn encrypt_chunk_into(
         .map_err(|e| format!("Invalid key: {:?}", e))?;
     let nonce_obj = chacha20poly1305::Nonce::from(chunk_nonce);
     let offset = output.len();
-    output.resize(offset + plaintext.len() + 16, 0);
-    chacha20poly1305::ChaCha20Poly1305::seal(
+    let end = offset
+        .checked_add(plaintext.len())
+        .and_then(|len| len.checked_add(16))
+        .ok_or_else(|| "Ciphertext output length overflow".to_string())?;
+    output.resize(end, 0);
+    if let Err(e) = chacha20poly1305::ChaCha20Poly1305::seal(
         &key,
         &nonce_obj,
         plaintext,
         None,
         &mut output[offset..],
-    )
-    .map_err(|e| format!("Failed to encrypt: {:?}", e))?;
+    ) {
+        output[offset..].zeroize();
+        output.truncate(offset);
+        return Err(format!("Failed to encrypt: {:?}", e));
+    }
     Ok(())
 }
 
@@ -102,7 +120,17 @@ pub(crate) fn unwrap_content_key_raw(
         .map_err(|e| format!("Invalid key: {:?}", e))?;
     let nonce_obj = chacha20poly1305::Nonce::from(*wrap_nonce);
     let mut content_key = [0u8; 32];
-    chacha20poly1305::ChaCha20Poly1305::open(&key, &nonce_obj, wrapped_key, None, &mut content_key)
-        .map_err(|_| "Failed to unwrap key. Password may be incorrect.".to_string())?;
+    if chacha20poly1305::ChaCha20Poly1305::open(
+        &key,
+        &nonce_obj,
+        wrapped_key,
+        None,
+        &mut content_key,
+    )
+    .is_err()
+    {
+        content_key.zeroize();
+        return Err("Failed to unwrap key. Password may be incorrect.".to_string());
+    }
     Ok(content_key)
 }

@@ -14,6 +14,20 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.15.7",
+            date: "2026-11-01",
+            items_en: vec![
+                "Added versioned BLAKE3 file commitments that bind plaintext chunks, paste identity, length, and metadata; the browser verifies each decrypted chunk before exposing content",
+                "Switched Argon2id, HKDF-SHA256, HMAC-SHA256, and SHA-256 hashing to Orion while preserving existing password-derived keys",
+                "Hardened AEAD failure cleanup, ciphertext length validation, recipient key binding, and cryptographic regression coverage",
+            ],
+            items_fa: vec![
+                "افزودن تعهد نسخه‌دار BLAKE3 برای فایل که chunkهای متن ساده، شناسهٔ Paste، اندازه و فراداده را به هم پیوند می‌دهد؛ مرورگر پیش از نمایش محتوا، هر chunk رمزگشایی‌شده را بررسی می‌کند",
+                "انتقال Argon2id،‏ HKDF-SHA256،‏ HMAC-SHA256 و هش SHA-256 به Orion با حفظ کلیدهای مشتق‌شدهٔ فعلی",
+                "سخت‌سازی پاک‌سازی پس از خطای AEAD، اعتبارسنجی طول رمزمتن، اتصال کلید گیرنده به شناسه و پوشش آزمون‌های رمزنگاری",
+            ],
+        },
+        Change {
             version: "v0.15.6",
             date: "2026-11-01",
             items_en: vec![

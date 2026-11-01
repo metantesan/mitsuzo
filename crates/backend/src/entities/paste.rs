@@ -15,6 +15,14 @@ pub enum PasteVersion {
     XWingHkdfSha256ChaCha20Poly1305,
     #[sea_orm(string_value = "xwing-hkdf-sha256-xchacha20poly1305")]
     XWingHkdfSha256XChaCha20Poly1305,
+    #[sea_orm(string_value = "argon2id-hkdf-sha256-chacha20poly1305-blake3")]
+    Argon2idHkdfSha256ChaCha20Poly1305Blake3,
+    #[sea_orm(string_value = "argon2id-hkdf-sha256-xchacha20poly1305-blake3")]
+    Argon2idHkdfSha256XChaCha20Poly1305Blake3,
+    #[sea_orm(string_value = "xwing-hkdf-sha256-chacha20poly1305-blake3")]
+    XWingHkdfSha256ChaCha20Poly1305Blake3,
+    #[sea_orm(string_value = "xwing-hkdf-sha256-xchacha20poly1305-blake3")]
+    XWingHkdfSha256XChaCha20Poly1305Blake3,
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]

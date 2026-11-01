@@ -15,12 +15,13 @@ use dioxus::prelude::*;
 use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{
-    AccountProfileResponse, CHUNK_SIZE, ChunkInfoResponse, CreatePasteHeader, DataType,
-    GetStatsResponse, InitPasteResponse, KeyEnvelope, MAX_PASTE_SIZE, RecipientEnvelope,
-    UPLOAD_CHUNK_SIZE, XWingCreatePasteRequest, encode_xchacha_create, encode_xwing_create,
+    AccountProfileResponse, BLAKE3_COMMITMENT_CIPHERTEXT_LEN, Blake3CreatePasteRequest, CHUNK_SIZE,
+    ChunkInfoResponse, CreatePasteHeader, DataType, GetStatsResponse, InitPasteResponse,
+    KeyEnvelope, MAX_PASTE_SIZE, RecipientEnvelope, UPLOAD_CHUNK_SIZE, encode_blake3_create,
 };
 use mitsuzo_utils::{
-    ContentCipherKind, compute_burn_receipt, encrypt_setup, generate_content_key,
+    Blake3CommitmentContext, Blake3Hasher, ContentCipherKind, account_id_matches_query,
+    compute_burn_receipt, encrypt_blake3_commitment, encrypt_setup, generate_content_key,
     get_ciphertext_size, seal_content_key_for_xwing,
 };
 use std::sync::{
@@ -233,6 +234,10 @@ pub fn home_view() -> Element {
                         if let Some(body) = r.body
                             && let Ok(p) = bitcode::decode::<AccountProfileResponse>(&body)
                         {
+                            if !account_id_matches_query(&query, &p.kid) {
+                                popup_ctx.write().show_error(t!("user-not-found"));
+                                return;
+                            }
                             match fetch_xwing_public_key(&p.kid).await {
                                 Ok(xwing_pubkey) => {
                                     recipient.set(Some(RecipientTarget {
@@ -354,7 +359,13 @@ pub fn home_view() -> Element {
                 let burn_after = *burn_after_read.read() || auto_password;
                 let password = if auto_password {
                     let mut buf = [0u8; 16];
-                    let _ = getrandom::fill(&mut buf);
+                    if let Err(e) = getrandom::fill(&mut buf) {
+                        popup_ctx.write().show_error(t!(
+                            "error-encryption-failed",
+                            error: format!("random password generation failed: {e}")
+                        ));
+                        return;
+                    }
                     let auto_pw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
                     password_input.set(auto_pw.clone());
                     auto_pw
@@ -484,7 +495,13 @@ pub fn home_view() -> Element {
                         return;
                     };
                     let mut base_nonce = [0u8; 12];
-                    let _ = getrandom::fill(&mut base_nonce);
+                    if let Err(e) = getrandom::fill(&mut base_nonce) {
+                        popup_ctx.write().show_error(t!(
+                            "error-encryption-failed",
+                            error: format!("nonce generation failed: {e}")
+                        ));
+                        return;
+                    }
                     let (shared_secret, kem_ciphertext, env_nonce, sealed_cek) =
                         match seal_content_key_for_xwing(&target.xwing_pubkey, &content_key) {
                             Ok(result) => result,
@@ -592,17 +609,11 @@ pub fn home_view() -> Element {
                 } else {
                     None
                 };
-                let header_bytes = match xwing_ciphertext {
-                    Some(ciphertext) => encode_xwing_create(&XWingCreatePasteRequest {
-                        header: header.clone(),
-                        xwing_ciphertext: ciphertext,
-                        xchacha_nonce: xnonce,
-                    }),
-                    None => match xnonce {
-                        Some(nonce) => encode_xchacha_create(&header, &nonce),
-                        None => bitcode::encode(&header),
-                    },
-                };
+                let header_bytes = encode_blake3_create(&Blake3CreatePasteRequest {
+                    header: header.clone(),
+                    xwing_ciphertext,
+                    xchacha_nonce: xnonce,
+                });
 
                 progress.set(Some(ProgressState {
                     status: t!("progress-initiating-upload"),
@@ -664,9 +675,11 @@ pub fn home_view() -> Element {
                 }));
 
                 let mut enc_body = Vec::new();
+                let mut plaintext_hasher = Blake3Hasher::new();
                 let js_file = file_data.read().as_ref().cloned();
                 let streaming_file = js_file.is_some();
-                let total_ciphertext_size = get_ciphertext_size(file_size_for_chunks as usize);
+                let total_ciphertext_size = get_ciphertext_size(file_size_for_chunks as usize)
+                    .saturating_add(BLAKE3_COMMITMENT_CIPHERTEXT_LEN);
                 let mut streamed_upload_chunks = 0u32;
                 let encryption_started_ms = now_ms();
                 let mut last_encryption_progress_ms = encryption_started_ms;
@@ -685,6 +698,13 @@ pub fn home_view() -> Element {
                             let start = i as usize * CHUNK_SIZE;
                             let end = (start + CHUNK_SIZE).min(text_bytes.len());
                             let chunk = &text_bytes[start..end];
+                            if let Err(e) = plaintext_hasher.absorb(chunk) {
+                                cancel_remote_paste(&paste_id, &upload_token).await;
+                                popup_ctx.write().show_error(t!("error-encryption-failed", error: format!("BLAKE3 failed: {e}")));
+                                create_cancel.set(None);
+                                progress.set(None);
+                                return;
+                            }
                             let result = match xnonce {
                                 Some(nonce) => ContentCipherKind::XChaCha20Poly1305.encrypt_chunk(
                                     &encryption_key,
@@ -769,6 +789,13 @@ pub fn home_view() -> Element {
                             };
                             if cancel_flag.load(Ordering::Relaxed) {
                                 cancel_remote_paste(&paste_id, &upload_token).await;
+                                create_cancel.set(None);
+                                progress.set(None);
+                                return;
+                            }
+                            if let Err(e) = plaintext_hasher.absorb(&chunk_bytes) {
+                                cancel_remote_paste(&paste_id, &upload_token).await;
+                                popup_ctx.write().show_error(t!("error-encryption-failed", error: format!("BLAKE3 failed: {e}")));
                                 create_cancel.set(None);
                                 progress.set(None);
                                 return;
@@ -861,6 +888,64 @@ pub fn home_view() -> Element {
                     _ => {}
                 }
 
+                let mut plaintext_hash = [0u8; 32];
+                if let Err(e) = plaintext_hasher.squeeze(&mut plaintext_hash) {
+                    cancel_remote_paste(&paste_id, &upload_token).await;
+                    popup_ctx.write().show_error(
+                        t!("error-encryption-failed", error: format!("BLAKE3 failed: {e}")),
+                    );
+                    create_cancel.set(None);
+                    progress.set(None);
+                    return;
+                }
+                let commitment_metadata = mitsuzo_types::blake3_metadata_binding(
+                    &paste_id,
+                    &header.data_type,
+                    &header.filename,
+                    &header.content_type,
+                    total_chunks,
+                    file_size_for_chunks,
+                    header.allow_download,
+                    header.burn_after_read,
+                );
+                let commitment_result = match xnonce {
+                    Some(nonce) => encrypt_blake3_commitment(
+                        ContentCipherKind::XChaCha20Poly1305,
+                        &encryption_key,
+                        &nonce,
+                        Blake3CommitmentContext {
+                            paste_id: &paste_id,
+                            total_chunks,
+                            plaintext_len: file_size_for_chunks,
+                            metadata: &commitment_metadata,
+                        },
+                        &plaintext_hash,
+                        &mut enc_body,
+                    ),
+                    None => encrypt_blake3_commitment(
+                        ContentCipherKind::ChaCha20Poly1305,
+                        &encryption_key,
+                        &nonce_bytes,
+                        Blake3CommitmentContext {
+                            paste_id: &paste_id,
+                            total_chunks,
+                            plaintext_len: file_size_for_chunks,
+                            metadata: &commitment_metadata,
+                        },
+                        &plaintext_hash,
+                        &mut enc_body,
+                    ),
+                };
+                if let Err(e) = commitment_result {
+                    cancel_remote_paste(&paste_id, &upload_token).await;
+                    popup_ctx
+                        .write()
+                        .show_error(t!("error-encryption-failed", error: e.to_string()));
+                    create_cancel.set(None);
+                    progress.set(None);
+                    return;
+                }
+
                 if streaming_file && !enc_body.is_empty() {
                     let batch = std::mem::take(&mut enc_body);
                     let sent = upload_chunk_with_retry(
@@ -881,6 +966,7 @@ pub fn home_view() -> Element {
                         progress.set(None);
                         return;
                     }
+                    streamed_upload_chunks += 1;
                 }
 
                 if cancel_flag.load(Ordering::Relaxed) {

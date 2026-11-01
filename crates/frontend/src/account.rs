@@ -307,6 +307,9 @@ pub async fn fetch_xwing_public_key(kid: &[u8; 32]) -> Result<Vec<u8>, String> {
         .body
         .and_then(|b| bitcode::decode(&b).ok())
         .ok_or_else(|| "Invalid X-Wing key response".to_string())?;
+    if kid_from_xwing_pubkey(&response.public_key) != *kid {
+        return Err("Recipient X-Wing key does not match its account ID".into());
+    }
     Ok(response.public_key)
 }
 

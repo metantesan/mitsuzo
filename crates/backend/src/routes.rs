@@ -101,13 +101,10 @@ async fn security_headers(request: Request<Body>, next: Next) -> Response {
         HeaderValue::from_static("no-referrer"),
     );
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
-    // Start in report-only mode while the browser application is exercised
-    // across its supported flows; this surfaces compatibility issues without
-    // blocking the app.
     headers.insert(
-        "content-security-policy-report-only",
+        "content-security-policy",
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
         ),
     );
     response

@@ -11,17 +11,20 @@ use dioxus::prelude::*;
 use dioxus_i18n::t;
 use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{
-    ChangePasswordRequest, DataType, FailedAttempt, GetSaltResponse, KeyEnvelope, PasteAuthMode,
-    RecipientAuthChallenge, split_paste_frame_with_nonce,
+    BLAKE3_COMMITMENT_CIPHERTEXT_LEN, ChangePasswordRequest, DataType, FailedAttempt,
+    GetPasteHeader, GetSaltResponse, KeyEnvelope, PasteAuthMode, RecipientAuthChallenge,
+    blake3_metadata_binding, split_paste_frame_with_nonce,
 };
 use mitsuzo_utils::{
-    ContentCipherKind, compute_burn_receipt, compute_password_hash, derive_keys, encrypt_setup,
-    get_chunk_bounds, get_plaintext_size, kid_from_pubkey, open_content_key_for_legacy_xwing,
-    open_content_key_for_recipient, open_content_key_for_xwing_account,
-    open_content_key_for_xwing_shared, unwrap_content_key,
+    Blake3CommitmentContext, Blake3Hasher, ContentCipherKind, compute_burn_receipt,
+    compute_password_hash, derive_keys, encrypt_setup, get_chunk_bounds, get_plaintext_size,
+    kid_from_pubkey, open_content_key_for_legacy_xwing, open_content_key_for_recipient,
+    open_content_key_for_xwing_account, open_content_key_for_xwing_shared, unwrap_content_key,
+    verify_blake3_commitment,
 };
 use wasm_bindgen::JsCast;
 use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
+use zeroize::Zeroize;
 
 const PROGRESS_DEBOUNCE_MS: f64 = 100.0;
 
@@ -30,6 +33,63 @@ fn now_ms() -> f64 {
         .and_then(|window| window.performance())
         .map(|performance| performance.now())
         .unwrap_or(0.0)
+}
+
+fn validate_integrity_frame<'a>(
+    header: &GetPasteHeader,
+    expected_paste_id: &str,
+    blake3_format: bool,
+    xchacha_nonce: Option<[u8; 24]>,
+    encryption_key: &[u8; 32],
+    ciphertext: &'a [u8],
+) -> Result<(&'a [u8], Option<[u8; 32]>), String> {
+    if !blake3_format {
+        return Ok((ciphertext, None));
+    }
+    if header.id != expected_paste_id {
+        return Err("Paste ID does not match the requested paste".to_string());
+    }
+    let data_len = ciphertext
+        .len()
+        .checked_sub(BLAKE3_COMMITMENT_CIPHERTEXT_LEN)
+        .ok_or_else(|| "Missing authenticated file commitment".to_string())?;
+    let metadata = blake3_metadata_binding(
+        &header.id,
+        &header.data_type,
+        &header.filename,
+        &header.content_type,
+        header.total_chunks,
+        header.total_size,
+        header.allow_download,
+        header.burn_after_read,
+    );
+    let expected_hash = match xchacha_nonce {
+        Some(nonce) => verify_blake3_commitment(
+            ContentCipherKind::XChaCha20Poly1305,
+            encryption_key,
+            &nonce,
+            &ciphertext[data_len..],
+            Blake3CommitmentContext {
+                paste_id: &header.id,
+                total_chunks: header.total_chunks,
+                plaintext_len: header.total_size,
+                metadata: &metadata,
+            },
+        )?,
+        None => verify_blake3_commitment(
+            ContentCipherKind::ChaCha20Poly1305,
+            encryption_key,
+            &header.nonce,
+            &ciphertext[data_len..],
+            Blake3CommitmentContext {
+                paste_id: &header.id,
+                total_chunks: header.total_chunks,
+                plaintext_len: header.total_size,
+                metadata: &metadata,
+            },
+        )?,
+    };
+    Ok((&ciphertext[..data_len], Some(expected_hash)))
 }
 
 pub struct PasteContent {
@@ -928,9 +988,11 @@ async fn do_decrypt(
                 if let Some(body) = response.body {
                     // The body is a length-prefixed metadata frame carrying the
                     // password-wrapped content key, followed by the ciphertext.
-                    let (frame_header, xchacha_nonce, ciphertext) =
+                    let (frame_header, xchacha_nonce, ciphertext, blake3_integrity) =
                         match split_paste_frame_with_nonce(&body) {
-                            Ok((header, nonce, _kem, ciphertext)) => (header, nonce, ciphertext),
+                            Ok((header, nonce, _kem, ciphertext, blake3_integrity)) => {
+                                (header, nonce, ciphertext, blake3_integrity)
+                            }
                             Err(e) => {
                                 popup_ctx
                                     .write()
@@ -939,9 +1001,14 @@ async fn do_decrypt(
                                 return;
                             }
                         };
+                    if !blake3_integrity {
+                        popup_ctx.write().show_error(
+                            "Security notice: this legacy paste predates authenticated file-completeness checks.",
+                        );
+                    }
                     // Envelope pastes: unwrap the CEK from the frame's metadata.
                     // Legacy pastes have no envelope: the derived KEK IS the key.
-                    let encryption_key = match frame_header.key {
+                    let encryption_key = match frame_header.key.clone() {
                         Some(envelope) => {
                             match unwrap_content_key(
                                 &envelope.wrapped_key,
@@ -960,6 +1027,24 @@ async fn do_decrypt(
                         }
                         None => kek,
                     };
+                    let content = match validate_integrity_frame(
+                        &frame_header,
+                        &current_id,
+                        blake3_integrity,
+                        xchacha_nonce,
+                        &encryption_key,
+                        ciphertext,
+                    ) {
+                        Ok(result) => result,
+                        Err(e) => {
+                            popup_ctx
+                                .write()
+                                .show_error(t!("error-decryption-failed", error: e));
+                            progress.set(None);
+                            return;
+                        }
+                    };
+                    let (content, expected_plaintext_hash) = content;
                     content_key.set(Some(encryption_key));
                     old_password_hash.set(Some(password_hash));
                     try_count.set(Some(frame_header.try_count));
@@ -968,7 +1053,6 @@ async fn do_decrypt(
                     let paste_total_chunks = frame_header.total_chunks;
                     let header_nonce = frame_header.nonce;
                     let header_burn_after_read = frame_header.burn_after_read;
-                    let content = ciphertext;
 
                     let plaintext_size = match get_plaintext_size(paste_total_chunks, content.len())
                     {
@@ -983,6 +1067,7 @@ async fn do_decrypt(
                     };
 
                     let mut plaintext = Vec::with_capacity(plaintext_size);
+                    let mut plaintext_hasher = Blake3Hasher::new();
                     progress.set(Some(ProgressState {
                         status: format!(
                             "{} · 0.0 / {:.1} MiB",
@@ -996,7 +1081,11 @@ async fn do_decrypt(
                     let result: Result<(), String> = async {
                         for i in 0..paste_total_chunks {
                             let (start, end) = get_chunk_bounds(paste_total_chunks, i, content.len());
+                            let previous_len = plaintext.len();
                             match xchacha_nonce { Some(nonce) => ContentCipherKind::XChaCha20Poly1305.decrypt_chunk(&encryption_key, &nonce, i, &content[start..end], &mut plaintext)?, None => ContentCipherKind::ChaCha20Poly1305.decrypt_chunk(&encryption_key, &header_nonce, i, &content[start..end], &mut plaintext)? };
+                            if expected_plaintext_hash.is_some() {
+                                plaintext_hasher.absorb(&plaintext[previous_len..]).map_err(|e| format!("BLAKE3 hashing failed: {e}"))?;
+                            }
                             let current_ms = now_ms();
                             if current_ms - last_progress_update_ms >= PROGRESS_DEBOUNCE_MS
                                 || i + 1 == paste_total_chunks
@@ -1013,6 +1102,14 @@ async fn do_decrypt(
                                     progress: percent,
                                 }));
                                 TimeoutFuture::new(0).await;
+                            }
+                        }
+                        if let Some(expected) = expected_plaintext_hash {
+                            let mut actual = [0u8; 32];
+                            plaintext_hasher.squeeze(&mut actual).map_err(|e| format!("BLAKE3 hashing failed: {e}"))?;
+                            if actual != expected {
+                                plaintext.zeroize();
+                                return Err("Decrypted content does not match its BLAKE3 commitment".to_string());
                             }
                         }
                         Ok(())
@@ -1053,6 +1150,7 @@ async fn do_decrypt(
                             progress.set(None);
                         }
                         Err(e) => {
+                            plaintext.zeroize();
                             popup_ctx
                                 .write()
                                 .show_error(t!("error-decryption-failed", error: e.to_string()));
@@ -1198,9 +1296,11 @@ async fn do_recipient_decrypt(
                 progress.set(None);
                 return;
             };
-            let (frame_header, xchacha_nonce, kem, ciphertext) =
+            let (frame_header, xchacha_nonce, kem, ciphertext, blake3_integrity) =
                 match split_paste_frame_with_nonce(&body) {
-                    Ok((header, nonce, kem, ciphertext)) => (header, nonce, kem, ciphertext),
+                    Ok((header, nonce, kem, ciphertext, blake3_integrity)) => {
+                        (header, nonce, kem, ciphertext, blake3_integrity)
+                    }
                     Err(e) => {
                         popup_ctx
                             .write()
@@ -1209,6 +1309,11 @@ async fn do_recipient_decrypt(
                         return;
                     }
                 };
+            if !blake3_integrity {
+                popup_ctx.write().show_error(
+                    "Security notice: this legacy paste predates authenticated file-completeness checks.",
+                );
+            }
             let Some(envelope) = frame_header.recipient.clone() else {
                 popup_ctx
                     .write()
@@ -1260,6 +1365,24 @@ async fn do_recipient_decrypt(
                     return;
                 }
             };
+            let content = match validate_integrity_frame(
+                &frame_header,
+                current_id,
+                blake3_integrity,
+                xchacha_nonce,
+                &encryption_key,
+                ciphertext,
+            ) {
+                Ok(result) => result,
+                Err(e) => {
+                    popup_ctx
+                        .write()
+                        .show_error(t!("error-decryption-failed", error: e));
+                    progress.set(None);
+                    return;
+                }
+            };
+            let (content, expected_plaintext_hash) = content;
             content_key.set(Some(encryption_key));
             try_count.set(None);
             ttl.set(Some(frame_header.ttl));
@@ -1268,7 +1391,6 @@ async fn do_recipient_decrypt(
             let paste_total_chunks = frame_header.total_chunks;
             let header_nonce = frame_header.nonce;
             let header_burn_after_read = frame_header.burn_after_read;
-            let content = ciphertext;
 
             let plaintext_size = match get_plaintext_size(paste_total_chunks, content.len()) {
                 Ok(s) => s,
@@ -1282,6 +1404,7 @@ async fn do_recipient_decrypt(
             };
 
             let mut plaintext = Vec::with_capacity(plaintext_size);
+            let mut plaintext_hasher = Blake3Hasher::new();
             progress.set(Some(ProgressState {
                 status: format!(
                     "{} · 0.0 / {:.1} MiB",
@@ -1295,6 +1418,7 @@ async fn do_recipient_decrypt(
             let result: Result<(), String> = async {
                 for i in 0..paste_total_chunks {
                     let (start, end) = get_chunk_bounds(paste_total_chunks, i, content.len());
+                    let previous_len = plaintext.len();
                     match xchacha_nonce {
                         Some(nonce) => ContentCipherKind::XChaCha20Poly1305.decrypt_chunk(
                             &encryption_key,
@@ -1311,6 +1435,11 @@ async fn do_recipient_decrypt(
                             &mut plaintext,
                         )?,
                     };
+                    if expected_plaintext_hash.is_some() {
+                        plaintext_hasher
+                            .absorb(&plaintext[previous_len..])
+                            .map_err(|e| format!("BLAKE3 hashing failed: {e}"))?;
+                    }
                     let current_ms = now_ms();
                     if current_ms - last_progress_update_ms >= PROGRESS_DEBOUNCE_MS
                         || i + 1 == paste_total_chunks
@@ -1327,6 +1456,18 @@ async fn do_recipient_decrypt(
                             progress: percent,
                         }));
                         TimeoutFuture::new(0).await;
+                    }
+                }
+                if let Some(expected) = expected_plaintext_hash {
+                    let mut actual = [0u8; 32];
+                    plaintext_hasher
+                        .squeeze(&mut actual)
+                        .map_err(|e| format!("BLAKE3 hashing failed: {e}"))?;
+                    if actual != expected {
+                        plaintext.zeroize();
+                        return Err(
+                            "Decrypted content does not match its BLAKE3 commitment".to_string()
+                        );
                     }
                 }
                 Ok(())
@@ -1362,6 +1503,7 @@ async fn do_recipient_decrypt(
                     progress.set(None);
                 }
                 Err(e) => {
+                    plaintext.zeroize();
                     popup_ctx
                         .write()
                         .show_error(t!("error-decryption-failed", error: e.to_string()));

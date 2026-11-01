@@ -4,19 +4,20 @@ use clap::{Parser, Subcommand, ValueEnum};
 use colored::*;
 use mitsuzo_types::{
     AccountKeyBlob, AccountProfileResponse, AccountXWingKeyRequest, AccountXWingKeyResponse,
-    CHUNK_SIZE, ChallengeResponse, ChangePasswordRequest, ChunkInfoResponse, CreatePasteHeader,
-    DataType, GetSaltResponse, InitPasteResponse, KeyEnvelope, PasteAuthMode, PasteRecipientInfo,
-    RecipientAuthChallenge, RecipientEnvelope, RegisterAccountRequest, UPLOAD_CHUNK_SIZE,
-    XWingCreatePasteRequest, encode_xchacha_create, encode_xwing_create,
-    split_paste_frame_with_nonce,
+    BLAKE3_COMMITMENT_CIPHERTEXT_LEN, Blake3CreatePasteRequest, CHUNK_SIZE, ChallengeResponse,
+    ChangePasswordRequest, ChunkInfoResponse, CreatePasteHeader, DataType, GetSaltResponse,
+    InitPasteResponse, KeyEnvelope, PasteAuthMode, PasteRecipientInfo, RecipientAuthChallenge,
+    RecipientEnvelope, RegisterAccountRequest, UPLOAD_CHUNK_SIZE, blake3_metadata_binding,
+    encode_blake3_create, split_paste_frame_with_nonce,
 };
 use mitsuzo_utils::{
-    ContentCipherKind, compute_burn_receipt, compute_password_hash, derive_account_scalar,
-    derive_keys, derive_xwing_account_public_key, encrypt_setup, generate_content_key,
-    get_chunk_bounds, get_ciphertext_size, kid_from_pubkey, kid_from_xwing_pubkey,
-    lock_account_key, open_challenge, open_content_key_for_legacy_xwing,
+    Blake3CommitmentContext, Blake3Hasher, ContentCipherKind, account_id_matches_query,
+    compute_burn_receipt, compute_password_hash, derive_account_scalar, derive_keys,
+    derive_xwing_account_public_key, encrypt_blake3_commitment, encrypt_setup,
+    generate_content_key, get_chunk_bounds, get_ciphertext_size, kid_from_pubkey,
+    kid_from_xwing_pubkey, lock_account_key, open_challenge, open_content_key_for_legacy_xwing,
     open_content_key_for_recipient, open_content_key_for_xwing_account, pubkey_from_scalar,
-    seal_content_key_for_xwing, unlock_account_key, unwrap_content_key,
+    seal_content_key_for_xwing, unlock_account_key, unwrap_content_key, verify_blake3_commitment,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -450,6 +451,9 @@ async fn fetch_xwing_key(client: &Client, base_url: &str, kid: &[u8; 32]) -> eyr
             }
         })?;
     let decoded: AccountXWingKeyResponse = bitcode::decode(&response.bytes().await?)?;
+    if kid_from_xwing_pubkey(&decoded.public_key) != *kid {
+        eyre::bail!("Recipient X-Wing key does not match its account ID");
+    }
     Ok(decoded.public_key)
 }
 
@@ -643,8 +647,9 @@ async fn account_paste_get(
         return Ok(());
     }
     let body = data_resp.bytes().await?;
-    let (frame_header, xnonce, xwing_ciphertext, ciphertext) = split_paste_frame_with_nonce(&body)
-        .map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
+    let (frame_header, xnonce, xwing_ciphertext, ciphertext, blake3_integrity) =
+        split_paste_frame_with_nonce(&body)
+            .map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
     let Some(envelope) = frame_header.recipient.clone() else {
         eprintln!("{} Missing recipient envelope.", "Error:".red().bold());
         return Ok(());
@@ -690,14 +695,22 @@ async fn account_paste_get(
         "Size:".bright_black(),
         indicatif::HumanBytes(frame_header.total_size),
         frame_header.total_chunks,
-        indicatif::HumanBytes(get_ciphertext_size(frame_header.total_size as usize) as u64),
+        indicatif::HumanBytes(
+            (get_ciphertext_size(frame_header.total_size as usize) as u64).saturating_add(
+                if blake3_integrity {
+                    BLAKE3_COMMITMENT_CIPHERTEXT_LEN as u64
+                } else {
+                    0
+                }
+            ),
+        ),
     );
 
     finish_decrypt(
         client,
         base_url,
         id,
-        (&frame_header, xnonce),
+        (&frame_header, xnonce, blake3_integrity),
         ek,
         ciphertext.to_vec(),
         output,
@@ -711,15 +724,72 @@ async fn finish_decrypt(
     client: &Client,
     base_url: &str,
     id: &str,
-    (meta, xnonce): (&mitsuzo_types::GetPasteHeader, Option<[u8; 24]>),
+    (meta, xnonce, blake3_integrity): (&mitsuzo_types::GetPasteHeader, Option<[u8; 24]>, bool),
     mut ek: [u8; 32],
     encrypted: Vec<u8>,
     output: &Option<String>,
 ) -> eyre::Result<()> {
+    if !blake3_integrity {
+        eprintln!(
+            "{} This legacy paste has no authenticated EOF commitment; trailing truncation may not be detectable.",
+            "Security notice:".yellow().bold()
+        );
+    }
     let receipt = meta.burn_after_read.then(|| compute_burn_receipt(&ek));
 
     let done = Arc::new(AtomicU32::new(0));
     let failed = std::sync::atomic::AtomicBool::new(false);
+    let mut expected_plaintext_hash = None;
+    let encrypted_data_len = if blake3_integrity {
+        if meta.id != id {
+            eyre::bail!("Paste ID in the authenticated frame does not match the requested ID");
+        }
+        let commitment_start = encrypted
+            .len()
+            .checked_sub(BLAKE3_COMMITMENT_CIPHERTEXT_LEN)
+            .ok_or_else(|| eyre::eyre!("Missing authenticated file commitment"))?;
+        let metadata = blake3_metadata_binding(
+            &meta.id,
+            &meta.data_type,
+            &meta.filename,
+            &meta.content_type,
+            meta.total_chunks,
+            meta.total_size,
+            meta.allow_download,
+            meta.burn_after_read,
+        );
+        expected_plaintext_hash = Some(match xnonce {
+            Some(nonce) => verify_blake3_commitment(
+                ContentCipherKind::XChaCha20Poly1305,
+                &ek,
+                &nonce,
+                &encrypted[commitment_start..],
+                Blake3CommitmentContext {
+                    paste_id: id,
+                    total_chunks: meta.total_chunks,
+                    plaintext_len: meta.total_size,
+                    metadata: &metadata,
+                },
+            )
+            .map_err(|e| eyre::eyre!("File integrity verification failed: {e}"))?,
+            None => verify_blake3_commitment(
+                ContentCipherKind::ChaCha20Poly1305,
+                &ek,
+                &meta.nonce,
+                &encrypted[commitment_start..],
+                Blake3CommitmentContext {
+                    paste_id: id,
+                    total_chunks: meta.total_chunks,
+                    plaintext_len: meta.total_size,
+                    metadata: &metadata,
+                },
+            )
+            .map_err(|e| eyre::eyre!("File integrity verification failed: {e}"))?,
+        });
+        commitment_start
+    } else {
+        encrypted.len()
+    };
     let total = meta.total_chunks;
     let pb = make_pb(total as u64, "magenta/yellow", "");
 
@@ -744,7 +814,7 @@ async fn finish_decrypt(
             }
             let k = ek;
             let nonce = meta.nonce;
-            let enc = &encrypted;
+            let enc = &encrypted[..encrypted_data_len];
             let failed = &failed;
             let results = &results;
             let done = &done;
@@ -794,6 +864,28 @@ async fn finish_decrypt(
         eyre::bail!("Failed to authenticate paste content");
     }
 
+    let mut results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+    results.sort_by_key(|(t, _)| *t);
+    let mut decrypted: Vec<u8> = results.into_iter().flat_map(|(_, buf)| buf).collect();
+    if let Some(expected) = expected_plaintext_hash {
+        let mut hasher = Blake3Hasher::new();
+        for chunk in decrypted.chunks(CHUNK_SIZE) {
+            if let Err(error) = hasher.absorb(chunk) {
+                decrypted.zeroize();
+                return Err(eyre::eyre!("BLAKE3 hashing failed: {error}"));
+            }
+        }
+        let mut actual = [0u8; 32];
+        if let Err(error) = hasher.squeeze(&mut actual) {
+            decrypted.zeroize();
+            return Err(eyre::eyre!("BLAKE3 hashing failed: {error}"));
+        }
+        if actual != expected {
+            decrypted.zeroize();
+            eyre::bail!("Decrypted content does not match its BLAKE3 commitment");
+        }
+    }
+
     if meta.burn_after_read {
         let receipt = receipt.expect("burn receipt");
         let burn_resp = client
@@ -809,10 +901,6 @@ async fn finish_decrypt(
             _ => {}
         }
     }
-
-    let mut results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
-    results.sort_by_key(|(t, _)| *t);
-    let decrypted: Vec<u8> = results.into_iter().flat_map(|(_, buf)| buf).collect();
 
     if let Some(output_path) = output {
         if output_path == "-" {
@@ -896,6 +984,9 @@ async fn main() -> eyre::Result<()> {
                     );
                 }
                 let profile: AccountProfileResponse = bitcode::decode(&resp.bytes().await?)?;
+                if !account_id_matches_query(to, &profile.kid) {
+                    eyre::bail!("Server account profile does not match the requested recipient ID");
+                }
                 let xwing_public_key = fetch_xwing_key(&client, &base_url, &profile.kid).await?;
                 eprintln!(
                     "{} Encrypting to account {} (0x{})",
@@ -1052,17 +1143,11 @@ async fn main() -> eyre::Result<()> {
             } else {
                 None
             };
-            let header_bytes = match xwing_ciphertext {
-                Some(ciphertext) => encode_xwing_create(&XWingCreatePasteRequest {
-                    header: header.clone(),
-                    xwing_ciphertext: ciphertext,
-                    xchacha_nonce: xnonce,
-                }),
-                None => match xnonce {
-                    Some(nonce) => encode_xchacha_create(&header, &nonce),
-                    None => bitcode::encode(&header),
-                },
-            };
+            let header_bytes = encode_blake3_create(&Blake3CreatePasteRequest {
+                header: header.clone(),
+                xwing_ciphertext,
+                xchacha_nonce: xnonce,
+            });
 
             let pb = make_pb(total_enc_chunks as u64, "blue", "");
             let done = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -1128,8 +1213,7 @@ async fn main() -> eyre::Result<()> {
             }
             let mut results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
             results.sort_by_key(|(t, _)| *t);
-            let ciphertext: Vec<u8> = results.into_iter().flat_map(|(_, buf)| buf).collect();
-            drop(content_key);
+            let mut ciphertext: Vec<u8> = results.into_iter().flat_map(|(_, buf)| buf).collect();
             pb.finish_and_clear();
 
             let init_response = client
@@ -1172,6 +1256,40 @@ async fn main() -> eyre::Result<()> {
             let paste_id = decoded.id;
             let upload_token =
                 base64::engine::general_purpose::STANDARD.encode(decoded.upload_token);
+
+            let metadata = blake3_metadata_binding(
+                &paste_id,
+                &header.data_type,
+                &header.filename,
+                &header.content_type,
+                header.total_chunks,
+                content.len() as u64,
+                header.allow_download,
+                header.burn_after_read,
+            );
+            let plaintext_hash = mitsuzo_utils::blake3_digest(&content)
+                .map_err(|e| eyre::eyre!("Failed to hash paste content: {e}"))?;
+            let cipher_kind = if xnonce.is_some() {
+                ContentCipherKind::XChaCha20Poly1305
+            } else {
+                ContentCipherKind::ChaCha20Poly1305
+            };
+            let content_nonce: &[u8] = xnonce.as_ref().map_or(nonce.as_slice(), |n| n.as_slice());
+            encrypt_blake3_commitment(
+                cipher_kind,
+                &content_key,
+                content_nonce,
+                Blake3CommitmentContext {
+                    paste_id: &paste_id,
+                    total_chunks: header.total_chunks,
+                    plaintext_len: content.len() as u64,
+                    metadata: &metadata,
+                },
+                &plaintext_hash,
+                &mut ciphertext,
+            )
+            .map_err(|e| eyre::eyre!("Failed to encrypt file commitment: {e}"))?;
+            drop(content_key);
 
             let chunk_info = client
                 .get(format!("{}/api/paste/{}/chunks", base_url, paste_id))
@@ -1352,10 +1470,16 @@ async fn main() -> eyre::Result<()> {
                 return Ok(());
             }
             let meta_body = meta_resp.bytes().await?;
-            let (meta, xnonce, _, _) = split_paste_frame_with_nonce(&meta_body)
-                .map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
+            let (meta, xnonce, _, _, blake3_integrity) =
+                split_paste_frame_with_nonce(&meta_body)
+                    .map_err(|e| eyre::eyre!("Invalid paste frame: {}", e))?;
 
-            let enc_bytes = get_ciphertext_size(meta.total_size as usize);
+            let enc_bytes =
+                get_ciphertext_size(meta.total_size as usize).saturating_add(if blake3_integrity {
+                    BLAKE3_COMMITMENT_CIPHERTEXT_LEN
+                } else {
+                    0
+                });
 
             eprintln!(
                 "{} {:.2} plain · {} chunks · {:.2} encrypted",
@@ -1407,7 +1531,7 @@ async fn main() -> eyre::Result<()> {
                             .send()
                             .await
                             && let Ok(data) = resp.bytes().await
-                            && let Ok((_, _, _, slice)) = split_paste_frame_with_nonce(&data)
+                            && let Ok((_, _, _, slice, _)) = split_paste_frame_with_nonce(&data)
                         {
                             let mut b = buf.lock().unwrap();
                             b[s as usize..][..slice.len()].copy_from_slice(slice);
@@ -1453,7 +1577,7 @@ async fn main() -> eyre::Result<()> {
                 &client,
                 &base_url,
                 id,
-                (&meta, xnonce),
+                (&meta, xnonce, blake3_integrity),
                 ek,
                 encrypted,
                 output,
@@ -1551,7 +1675,7 @@ async fn main() -> eyre::Result<()> {
             }
             let key_body = key_resp.bytes().await?;
             let envelope = match split_paste_frame_with_nonce(&key_body) {
-                Ok((hdr, _, _, _)) => hdr.key,
+                Ok((hdr, _, _, _, _)) => hdr.key,
                 Err(e) => return Err(eyre::eyre!("Invalid paste frame: {}", e)),
             };
 

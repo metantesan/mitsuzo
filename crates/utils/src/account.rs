@@ -3,7 +3,7 @@ use crate::{
     wrap_content_key,
 };
 use mitsuzo_types::AccountKeyBlob;
-use sha2::{Digest, Sha256};
+use orion::hazardous::hash::sha2::sha256::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 /// Recipient key agreement abstraction; implementations return a shared secret.
@@ -51,16 +51,38 @@ pub fn pubkey_from_scalar(scalar: &[u8; 32]) -> [u8; 32] {
 
 /// Full 32-byte account id: `SHA-256(pubkey)`.
 pub fn kid_from_pubkey(pubkey: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(pubkey);
-    hasher.finalize().into()
+    sha256_digest(pubkey)
+}
+
+/// Calculate SHA-256 through Orion for non-password protocol hashes.
+pub fn sha256_digest(data: &[u8]) -> [u8; 32] {
+    Sha256::digest(data)
+        .expect("SHA-256 digest should not fail")
+        .as_ref()
+        .try_into()
+        .expect("SHA-256 outputs 32 bytes")
 }
 
 /// X-Wing account id: SHA-256 of the X-Wing public key.
 pub fn kid_from_xwing_pubkey(pubkey: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(pubkey);
-    hasher.finalize().into()
+    sha256_digest(pubkey)
+}
+
+/// Verify that a profile returned for a user-supplied full or prefix account
+/// ID is the same account the caller requested.
+pub fn account_id_matches_query(query: &str, kid: &[u8; 32]) -> bool {
+    let query = query
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| query.trim().strip_prefix("0X"))
+        .unwrap_or(query.trim())
+        .to_ascii_lowercase();
+    let hex: String = kid.iter().map(|byte| format!("{byte:02x}")).collect();
+    match query.len() {
+        40 => hex.starts_with(&query),
+        64 => hex == query,
+        _ => false,
+    }
 }
 
 /// 20-byte display prefix used in profile URLs (`0x` + 40 hex chars).

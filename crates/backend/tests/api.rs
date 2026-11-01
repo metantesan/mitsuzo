@@ -324,12 +324,157 @@ async fn xchacha_password_paste_round_trip() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_bytes(response).await;
-    let (meta, returned_nonce, _, encrypted) = split_paste_frame_with_nonce(&body).unwrap();
+    let (meta, returned_nonce, _, encrypted, _) = split_paste_frame_with_nonce(&body).unwrap();
     assert_eq!(returned_nonce, Some(nonce));
     assert_eq!(meta.key.unwrap().wrapped_key, setup.wrapped_key);
     let mut plaintext = Vec::new();
     decrypt_xchacha_chunk_into(encrypted, &key, &nonce, 0, &mut plaintext).unwrap();
     assert_eq!(plaintext, b"xchacha test");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn blake3_integrity_requires_and_validates_eof_commitment() {
+    use mitsuzo_types::{
+        Blake3CreatePasteRequest, blake3_metadata_binding, encode_blake3_create,
+        split_paste_frame_with_nonce,
+    };
+    use mitsuzo_utils::{
+        Blake3CommitmentContext, ContentCipherKind, encrypt_blake3_commitment,
+        encrypt_xchacha_chunk_into, verify_blake3_commitment,
+    };
+
+    let (state, dir) = test_state(false).await;
+    let router = api_router(state);
+    let peer = "203.0.113.45";
+    let key = [52; 32];
+    let nonce = [53; 24];
+    let plaintext = b"integrity-v2 payload";
+    let setup = mitsuzo_utils::encrypt_setup("integrity password", &key).unwrap();
+    let mut header = password_header();
+    header.salt = Some(setup.salt);
+    header.password_hash = Some(setup.password_hash);
+    header.key = Some(KeyEnvelope {
+        wrap_nonce: setup.wrap_nonce,
+        wrapped_key: setup.wrapped_key,
+    });
+    header.filename = Some("proof.txt".into());
+    header.content_type = Some("text/plain".into());
+    let body = encode_blake3_create(&Blake3CreatePasteRequest {
+        header: header.clone(),
+        xwing_ciphertext: None,
+        xchacha_nonce: Some(nonce),
+    });
+    let response = router
+        .clone()
+        .oneshot(request(Method::POST, "/paste", peer, &[], body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let init: InitPasteResponse = bitcode::decode(&body_bytes(response).await).unwrap();
+    let token = b64(&init.upload_token);
+
+    let mut ciphertext = Vec::new();
+    encrypt_xchacha_chunk_into(plaintext, &key, &nonce, 0, &mut ciphertext).unwrap();
+    let metadata = blake3_metadata_binding(
+        &init.id,
+        &header.data_type,
+        &header.filename,
+        &header.content_type,
+        header.total_chunks,
+        plaintext.len() as u64,
+        header.allow_download,
+        header.burn_after_read,
+    );
+    encrypt_blake3_commitment(
+        ContentCipherKind::XChaCha20Poly1305,
+        &key,
+        &nonce,
+        Blake3CommitmentContext {
+            paste_id: &init.id,
+            total_chunks: header.total_chunks,
+            plaintext_len: plaintext.len() as u64,
+            metadata: &metadata,
+        },
+        &mitsuzo_utils::blake3_digest(plaintext).unwrap(),
+        &mut ciphertext,
+    )
+    .unwrap();
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::PUT,
+            &format!("/paste/{}/chunk/0", init.id),
+            peer,
+            &[("x-upload-token", &token)],
+            ciphertext,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/paste/{}/complete", init.id),
+            peer,
+            &[("x-upload-token", &token)],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let auth = b64(&setup.password_hash);
+    let response = router
+        .oneshot(request(
+            Method::GET,
+            &format!("/paste/{}/data", init.id),
+            peer,
+            &[("x-password-hash", &auth)],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    let body = body_bytes(response).await;
+    let (meta, returned_nonce, _, encrypted, blake3_integrity) =
+        split_paste_frame_with_nonce(&body).unwrap();
+    assert!(blake3_integrity);
+    assert_eq!(returned_nonce, Some(nonce));
+    let commitment_offset = encrypted.len() - mitsuzo_types::BLAKE3_COMMITMENT_CIPHERTEXT_LEN;
+    let metadata = blake3_metadata_binding(
+        &meta.id,
+        &meta.data_type,
+        &meta.filename,
+        &meta.content_type,
+        meta.total_chunks,
+        meta.total_size,
+        meta.allow_download,
+        meta.burn_after_read,
+    );
+    verify_blake3_commitment(
+        ContentCipherKind::XChaCha20Poly1305,
+        &key,
+        &nonce,
+        &encrypted[commitment_offset..],
+        Blake3CommitmentContext {
+            paste_id: &init.id,
+            total_chunks: 1,
+            plaintext_len: plaintext.len() as u64,
+            metadata: &metadata,
+        },
+    )
+    .unwrap();
+    let mut recovered = Vec::new();
+    mitsuzo_utils::decrypt_xchacha_chunk_into(
+        &encrypted[..commitment_offset],
+        &key,
+        &nonce,
+        0,
+        &mut recovered,
+    )
+    .unwrap();
+    assert_eq!(recovered, plaintext);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -662,8 +807,9 @@ async fn xwing_recipient_paste_end_to_end_for_both_content_ciphers() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = body_bytes(response).await;
-        let (meta, returned_xnonce, returned_kem, encrypted) =
+        let (meta, returned_xnonce, returned_kem, encrypted, blake3_integrity) =
             split_paste_frame_with_nonce(&body).unwrap();
+        assert!(!blake3_integrity);
         assert_eq!(returned_xnonce, xchacha_nonce);
         let returned_kem = returned_kem.expect("X-Wing frame marker and KEM ciphertext");
         assert_eq!(returned_kem, kem_ciphertext);
@@ -763,11 +909,16 @@ async fn health_and_readiness_endpoints_report_ok() {
         "no-referrer"
     );
     assert_eq!(health.headers().get("x-frame-options").unwrap(), "DENY");
-    assert!(
-        health
-            .headers()
-            .contains_key("content-security-policy-report-only")
-    );
+    let csp = health
+        .headers()
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval'"));
+    assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
+    assert!(csp.contains("style-src-attr 'unsafe-inline'"));
+    assert!(csp.contains("connect-src 'self'"));
 
     let ready = router
         .clone()

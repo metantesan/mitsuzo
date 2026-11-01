@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.15.6"
+version = "0.15.7"
 license = "BSD-3-Clause"
 authors = ["hikari <me@metantesan.com>"]
 edition = "2024"
@@ -21,8 +21,6 @@ mitsuzo-types = { path = "crates/types" }
 mitsuzo-utils = { path = "crates/utils" }
 cli = { path = "crates/cli" }
 
-argon2 = "0.6"
-sha2 = "0.11.0"
 base64 = "0.23"
 bitcode = { version = "0.6.7", features = ["serde"] }
 orion = "0.18"

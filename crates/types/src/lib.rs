@@ -8,6 +8,25 @@ pub const MAX_PASTE_SIZE: usize = 1_073_741_824;
 pub const XCHACHA_FORMAT_MARKER: &[u8; 8] = b"MITSUXC1";
 /// Prefix for versioned recipient pastes using an X-Wing KEM envelope.
 pub const XWING_FORMAT_MARKER: &[u8; 8] = b"MITSUPQ1";
+/// Explicit marker for files carrying an authenticated end-of-file record.
+pub const BLAKE3_FORMAT_MARKER: &[u8; 8] = b"MITSUBL3";
+/// 92-byte commitment plus the 16-byte AEAD tag for six-digit paste IDs.
+pub const BLAKE3_COMMITMENT_CIPHERTEXT_LEN: usize = 108;
+
+#[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
+pub struct Blake3CreatePasteRequest {
+    pub header: CreatePasteHeader,
+    pub xwing_ciphertext: Option<Vec<u8>>,
+    pub xchacha_nonce: Option<[u8; 24]>,
+}
+
+pub fn encode_blake3_create(request: &Blake3CreatePasteRequest) -> Vec<u8> {
+    let encoded = bitcode::encode(request);
+    let mut result = Vec::with_capacity(8 + encoded.len());
+    result.extend_from_slice(BLAKE3_FORMAT_MARKER);
+    result.extend_from_slice(&encoded);
+    result
+}
 
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
 pub struct XWingCreatePasteRequest {
@@ -146,10 +165,42 @@ pub struct GetPasteHeader {
     pub recipient: Option<RecipientEnvelope>,
 }
 
+/// Canonical bytes committed by the BLAKE3 EOF record. Keep the field order stable.
+#[allow(clippy::too_many_arguments)]
+pub fn blake3_metadata_binding(
+    id: &str,
+    data_type: &DataType,
+    filename: &Option<String>,
+    content_type: &Option<String>,
+    total_chunks: u32,
+    total_size: u64,
+    allow_download: bool,
+    burn_after_read: bool,
+) -> Vec<u8> {
+    bitcode::encode(&(
+        3u8,
+        id.to_owned(),
+        data_type.clone(),
+        filename.clone(),
+        content_type.clone(),
+        total_chunks,
+        total_size,
+        allow_download,
+        burn_after_read,
+    ))
+}
+
 #[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
 pub struct XWingPasteFrame {
     pub header: GetPasteHeader,
     pub xwing_ciphertext: Vec<u8>,
+    pub xchacha_nonce: Option<[u8; 24]>,
+}
+
+#[derive(Serialize, Deserialize, bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
+pub struct Blake3PasteFrame {
+    pub header: GetPasteHeader,
+    pub xwing_ciphertext: Option<Vec<u8>>,
     pub xchacha_nonce: Option<[u8; 24]>,
 }
 
@@ -191,10 +242,35 @@ impl GetPasteHeader {
         out.extend_from_slice(&inner);
         out
     }
+
+    pub fn encode_blake3_frame(
+        &self,
+        xwing_ciphertext: Option<Vec<u8>>,
+        xchacha_nonce: Option<[u8; 24]>,
+    ) -> Vec<u8> {
+        let encoded = bitcode::encode(&Blake3PasteFrame {
+            header: self.clone(),
+            xwing_ciphertext,
+            xchacha_nonce,
+        });
+        let mut inner = Vec::with_capacity(8 + encoded.len());
+        inner.extend_from_slice(BLAKE3_FORMAT_MARKER);
+        inner.extend_from_slice(&encoded);
+        let mut out = Vec::with_capacity(4 + inner.len());
+        out.extend_from_slice(&(inner.len() as u32).to_le_bytes());
+        out.extend_from_slice(&inner);
+        out
+    }
 }
 
 /// Decode either frame format, borrowing the ciphertext from the response.
-pub type DecodedPasteFrame<'a> = (GetPasteHeader, Option<[u8; 24]>, Option<Vec<u8>>, &'a [u8]);
+pub type DecodedPasteFrame<'a> = (
+    GetPasteHeader,
+    Option<[u8; 24]>,
+    Option<Vec<u8>>,
+    &'a [u8],
+    bool,
+);
 
 pub fn split_paste_frame_with_nonce(data: &[u8]) -> Result<DecodedPasteFrame<'_>, String> {
     if data.len() < 4 {
@@ -208,6 +284,16 @@ pub fn split_paste_frame_with_nonce(data: &[u8]) -> Result<DecodedPasteFrame<'_>
         return Err("truncated paste frame".to_string());
     }
     let header = &data[4..end];
+    if header.starts_with(BLAKE3_FORMAT_MARKER) {
+        let frame: Blake3PasteFrame = bitcode::decode(&header[8..]).map_err(|e| e.to_string())?;
+        return Ok((
+            frame.header,
+            frame.xchacha_nonce,
+            frame.xwing_ciphertext,
+            &data[end..],
+            true,
+        ));
+    }
     if header.starts_with(XWING_FORMAT_MARKER) {
         let frame: XWingPasteFrame = bitcode::decode(&header[8..]).map_err(|e| e.to_string())?;
         return Ok((
@@ -215,6 +301,7 @@ pub fn split_paste_frame_with_nonce(data: &[u8]) -> Result<DecodedPasteFrame<'_>
             frame.xchacha_nonce,
             Some(frame.xwing_ciphertext),
             &data[end..],
+            false,
         ));
     }
     let (encoded, nonce) = if header.starts_with(XCHACHA_FORMAT_MARKER) {
@@ -226,7 +313,7 @@ pub fn split_paste_frame_with_nonce(data: &[u8]) -> Result<DecodedPasteFrame<'_>
         (header, None)
     };
     let parsed = bitcode::decode(encoded).map_err(|e| e.to_string())?;
-    Ok((parsed, nonce, None, &data[end..]))
+    Ok((parsed, nonce, None, &data[end..], false))
 }
 
 /// Split a framed paste body into its metadata header and the trailing
@@ -266,21 +353,33 @@ mod frame_tests {
         };
         let mut legacy = header.encode_frame();
         legacy.extend_from_slice(b"body");
-        let (parsed, nonce, kem, body) = split_paste_frame_with_nonce(&legacy).unwrap();
+        let (parsed, nonce, kem, body, integrity) = split_paste_frame_with_nonce(&legacy).unwrap();
         assert_eq!(parsed, header);
         assert_eq!(nonce, None);
         assert_eq!(kem, None);
+        assert!(!integrity);
         assert_eq!(body, b"body");
         assert_eq!(split_paste_frame(&legacy).unwrap().0, header);
         let mut extended = header.encode_xchacha_frame(&[9; 24]);
         extended.extend_from_slice(b"body");
-        let (parsed, nonce, kem, body) = split_paste_frame_with_nonce(&extended).unwrap();
+        let (parsed, nonce, kem, body, integrity) =
+            split_paste_frame_with_nonce(&extended).unwrap();
         assert_eq!(parsed, header);
         assert_eq!(nonce, Some([9; 24]));
         assert_eq!(kem, None);
+        assert!(!integrity);
         assert_eq!(body, b"body");
         assert!(split_paste_frame(&extended).is_err());
         assert!(split_paste_frame_with_nonce(&extended[..20]).is_err());
+        let mut integrity_frame = header.encode_blake3_frame(None, Some([7; 24]));
+        integrity_frame.extend_from_slice(b"body");
+        let (parsed, nonce, kem, body, integrity) =
+            split_paste_frame_with_nonce(&integrity_frame).unwrap();
+        assert_eq!(parsed, header);
+        assert_eq!(nonce, Some([7; 24]));
+        assert_eq!(kem, None);
+        assert_eq!(body, b"body");
+        assert!(integrity);
     }
 }
 
@@ -345,6 +444,7 @@ pub struct ChangePasswordRequest {
 
 #[derive(bitcode::Encode, bitcode::Decode, Debug, Clone, PartialEq)]
 pub struct PasteMeta {
+    pub blake3_integrity: bool,
     pub try_count: u32,
     pub expiration_timestamp: u64,
     pub data_type: DataType,
