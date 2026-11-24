@@ -10,8 +10,6 @@ use self::{
     workflow::workflow_section, zk::zk_section,
 };
 
-const DIAGRAM_SVG: &str = include_str!(concat!(env!("OUT_DIR"), "/diagram.svg"));
-
 pub mod accounts;
 pub mod api;
 pub mod burn_after;

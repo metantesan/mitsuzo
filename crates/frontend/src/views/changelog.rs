@@ -14,6 +14,18 @@ struct Change {
 fn get_changelog() -> Vec<Change> {
     vec![
         Change {
+            version: "v0.15.8",
+            date: "2026-11-25",
+            items_en: vec![
+                "Replaced X25519 operations with Orion and removed the direct x25519-dalek dependency",
+                "Removed direct gloo-timers and Mermaid renderer dependencies; browser timers now use the built-in window API and the workflow diagram is a bundled SVG",
+            ],
+            items_fa: vec![
+                "جایگزینی عملیات X25519 با Orion و حذف وابستگی مستقیم x25519-dalek",
+                "حذف وابستگی‌های مستقیم gloo-timers و Mermaid؛ زمان‌سنج مرورگر اکنون از API داخلی window استفاده می‌کند و نمودار گردش کار به‌صورت SVG همراه برنامه است",
+            ],
+        },
+        Change {
             version: "v0.15.7",
             date: "2026-11-01",
             items_en: vec![

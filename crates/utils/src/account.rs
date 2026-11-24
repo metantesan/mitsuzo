@@ -3,8 +3,8 @@ use crate::{
     wrap_content_key,
 };
 use mitsuzo_types::AccountKeyBlob;
+use orion::hazardous::ecc::x25519::{PrivateKey, PublicKey, key_agreement};
 use orion::hazardous::hash::sha2::sha256::Sha256;
-use x25519_dalek::{PublicKey, StaticSecret};
 
 /// Recipient key agreement abstraction; implementations return a shared secret.
 pub trait KeyAgreement {
@@ -14,9 +14,14 @@ pub trait KeyAgreement {
 pub struct X25519;
 impl KeyAgreement for X25519 {
     fn shared_secret(private: &[u8; 32], public: &[u8; 32]) -> Result<[u8; 32], String> {
-        let our = StaticSecret::from(*private);
+        let our = PrivateKey::from(*private);
         let their = PublicKey::from(*public);
-        Ok(our.diffie_hellman(&their).to_bytes())
+        let shared =
+            key_agreement(&our, &their).map_err(|_| "X25519 key agreement failed".to_string())?;
+        shared
+            .unprotected_as_ref()
+            .try_into()
+            .map_err(|_| "Invalid X25519 shared-secret length".to_string())
     }
 }
 
@@ -45,8 +50,12 @@ pub fn derive_account_scalar(bip39_seed: &[u8; 64]) -> [u8; 32] {
 
 /// X25519 base-point multiplication: derive the public key from a scalar.
 pub fn pubkey_from_scalar(scalar: &[u8; 32]) -> [u8; 32] {
-    let secret = StaticSecret::from(*scalar);
-    PublicKey::from(&secret).to_bytes()
+    let secret = PrivateKey::from(*scalar);
+    PublicKey::try_from(&secret)
+        .expect("X25519 public-key derivation should not fail")
+        .as_ref()
+        .try_into()
+        .expect("X25519 public keys are 32 bytes")
 }
 
 /// Full 32-byte account id: `SHA-256(pubkey)`.

@@ -11,6 +11,31 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use web_sys::{ProgressEvent, XmlHttpRequest};
 
+/// Wait using the browser's timer API without another timer dependency.
+pub async fn sleep_ms(delay_ms: u32) {
+    let (sender, receiver) = oneshot::channel();
+    let callback = Closure::once_into_js(move || {
+        let _ = sender.send(());
+    });
+
+    let timer_scheduled = web_sys::window().is_some_and(|window| {
+        window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.unchecked_ref(),
+                delay_ms.min(i32::MAX as u32) as i32,
+            )
+            .is_ok()
+    });
+
+    if !timer_scheduled {
+        let _ = callback
+            .unchecked_ref::<js_sys::Function>()
+            .call0(&JsValue::UNDEFINED);
+    }
+
+    let _ = receiver.await;
+}
+
 #[wasm_bindgen]
 extern "C" {
     type Clipboard;
@@ -271,7 +296,7 @@ where
     } = xhr_put_headers(url, body, headers)?;
     let cancel = async move {
         loop {
-            gloo_timers::future::TimeoutFuture::new(50).await;
+            sleep_ms(50).await;
             if cancel_flag.load(Ordering::Relaxed) {
                 break;
             }

@@ -1,8 +1,6 @@
 use dioxus::prelude::*;
 use dioxus_i18n::t;
 
-use super::DIAGRAM_SVG;
-
 #[component]
 pub fn workflow_section() -> Element {
     rsx! {
@@ -13,8 +11,12 @@ pub fn workflow_section() -> Element {
                 {t!("workflow-diagram")}
             }
             div {
-                class: "mermaid overflow-auto",
-                dangerous_inner_html: DIAGRAM_SVG,
+                class: "overflow-auto",
+                img {
+                    src: asset!("/assets/workflow.svg"),
+                    alt: t!("workflow-diagram"),
+                    class: "w-full h-auto",
+                }
             }
             p {
                 class: "text-sm text-text-secondary mt-4",

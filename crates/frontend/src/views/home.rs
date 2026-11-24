@@ -7,13 +7,12 @@ use crate::account::{
 use crate::components::{PopupContext, QrCode};
 use crate::sanitize_id;
 use crate::utils::{
-    copy_to_clipboard, do_xhr_get, do_xhr_post, do_xhr_post_headers, do_xhr_put_headers,
+    copy_to_clipboard, do_xhr_get, do_xhr_post, do_xhr_post_headers, do_xhr_put_headers, sleep_ms,
 };
 use base64::Engine as _;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use dioxus_i18n::t;
-use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{
     AccountProfileResponse, BLAKE3_COMMITMENT_CIPHERTEXT_LEN, Blake3CreatePasteRequest, CHUNK_SIZE,
     ChunkInfoResponse, CreatePasteHeader, DataType, GetStatsResponse, InitPasteResponse,
@@ -75,7 +74,7 @@ where
         let delay_ms = 400u32
             .saturating_mul(1u32 << exponent)
             .min(UPLOAD_RETRY_MAX_DELAY_MS);
-        TimeoutFuture::new(delay_ms).await;
+        sleep_ms(delay_ms).await;
     }
 }
 
@@ -749,7 +748,7 @@ pub fn home_view() -> Element {
                                     ),
                                     progress: percent,
                                 }));
-                                TimeoutFuture::new(0).await;
+                                sleep_ms(0).await;
                             }
                         }
                     }
@@ -881,7 +880,7 @@ pub fn home_view() -> Element {
                                     ),
                                     progress: pct,
                                 }));
-                                TimeoutFuture::new(0).await;
+                                sleep_ms(0).await;
                             }
                         }
                     }
@@ -1161,7 +1160,7 @@ pub fn home_view() -> Element {
                         }));
                         let mut completion_progress = progress;
                         spawn(async move {
-                            TimeoutFuture::new(1800).await;
+                            sleep_ms(1800).await;
                             if completion_progress
                                 .read()
                                 .as_ref()

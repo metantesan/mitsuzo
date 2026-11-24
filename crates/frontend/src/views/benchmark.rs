@@ -1,3 +1,4 @@
+use crate::utils::sleep_ms;
 use dioxus::prelude::*;
 use mitsuzo_utils::ContentCipherKind;
 
@@ -47,7 +48,7 @@ async fn benchmark_cipher(
     let mut encrypted = Vec::with_capacity(CHUNK_SIZE + 16);
     let mut paused_ms = 0.0;
     progress("Encrypting", 0, chunk_count);
-    gloo_timers::future::TimeoutFuture::new(0).await;
+    sleep_ms(0).await;
     let encrypt_start = now_ms()?;
     for index in 0..chunk_count {
         let offset = index * CHUNK_SIZE;
@@ -63,7 +64,7 @@ async fn benchmark_cipher(
         if (index + 1) % 64 == 0 && index + 1 < chunk_count {
             let pause_start = now_ms()?;
             progress("Encrypting", index + 1, chunk_count);
-            gloo_timers::future::TimeoutFuture::new(0).await;
+            sleep_ms(0).await;
             paused_ms += now_ms()? - pause_start;
         }
     }
@@ -76,7 +77,7 @@ async fn benchmark_cipher(
     let decrypt_pool_len = chunk_count.min(256);
     let mut encrypted_pool = Vec::with_capacity(decrypt_pool_len);
     progress("Preparing decryption samples", 0, decrypt_pool_len);
-    gloo_timers::future::TimeoutFuture::new(0).await;
+    sleep_ms(0).await;
     for index in 0..decrypt_pool_len {
         let mut chunk_ciphertext = Vec::with_capacity(CHUNK_SIZE + 16);
         cipher.encrypt_chunk(
@@ -89,7 +90,7 @@ async fn benchmark_cipher(
         encrypted_pool.push(chunk_ciphertext);
         if (index + 1) % 64 == 0 && index + 1 < decrypt_pool_len {
             progress("Preparing decryption samples", index + 1, decrypt_pool_len);
-            gloo_timers::future::TimeoutFuture::new(0).await;
+            sleep_ms(0).await;
         }
     }
     progress(
@@ -101,7 +102,7 @@ async fn benchmark_cipher(
     let mut decrypted_chunk = Vec::with_capacity(CHUNK_SIZE);
     let mut decrypt_paused_ms = 0.0;
     progress("Decrypting", 0, chunk_count);
-    gloo_timers::future::TimeoutFuture::new(0).await;
+    sleep_ms(0).await;
     let decrypt_start = now_ms()?;
     for index in 0..chunk_count {
         let pool_index = index % decrypt_pool_len;
@@ -123,7 +124,7 @@ async fn benchmark_cipher(
         if (index + 1) % 64 == 0 && index + 1 < chunk_count {
             let pause_start = now_ms()?;
             progress("Decrypting", index + 1, chunk_count);
-            gloo_timers::future::TimeoutFuture::new(0).await;
+            sleep_ms(0).await;
             decrypt_paused_ms += now_ms()? - pause_start;
         }
     }

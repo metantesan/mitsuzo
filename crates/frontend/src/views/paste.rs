@@ -5,11 +5,10 @@ use crate::account::{
 };
 use crate::components::PopupContext;
 use crate::sanitize_id;
-use crate::utils::{copy_to_clipboard, do_xhr_get, do_xhr_post, do_xhr_post_headers};
+use crate::utils::{copy_to_clipboard, do_xhr_get, do_xhr_post, do_xhr_post_headers, sleep_ms};
 use base64::{Engine as _, engine::general_purpose};
 use dioxus::prelude::*;
 use dioxus_i18n::t;
-use gloo_timers::future::TimeoutFuture;
 use mitsuzo_types::{
     BLAKE3_COMMITMENT_CIPHERTEXT_LEN, ChangePasswordRequest, DataType, FailedAttempt,
     GetPasteHeader, GetSaltResponse, KeyEnvelope, PasteAuthMode, RecipientAuthChallenge,
@@ -925,7 +924,7 @@ async fn do_decrypt(
         status: t!("progress-deriving-key"),
         progress: 0.0,
     }));
-    TimeoutFuture::new(0).await;
+    sleep_ms(0).await;
 
     // Derive the KEK and validation key from the password. The KEK later
     // unwraps the content key that arrives with the ciphertext; the
@@ -944,7 +943,7 @@ async fn do_decrypt(
         status: t!("progress-deriving-key"),
         progress: 100.0,
     }));
-    TimeoutFuture::new(0).await;
+    sleep_ms(0).await;
 
     let password_hash = compute_password_hash(&validation_key, &salt_bytes);
     let encoded_hash = general_purpose::STANDARD.encode(password_hash);
@@ -1076,7 +1075,7 @@ async fn do_decrypt(
                         ),
                         progress: 0.0,
                     }));
-                    TimeoutFuture::new(0).await;
+                    sleep_ms(0).await;
                     let mut last_progress_update_ms = now_ms();
                     let result: Result<(), String> = async {
                         for i in 0..paste_total_chunks {
@@ -1101,7 +1100,7 @@ async fn do_decrypt(
                                     ),
                                     progress: percent,
                                 }));
-                                TimeoutFuture::new(0).await;
+                                sleep_ms(0).await;
                             }
                         }
                         if let Some(expected) = expected_plaintext_hash {
@@ -1254,7 +1253,7 @@ async fn do_recipient_decrypt(
         status: t!("recipient-authenticating"),
         progress: 100.0,
     }));
-    TimeoutFuture::new(0).await;
+    sleep_ms(0).await;
 
     progress.set(Some(ProgressState {
         status: t!("progress-downloading-content"),
@@ -1413,7 +1412,7 @@ async fn do_recipient_decrypt(
                 ),
                 progress: 0.0,
             }));
-            TimeoutFuture::new(0).await;
+            sleep_ms(0).await;
             let mut last_progress_update_ms = now_ms();
             let result: Result<(), String> = async {
                 for i in 0..paste_total_chunks {
@@ -1455,7 +1454,7 @@ async fn do_recipient_decrypt(
                             ),
                             progress: percent,
                         }));
-                        TimeoutFuture::new(0).await;
+                        sleep_ms(0).await;
                     }
                 }
                 if let Some(expected) = expected_plaintext_hash {
