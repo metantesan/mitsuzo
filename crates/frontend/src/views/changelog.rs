@@ -19,10 +19,12 @@ fn get_changelog() -> Vec<Change> {
             items_en: vec![
                 "Replaced X25519 operations with Orion and removed the direct x25519-dalek dependency",
                 "Removed direct gloo-timers and Mermaid renderer dependencies; browser timers now use the built-in window API and the workflow diagram is a bundled SVG",
+                "Updated URL and SQLx SQLite dependencies to patched releases after dependency security audits",
             ],
             items_fa: vec![
                 "جایگزینی عملیات X25519 با Orion و حذف وابستگی مستقیم x25519-dalek",
                 "حذف وابستگی‌های مستقیم gloo-timers و Mermaid؛ زمان‌سنج مرورگر اکنون از API داخلی window استفاده می‌کند و نمودار گردش کار به‌صورت SVG همراه برنامه است",
+                "به‌روزرسانی URL و وابستگی‌های SQLite در SQLx به نسخه‌های اصلاح‌شده پس از بررسی امنیت وابستگی‌ها",
             ],
         },
         Change {
