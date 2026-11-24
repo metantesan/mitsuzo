@@ -1,3 +1,5 @@
+#![allow(unreachable_code)]
+
 mod account;
 mod components;
 mod utils;
@@ -24,7 +26,6 @@ pub const BASE_URL: &str = match option_env!("BASE_URL") {
 };
 
 #[derive(Routable, Clone, PartialEq)]
-#[allow(unreachable_code)]
 #[rustfmt::skip]
 enum Route {
     #[layout(app_layout)]
