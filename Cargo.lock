@@ -2186,9 +2186,9 @@ dependencies = [
 
 [[package]]
 name = "gloo-file"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "544a15ff6a3d5976bebc97380c8471ae14283bc71f4bb198d6c8cae64f411ab7"
+checksum = "959eb0fd8614faead200f1abcacced6bdf89795a4e13f17eb9dc53a801c8150f"
 dependencies = [
  "futures-channel",
  "gloo-events",
